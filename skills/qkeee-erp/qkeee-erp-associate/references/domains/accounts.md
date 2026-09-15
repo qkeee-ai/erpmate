@@ -1,22 +1,22 @@
 # Domain: accounts (AP/AR, Journal Entry, tax)
 
-Code lives in `scripts/domains/accounts.py`
+Code: `scripts/domains/accounts.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Journal Entry", "Payment Entry", "Purchase
 Invoice", "Sales Invoice")` — see that module's docstring). Applies
-`00-conventions.md` and `01-connectivity.md` in full; this file only adds
+`00-conventions.md` and `01-connectivity.md` in full; this file adds only
 what's specific to AP/AR, JE drafting, 3-way match, and tax mechanics.
 
-Every capability below routes through the shared `core.client` functions
-plus `domains.accounts.mutate()` — this domain has no unique connector
-logic of its own. The DRAFT-composition logic (JE balance enforcement,
-cancel-impact statement wording) belongs in `render_je_draft.py`/
+Every capability routes through `core.client` plus
+`domains.accounts.mutate()` — this domain has no unique connector logic
+of its own. The DRAFT-composition logic (JE balance enforcement,
+cancel-impact wording) belongs in `render_je_draft.py`/
 `render_cancel_confirmation.py`, which don't exist in this skill's
-scripts/ yet — that part is still prompt discipline. The submit/cancel
-GATE itself is code-enforced: `scripts/domains/accounts.py` registers
-both actions with `core.client.register_domain_token_gate()`, so
-`mutate_resource()` refuses either one without a fresh
-`confirmation_token` computed via `scripts/core/confirm_token.py`'s
-`advisory-token` CLI over the exact facts just confirmed with the user.
+scripts/ yet — still prompt discipline. The submit/cancel gate itself is
+code-enforced: `accounts.py` registers both actions with
+`core.client.register_domain_token_gate()`, so `mutate_resource()`
+refuses either without a fresh `confirmation_token` computed via
+`scripts/core/confirm_token.py`'s `advisory-token` CLI over the exact
+facts just confirmed with the user.
 
 ## When this domain applies
 
@@ -27,22 +27,23 @@ review, TDS/GST/e-invoicing/e-way-bill questions.
 ## Non-negotiables specific to this domain
 
 - **Never submit or cancel a financial document without explicit user
-  confirmation, even in `read-write` mode.** The library-wide mode gate is
-  necessary but not sufficient — a Journal Entry draft must additionally
-  clear this domain's own advisory-first step before Execute. Symmetric
-  for both submit (must balance, arithmetic-checked) and cancel (must
-  state what will actually change) — neither is a formality.
+  confirmation, even in `read-write` mode.** The library-wide mode gate
+  is necessary but not sufficient — a Journal Entry draft must
+  additionally clear this domain's own advisory-first step before
+  Execute. Symmetric for both submit (must balance, arithmetic-checked)
+  and cancel (must state what will actually change) — neither is a
+  formality.
 - **Tax outputs (TDS, GST, e-invoicing, e-way bill) always carry a
   disclaimer that they assist, not replace, verification against current
   regulation.** Regulation changes faster than this skill's knowledge;
   government portals are the ground-truth authority, never this skill's
   own memory.
-- **TDS is core ERPNext (Tax Withholding Category), not India-Compliance-
-  gated** — confirmed live. Only GST-specific mechanics (GSTIN validation,
-  GSTR filing, e-invoicing, e-way bill) need the India Compliance app.
-  Confirm installed apps (`Module Def` query, or the environment
-  assessment's app inventory) before promising a GST-specific capability
-  works on a given instance. GST/e-invoicing/e-way-bill remain
+- **TDS is core ERPNext (Tax Withholding Category), not
+  India-Compliance-gated.** Only GST-specific mechanics (GSTIN
+  validation, GSTR filing, e-invoicing, e-way bill) need the India
+  Compliance app. Confirm installed apps (`Module Def` query, or the
+  environment assessment's app inventory) before promising a GST-specific
+  capability works on a given instance. GST/e-invoicing/e-way-bill remain
   **unverified end-to-end** absent a live India-Compliance-enabled
   instance — say so on first real use against a new instance.
 

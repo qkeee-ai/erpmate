@@ -1,9 +1,8 @@
 # Domain: sales (Customer, Quotation, Sales Order, Delivery Note)
 
-Code lives in `scripts/domains/sales.py`
-(`ALLOWED_WRITE_DOCTYPES = ("Customer", "Quotation", "Sales Order",
-"Delivery Note")`). Deliberately scoped to ERPNext's Selling module, not a
-full CRM replacement.
+Code: `scripts/domains/sales.py` (`ALLOWED_WRITE_DOCTYPES = ("Customer",
+"Quotation", "Sales Order", "Delivery Note")`). Deliberately scoped to
+ERPNext's Selling module, not a full CRM replacement.
 
 This domain has no unique connector logic of its own — the domain logic
 below belongs in `render_customer_draft.py`/`render_quotation_draft.py`/
@@ -25,11 +24,11 @@ or Delivery Note stands, a lightweight sales pipeline view.
   Purchase Order).
 - **Customer onboarding requires a reachable primary contact, not just a
   name.** ERPNext's own hard-mandatory Customer fields are only
-  `customer_name` + `customer_type` (confirmed live). This domain's bar is
-  stricter: `customer_group`, `territory`, and at least one of
-  `contact_email`/`contact_mobile` are required before a draft is marked
-  ready. Incomplete extractions must be flagged, never silently filled
-  with a placeholder.
+  `customer_name` + `customer_type`. This domain's bar is stricter:
+  `customer_group`, `territory`, and at least one of `contact_email`/
+  `contact_mobile` are required before a draft is marked ready.
+  Incomplete extractions must be flagged, never silently filled with a
+  placeholder.
 
 ## Procedure
 
@@ -43,9 +42,8 @@ or Delivery Note stands, a lightweight sales pipeline view.
    3. `mutate Customer update` on the same Customer, setting
       `customer_primary_contact` to the Contact's real (autonamed) name
       from step 2 — **not optional**: `Customer.mobile_no`/`email_id`
-      stay empty without it (confirmed live — creating the Contact and
-      linking it via its own `links` table does NOT auto-populate this
-      field).
+      stay empty without it (creating the Contact and linking it via its
+      own `links` table does NOT auto-populate this field).
    Present the full staged draft (all pending payloads) and get one
    explicit confirmation before starting step 1. After step 3, re-fetch
    the Customer via `core.client.get_resource()` (needed to check the
@@ -75,7 +73,7 @@ or Delivery Note stands, a lightweight sales pipeline view.
    never collapsed into one "status." When investigating a fulfilment
    mismatch specifically, also query `Delivery Note Item` (`parent`,
    `against_sales_order`, `so_detail`) — a missing `so_detail` is the
-   live-confirmed likely cause of a `per_delivered` mismatch.
+   likely cause of a `per_delivered` mismatch.
 5. **Sales pipeline-lite reporting**: query `Quotation` grouped/counted by
    `status` for the quotation-stage side (no dedicated built-in report
    confirmed for this lens — hand-aggregate, and pass the true total row

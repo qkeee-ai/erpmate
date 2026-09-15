@@ -35,9 +35,9 @@ ALLOWED_WRITE_DOCTYPES = (
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 
-# Submit/cancel now require a fresh confirmation_token from
+# Submit/cancel require a fresh confirmation_token from
 # core/confirm_token.py's advisory-token CLI, verified in mutate_resource()
-# — a real code-level backstop, not prompt discipline alone.
+# — the code-level backstop.
 core_client.register_domain_token_gate(DOMAIN_NAME, {"submit", "cancel"})
 
 
@@ -55,26 +55,23 @@ def get_stock_reconciliation_items(tag: str, warehouse: str, company: str,
     get_items whitelisted method — NEVER guess or hand-supply current_qty
     for a Stock Reconciliation line.
 
-    Confirmed live: the Stock Reconciliation Item's `current_qty` field is
-    NOT resolved server-side from a caller-supplied value at create time
-    (it's silently reset to 0 in the create response regardless of what's
-    passed in), and Bin.actual_qty is NOT authoritative for a batch-tracked
-    item — get_items() is the only confirmed-correct source, and for a
-    batch-tracked item it returns one row PER EXISTING BATCH (not a single
-    item-level total), each with its own batch_no + current_qty. A caller
-    that reconciles a batch-tracked item without resolving per-batch rows
-    first and instead submits a single line with an unresolved/zero
-    current_qty risks ERPNext creating a brand-new batch for the delta
-    instead of correcting existing batches — confirmed live: this exact
-    mistake inflated a 6-unit balance to 14 units (should have been
-    corrected to 8) because the reconcile silently ADDED 8 to the existing
-    balance rather than SETTING it, when current_qty was passed as
-    0/unresolved for a batch-tracked item.
+    The Stock Reconciliation Item's `current_qty` field is not resolved
+    server-side from a caller-supplied value at create time (it is reset
+    to 0 in the create response regardless of what is passed in), and
+    Bin.actual_qty is not authoritative for a batch-tracked item —
+    get_items() is the only correct source, and for a batch-tracked item
+    it returns one row PER EXISTING BATCH (not a single item-level
+    total), each with its own batch_no + current_qty. A caller that
+    reconciles a batch-tracked item without resolving per-batch rows
+    first, and instead submits a single line with an unresolved/zero
+    current_qty, risks ERPNext creating a brand-new batch for the delta
+    instead of correcting existing batches, because the reconcile adds
+    the unresolved delta to the existing balance rather than setting it.
 
-    `item_code` is optional (confirmed live): omitting it returns every
-    item with a nonzero/tracked balance in `warehouse`, not just one —
-    useful for reconciling a whole warehouse's physical count in one
-    resolver call instead of one per item.
+    `item_code` is optional: omitting it returns every item with a
+    nonzero/tracked balance in `warehouse`, not just one — useful for
+    reconciling a whole warehouse's physical count in one resolver call
+    instead of one per item.
     """
     cfg = get_env_config(tag)
     payload = {
@@ -100,12 +97,11 @@ def bin_rows_to_actual_source_qty(bin_rows: list) -> dict:
     qty}`` mapping a stock-entry draft renderer expects as
     `actual_source_qty`.
 
-    Added because this translation was previously left undocumented and
-    untested, entirely up to whatever called get_bin_qty() to get the
-    shape right at runtime — a caller passing get_bin_qty()'s raw ``data``
-    list straight into actual_source_qty would fail every availability
-    check with "no actual_source_qty entry provided", not because stock
-    was actually unavailable but because the shapes never matched.
+    Passing get_bin_qty()'s raw ``data`` list straight into
+    actual_source_qty fails every availability check with "no
+    actual_source_qty entry provided" — not because stock is actually
+    unavailable, but because the shapes don't match. Use this converter
+    instead.
     """
     return {(row["item_code"], row["warehouse"]): row["actual_qty"] for row in bin_rows}
 

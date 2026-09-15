@@ -1,7 +1,7 @@
 # Domain: mis (GL / MIS reporting, read-only)
 
-Code lives in `scripts/domains/mis.py`
-(`ALLOWED_WRITE_DOCTYPES = ()` — deliberately empty, see below).
+Code: `scripts/domains/mis.py` (`ALLOWED_WRITE_DOCTYPES = ()` —
+deliberately empty, see below).
 
 ## Read-only, always — enforced in code, not by omission
 

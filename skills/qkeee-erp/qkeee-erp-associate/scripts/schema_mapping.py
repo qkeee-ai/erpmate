@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-Schema-first attribute mapping for every create/update (issue 01,
-.scratch/hermes-erp-bot-reliability/issues/01-schema-first-attribute-
-mapping.md — folds in F4). Generalizes F3 (Item's HSN/tax fields had no
-documented home) past Item: fetches the live doctype schema
-(`discover.py meta`, resurrected for F8) and matches whatever fields a
-caller or an extraction step proposes against it, so a field is only
-dropped because it genuinely isn't on the live doctype — never because a
-domain doc's hand-curated field list forgot to mention it.
+Schema-first attribute mapping for every create/update. Fetches the live
+doctype schema (`discover.py meta`) and matches whatever fields a caller
+or an extraction step proposes against it, so a field is only dropped
+because it genuinely isn't on the live doctype — never because a domain
+doc's hand-curated field list forgot to mention it.
 
-## Design decisions (see issue 01's own open questions)
+## Design decisions
 
 - **Lives at the call-site tier (execute_write.py calls in), not inside
   mutate_resource()/gated_mutate_resource().** Doctype-field-shape
@@ -21,37 +18,42 @@ domain doc's hand-curated field list forgot to mention it.
   already-correct fieldnames and mock at the HTTP layer) would need a new
   DocType-meta mock just to keep passing, for a check that changes
   nothing about a payload that was already correct. execute_write.py is
-  still the single write entry point (F1) every real write goes through,
-  so "runs on every create/update, unconditionally" holds in practice
-  without touching the connector's own tested surface. A caller that
-  mutates outside execute_write.py — e.g. procurement.py's own
+  the single write entry point every real write goes through, so "runs
+  on every create/update, unconditionally" holds in practice without
+  touching the connector's own tested surface. A caller that mutates
+  outside execute_write.py — e.g. procurement.py's own
   `_create_linked_kyc_record()`, which calls `core_client.mutate_resource`
   directly for the Address/Contact half of a Supplier-KYC create — does
-  NOT get this check. That's a known, deliberate gap, not an oversight:
-  revisit if that path turns out to need it too, rather than reaching
-  into the connector to cover it now.
+  NOT get a second, redundant schema-mapping pass at THAT call site;
+  instead, `execute_write.py`'s own `_apply_kyc_schema_mapping()` maps
+  `kyc["address"]`/`kyc["contact"]` against Address's/Contact's own live
+  schema BEFORE dispatch, so by the time `_create_linked_kyc_record()`
+  actually fires, the sub-payload it receives is already schema-mapped —
+  same "call-site tier, not the connector" placement as everything else
+  in this module, just at the point where the KYC sub-payload's shape is
+  actually known (`execute_write.py`'s `--kyc` handling), not inside
+  `procurement.py`'s own `mutate()`.
 - **Exact/normalized match auto-applies; fuzzy/synonym matches are
   suggestions, never silently written.** A candidate key that equals a
   live fieldname, or normalizes to one (case/space/hyphen/underscore-
-  insensitive), maps automatically — this is exactly today's working
-  behavior for a caller that already uses correct fieldnames, just now
-  confirmed against the live schema instead of assumed. Anything beyond
-  that (a small hardcoded synonym table for common India-compliance
-  abbreviations — HSN, GSTIN, PAN, TIN) is surfaced as a
-  `suggested_mappings` entry that needs an explicit `confirmed_mappings`
-  entry to ever reach a payload. Matches the issue's own risk callout:
+  insensitive), maps automatically — this is the working behavior for a
+  caller that already uses correct fieldnames, just now confirmed against
+  the live schema instead of assumed. Anything beyond that (a small
+  hardcoded synonym table for common India-compliance abbreviations —
+  HSN, GSTIN, PAN, TIN) is surfaced as a `suggested_mappings` entry that
+  needs an explicit `confirmed_mappings` entry to ever reach a payload:
   fuzzy matching risks mapping the wrong field, so it gets a confirmation
   step, not best-effort silence.
-- **Degrade to today's behavior (payload passed through unmapped) on any
-  schema-fetch failure — warn, don't refuse the write.** A correctly
-  least-privileged bot (F7's own recommendation) can legitimately lack
-  System-Manager-level DocType read and 403 on the schema fetch; refusing
-  every write instance-wide over that would be a worse regression than an
-  occasional unmapped field, matching the existing best-effort posture
-  this connector already applies to audit logging and to a write that
-  proceeds under an RBAC-precheck-unreliable warning. A fetch failure is
-  cached per (tag, doctype) so a doctype this bot can't read metadata for
-  doesn't retry the fetch on every subsequent write in the same process.
+- **Degrade to passthrough (payload sent unmapped) on any schema-fetch
+  failure — warn, don't refuse the write.** A correctly least-privileged
+  bot can legitimately lack System-Manager-level DocType read and 403 on
+  the schema fetch; refusing every write instance-wide over that would be
+  a worse regression than an occasional unmapped field, matching the
+  existing best-effort posture this connector already applies to audit
+  logging and to a write that proceeds under an RBAC-precheck-unreliable
+  warning. A fetch failure is cached per (tag, doctype) so a doctype this
+  bot can't read metadata for doesn't retry the fetch on every subsequent
+  write in the same process.
 - **Cache scope: in-process, per (tag, doctype) — not cross-process or
   disk-backed.** execute_write.py is a fresh process per CLI invocation
   (one write per call), so an in-process cache only pays off for multiple
@@ -62,7 +64,7 @@ domain doc's hand-curated field list forgot to mention it.
   pays for the RBAC pre-check and the audit pre-image fetch on every
   single write, and a disk cache would add staleness/invalidation
   questions a one-write-per-process pattern doesn't need answered yet.
-- **F2/KYC interaction: complementary, not merged.** procurement.py's
+- **KYC interaction: complementary, not merged.** procurement.py's
   `IncompleteSupplierKYCError` gate answers a *policy* question (is KYC
   data present, or was a waiver explicitly confirmed) — this module
   answers a different, *mechanical* one (do the fields actually offered
@@ -71,26 +73,21 @@ domain doc's hand-curated field list forgot to mention it.
   that goes through execute_write.py — this module maps whatever fields
   were supplied against that doctype's live schema, the same as any other
   create.
-- **F4 handoff: schema-mapping consumes doc-extraction's staged-report
-  shape directly when given one** (`match_staged_report()` below) —
-  `{"field", "value", "confidence", "row"?}` per doc-extraction.md step
-  6 — refusing on a field missing `confidence`/`value`
-  (`MalformedStagedReportError`, finally code-enforcing that domain's own
-  long-standing non-negotiable instead of only documenting it) and
-  flagging — not just warning about — a field that is BOTH `low`-
-  confidence AND unmatched against the live schema: the specific worst
-  case issue 01 calls out, since neither signal alone would have caught
-  it. `execute_write.py`'s plain `--payload` path (no staged report
+- **doc-extraction handoff: schema-mapping consumes doc-extraction's
+  staged-report shape directly when given one** (`match_staged_report()`
+  below) — `{"field", "value", "confidence", "row"?}` per
+  doc-extraction.md step 6 — refusing on a field missing
+  `confidence`/`value` (`MalformedStagedReportError`) and flagging — not
+  just warning about — a field that is BOTH `low`-confidence AND
+  unmatched against the live schema, since neither signal alone would
+  catch it. `execute_write.py`'s plain `--payload` path (no staged report
   given) still runs the plain dict-keyed matcher — warn-only, never
   blocks — since there's no per-field confidence to escalate on there.
 - **Known adjacent gap, not fixed here:** doc-extraction.md step 6 says
   to "render the staged report through a script" — no such script
-  (`render_*.py` or otherwise) exists anywhere in this tree yet (checked:
-  `find . -iname 'render_*'` is empty). `match_staged_report()` gives that
-  future script something real to hand off to, but does not itself
-  create the missing renderer — flagging honestly rather than silently
-  assuming it exists, the same way F8's own writeup did for
-  `discover.py`.
+  (`render_*.py` or otherwise) exists anywhere in this tree yet.
+  `match_staged_report()` gives that future script something real to hand
+  off to, but does not itself create the missing renderer.
 
 Pure functions throughout, except `get_doctype_schema()`/
 `map_payload_for_write()` — the only two that talk to ERPNext (via
@@ -139,9 +136,8 @@ def _normalize(s: str) -> str:
 class MalformedStagedReportError(ConnectorError):
     """Raised by match_staged_report() when a field is missing its
     `confidence` key or has no `value` key at all — doc-extraction.md
-    step 6's own render-refusal rule, finally code-enforced here instead
-    of only at the (never-shipped, see module docstring) staged-report
-    renderer (F4)."""
+    step 6's own render-refusal rule, code-enforced here since no
+    staged-report renderer exists yet (see module docstring)."""
 
 
 def match_fields(schema_fields: list, candidate: dict) -> dict:
@@ -222,24 +218,22 @@ def apply_confirmed_mappings(result: dict, confirmed_mappings: dict) -> dict:
 
 
 def match_staged_report(schema_fields: list, staged_fields: list) -> dict:
-    """F4 handoff — consumes doc-extraction's staged-report shape
-    directly: a list of `{"field", "value", "confidence", "row"?}` dicts
-    (doc-extraction.md step 6). Refuses (`MalformedStagedReportError`) on
-    any entry missing a `confidence` key or a `value` key at all — the
-    same rule doc-extraction.md's own render step was always supposed to
-    enforce (F4: it never ran in practice). A `row`-tagged entry
-    (repeating line item) is matched by its own `field` name only;
-    `confidence_by_field`/`row` are carried through on the result for the
-    caller to regroup by.
+    """Consumes doc-extraction's staged-report shape directly: a list of
+    `{"field", "value", "confidence", "row"?}` dicts (doc-extraction.md
+    step 6). Refuses (`MalformedStagedReportError`) on any entry missing
+    a `confidence` key or a `value` key at all — the same rule
+    doc-extraction.md's own render step is supposed to enforce. A
+    `row`-tagged entry (repeating line item) is matched by its own
+    `field` name only; `confidence_by_field`/`row` are carried through on
+    the result for the caller to regroup by.
 
     Returns the same shape as `match_fields()`, plus a `high_risk` list:
     candidate keys that are BOTH `confidence == "low"` AND unmatched
-    against the live schema — the specific worst case issue 01 calls out,
-    since neither signal alone would have caught it. A high-risk field is
-    never in `mapped`, and never in `suggested_mappings` either, even if
-    a synonym hint would otherwise apply — it needs a human's eyes before
-    anything is offered, not an auto-suggestion on top of a low-confidence
-    value.
+    against the live schema — the specific worst case, since neither
+    signal alone would catch it. A high-risk field is never in `mapped`,
+    and never in `suggested_mappings` either, even if a synonym hint
+    would otherwise apply — it needs a human's eyes before anything is
+    offered, not an auto-suggestion on top of a low-confidence value.
     """
     for entry in staged_fields or []:
         if "confidence" not in entry or "value" not in entry:

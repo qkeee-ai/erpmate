@@ -31,15 +31,15 @@ This file is a **thin router only**: identity, the scope guardrail, the
 activation sequence, and the domain-classification table below. Every
 non-negotiable, GRC baseline, and connectivity mechanic lives one hop away
 in `references/00-conventions.md`/`01-connectivity.md` — read those before
-the first ERPNext call of a session, not instead of this file, but
-alongside it. Every procedure specific to a domain lives in
+the first ERPNext call of a session, alongside this file, not instead of
+it. Every procedure specific to a domain lives in
 `references/domains/<slug>.md`, latched only when the conversation's
 intent actually needs it.
 
 ## Scope guardrail
 
-ERPNext/organizational work only — a non-ERP request (general knowledge,
-opinion, small talk) gets a short, polite redirect back to this scope,
+ERPNext/organizational work only. A non-ERP request (general knowledge,
+opinion, small talk) gets a short, polite redirect back to this scope —
 never an attempt to answer it anyway. Stated once, in
 `references/00-conventions.md`; every domain file inherits it.
 
@@ -50,8 +50,8 @@ action:
 
 1. **Resolve the environment tag and run `health`.** `qkeee_erp.active_env`
    names the tag; `scripts/core/client.py --tag <tag> health` confirms
-   connectivity + auth (not query/write-time permission — report a later
-   permission error as its own distinct failure mode). State which tag +
+   connectivity + auth, not query/write-time permission — report a later
+   permission error as its own distinct failure mode. State which tag +
    base URL this session is connected to before any read or write, and
    re-surface that statement after a gap or before a batch of writes.
 2. **Check whether a `qkeee-erp-learned/<env-tag>` skill already exists**
@@ -60,16 +60,16 @@ action:
    environment's cataloged Frappe/ERPNext/app versions and custom-doctype
    notes from a prior session. If absent (or stale — see
    `02-environment-assessment.md`'s staleness signals), run the
-   environment-assessment procedure, then **promote the findings**:
-   run `scripts/core/memory_promote.py` (or call its
-   `build_promotion_plan()` directly) with the raw findings — it redacts
-   PII, formats the `SKILL.md`/`references/*.md` content, and returns an
-   ordered list of `skill_manage`/`memory` tool-call descriptors. Issue
-   those calls yourself, in the order given, via your own native
-   `skill_manage`/`memory` tool access — `memory_promote.py` cannot make
-   them itself (it runs as a subprocess script, a separate process from
-   your own tool-calling loop; see that module's docstring for why). Stop
-   at the first failed call and report a partial promotion rather than
+   environment-assessment procedure, then **promote the findings**: run
+   `scripts/core/memory_promote.py` (or call its `build_promotion_plan()`
+   directly) with the raw findings. It redacts PII, formats the
+   `SKILL.md`/`references/*.md` content, and returns an ordered list of
+   `skill_manage`/`memory` tool-call descriptors. Issue those calls
+   yourself, in the order given, via your own native `skill_manage`/
+   `memory` tool access — `memory_promote.py` cannot make them itself (it
+   runs as a subprocess script, a separate process from your own
+   tool-calling loop; see that module's docstring for why). Stop at the
+   first failed call and report a partial promotion rather than
    continuing past it. See `references/examples/qkeee-erp-learned-example/`
    for the exact content shape this produces.
 3. **Cross-check the requesting user's identity against an ERPNext `User`
@@ -77,26 +77,24 @@ action:
    user id/email — on every environment, every call, no exceptions (see
    `01-connectivity.md`'s requester-identity rule and
    `00-conventions.md`'s GRC baseline). There is no env-var or config
-   default for `requested_by` — it does not exist as a fallback, so
-   there is nothing to fall back to. Refuse to proceed on a requester
-   this skill cannot resolve. Never invent or guess a requester identity,
-   and never reuse a value resolved for an earlier call/turn — resolve it
-   fresh from the message actually being handled right now.
+   default for `requested_by` — nothing to fall back to. Refuse to
+   proceed on a requester this skill cannot resolve. Never invent or
+   guess a requester identity, and never reuse a value resolved for an
+   earlier call/turn — resolve it fresh from the message actually being
+   handled right now.
 4. **Classify intent against the domain table below; latch the matching
    `references/domains/*.md` file into context.** More than one domain
    file may apply mid-conversation (e.g. a procurement onboarding that
    hands off to `doc-extraction`) — latch each as the conversation's
    actual needs shift, don't front-load every domain file speculatively.
-   **For a single-domain, read-only lookup** (the common case — "fetch
-   X for company Y," a status check, a list query): latch only
+   **For a single-domain, read-only lookup** (the common case — "fetch X
+   for company Y," a status check, a list query): latch only
    `00-conventions.md` + `01-connectivity.md` + the one matching
    `domains/*.md` file. Skip `02-environment-assessment.md`,
    `03-spec-driven-execution.md`, and `grc-audit.md` unless step 2's
    staleness check or the intent itself actually needs them — loading
-   every reference file on every turn regardless of complexity was a
-   confirmed, measurable input-token cost in a token-usage review
-   (observed: 4-5 `skill_view` calls per turn even for a repeat, narrow
-   ask).
+   every reference file on every turn regardless of complexity wastes
+   input tokens for no benefit.
 5. **State scope and mode (read-only / read-write) for the session**
    before taking any action — a short, explicit statement of which
    domain(s) are in play and whether writes are possible this session,
@@ -180,39 +178,38 @@ all** (a third-party tool, an internal API) follows
   create it; see that directory's `README.md`.
 - `qkeee-erp-associate.env.example` — template for `$HERMES_HOME/qkeee-erp.env`.
 
-## Governance: this skill is externally-owned, not curator-managed
+## Governance: externally-owned, not curator-managed
 
-This shipped skill must stay closed to Hermes' autonomous background-
-review pass (which may otherwise "improve" its audit/RBAC/redaction
-logic unsupervised), while the `qkeee-erp-learned/*` satellite skills
-stay open to that same evolution — that's the whole point of the split.
-The mechanism is `skills.external_dirs` in `config.yaml` (**a config
-entry, not a frontmatter flag** — skill_usage.py deliberately keeps this
-kind of policy out of user-authored SKILL.md content), which the
-background-review write guard (`_background_review_write_guard`) checks
-first and refuses ANY autonomous `edit`/`patch`/`delete`/`write_file`/
-`remove_file` against, unconditionally — "external skills are read-only
-to the curator." This repo's own `config.yaml` lists `skills/qkeee-erp`
-under `skills.external_dirs`, which covers this skill (a subdirectory of
-it). A foreground, user-directed edit is unaffected — the guard only
-blocks the *autonomous* curator pass. Complementary belt-and-suspenders
-option for whoever operates the live profile: `hermes curator pin
-qkeee-erp-associate` additionally blocks `skill_manage(action="delete")`
-itself, not just autonomous writes — this requires a live profile/CLI,
-not a repo-side config change.
+This shipped skill stays closed to Hermes' autonomous background-review
+pass, which could otherwise "improve" its audit/RBAC/redaction logic
+unsupervised, while the `qkeee-erp-learned/*` satellite skills stay open
+to that same evolution — that's the point of the split. The mechanism is
+`skills.external_dirs` in `config.yaml` (a config entry, not a
+frontmatter flag — `skill_usage.py` deliberately keeps this kind of
+policy out of user-authored SKILL.md content), which the background-
+review write guard (`_background_review_write_guard`) checks first and
+refuses any autonomous `edit`/`patch`/`delete`/`write_file`/`remove_file`
+against, unconditionally: external skills are read-only to the curator.
+This repo's own `config.yaml` lists `skills/qkeee-erp` under
+`skills.external_dirs`, which covers this skill. A foreground,
+user-directed edit is unaffected — the guard only blocks the autonomous
+curator pass. Belt-and-suspenders option for whoever operates the live
+profile: `hermes curator pin qkeee-erp-associate` additionally blocks
+`skill_manage(action="delete")` itself, not just autonomous writes — this
+requires a live profile/CLI, not a repo-side config change.
 
-## Status note (read this before assuming a capability is fully live)
+## Status: what's actually code-enforced
 
 `scripts/core/client.py` and the domain modules with a write path are
 real, tested code, including RBAC-every-environment and always-on read
 audit logging (see `00-conventions.md`'s GRC baseline).
 
-Two distinct things sit under "advisory-first draft," and only one of
-them is code-enforced today:
+"Advisory-first draft" covers two distinct things, and only one is
+code-enforced today:
 
-- **The double-confirm GATE on submit/cancel/delete** (never let a write
+- **The double-confirm gate on submit/cancel/delete** (never let a write
   through without a fresh, exact-match confirmation over what was just
-  shown to the user) **is code-enforced**, uniformly, via
+  shown to the user) is code-enforced, uniformly, via
   `core.client.mutate_resource()`'s `DOMAIN_TOKEN_GATED_ACTIONS` registry
   (`register_domain_token_gate()`) for accounts/hr-payroll/sales/
   procurement/inventory's submit/cancel, and via each domain's own
@@ -224,8 +221,8 @@ them is code-enforced today:
 - **Composing the draft's actual content** — a Journal Entry's balance
   check and narration, a cancel's impact statement, a Quotation's
   presentation — still depends on the `render_*.py` scripts several
-  domain files describe, which are **not yet present in this skill's
-  `scripts/` directory**. The gate above will refuse an unconfirmed
+  domain files describe, which are not yet present in this skill's
+  `scripts/` directory. The gate above refuses an unconfirmed
   submit/cancel either way, but nothing yet code-assists producing the
   draft itself; that part is still prompt discipline.
 

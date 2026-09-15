@@ -45,23 +45,20 @@ unconditionally — neither is debug-gated or PROD-only.
   audit log itself and `Comment` from being logged, to avoid infinite
   recursion — not a gap in coverage of business writes. On the read
   path, the equivalent exemption (`_LOG_READ_RECURSION_EXEMPT_DOCTYPES`)
-  is narrower still and purpose-keyed rather than doctype-keyed (F12,
-  `.scratch/hermes-erp-bot-reliability/spec.md`) — a business-intent read
-  of `User`/`Role`/`DocType` (e.g. "who is this person, what can they
-  do") is a real logged row, not silently dropped the way it used to be.
+  is narrower still and purpose-keyed rather than doctype-keyed — a
+  business-intent read of `User`/`Role`/`DocType` (e.g. "who is this
+  person, what can they do") is a real logged row, not silently dropped.
 - Also proves: that a requester was REFUSED, and why. Every
   `_validate_prod_requester()` call — read or write — writes one
   gate-decision row (`response_payload.gate_check: true`), on the denial
-  branches as well as the allow (F11, same spec). Before this fix, a
-  denied call left nothing in the trail at all, since the gate raises
-  before the guarded read/write ever runs; a permission-denial review is
-  now a real query against this log, not a gap you have to explain away.
+  branches as well as the allow. A permission-denial review is a real
+  query against this log, not a gap to explain away.
 - Does NOT prove: that a human actually read and approved a
   `user_approved: "Approved"` write — that field is a detection signal
-  set by the calling domain after its own confirm stage, not independently
-  verified by the connector. A `confirmation_token` match (on a
-  double-confirm write) proves recency/consistency of the rendered facts,
-  never that a human said yes to them.
+  set by the calling domain after its own confirm stage, not
+  independently verified by the connector. A `confirmation_token` match
+  (on a double-confirm write) proves recency/consistency of the rendered
+  facts, never that a human said yes to them.
 - **Secondary cross-check, recommended for a real statutory audit:**
   enable `track_changes: 1` on every doctype this skill writes to, so
   Frappe's own `Version` doctype independently captures field diffs
@@ -105,8 +102,8 @@ unconditionally — neither is debug-gated or PROD-only.
 | Capability | Outcome | Notes |
 | --- | --- | --- |
 | Audit trail pull for a doctype/period | Every logged write, with requester/diff | Best-effort — flag any orphaned `Attempted` rows |
-| Read-access review | Who read what, when | Every read is logged, unconditionally — including User/Role/DocType business reads (F12) |
-| Permission-denial review | Who was refused, on what, and why | `status: "Failure"` + `response_payload.gate_check: true` (F11) |
+| Read-access review | Who read what, when | Every read is logged, unconditionally — including User/Role/DocType business reads |
+| Permission-denial review | Who was refused, on what, and why | `status: "Failure"` + `response_payload.gate_check: true` |
 | Segregation-of-duties question | `requested_by` vs. acting bot identity clarified | Cannot certify human identity beyond what's logged |
 | GRC guarantee status check | Honest live-vs-planned answer | Never imply a control is enforced before confirming it in code |
 

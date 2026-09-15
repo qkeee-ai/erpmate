@@ -67,27 +67,25 @@ call needs — on every environment tag, not PROD only. See
 `_validate_prod_requester()` below (the name reflects a narrower PROD-only
 origin; the check itself is now universal).
 
-Known limitation, confirmed live and structural (not instance-specific —
+Known limitation, structural rather than instance-specific:
 `frappe.client.has_permission` has no `user=` parameter in stock Frappe at
-all; it always answers for the calling session, never a named other user):
-per-requester permission can't actually be verified via that RPC this way.
+all — it always answers for the calling session, never a named other user
+— so per-requester permission can't actually be verified via that RPC.
 
-**2026-09-11 reinforcement (F7):** when `verify_rbac_precheck_reliable()`
-detects this, `_validate_prod_requester()` no longer leans on a `domain=`
-allowlist or a verified advisory-draft token to let the write through —
-`_requester_has_role_permission()` asks the same question a different
-way instead: locally, from the requester's own live role list and the
-doctype's own live DocPerm rows, never through the broken RPC. Only a
-positively-confirmed grant proceeds; an inconclusive or negative local
-verdict refuses outright (`UnvalidatedProdRequesterError`), REGARDLESS of
-`domain`/`advisory_token_verified` status — those still attest a write's
-*shape* was reviewed ahead of time, they just no longer get treated as
-proof `requested_by` specifically can do it, once the one RPC that would
-otherwise confirm that is already known unreliable. See
-`_requester_has_role_permission()`'s own docstring for what this local
-check can and can't see (User Permissions and `if_owner` scoping are
-invisible to it), and `_validate_prod_requester()`'s docstring for the
-full decision tree.
+When `verify_rbac_precheck_reliable()` detects this, `_validate_prod_requester()`
+does not lean on a `domain=` allowlist or a verified advisory-draft token to
+let the write through — `_requester_has_role_permission()` asks the same
+question a different way instead: locally, from the requester's own live
+role list and the doctype's own live DocPerm rows, never through the broken
+RPC. Only a positively-confirmed grant proceeds; an inconclusive or negative
+local verdict refuses outright (`UnvalidatedProdRequesterError`), regardless
+of `domain`/`advisory_token_verified` status — those attest a write's
+*shape* was reviewed ahead of time, but neither is treated as proof
+`requested_by` specifically can do it once the RPC that would otherwise
+confirm that is unreliable. See `_requester_has_role_permission()`'s own
+docstring for what this local check can and can't see (User Permissions and
+`if_owner` scoping are invisible to it), and `_validate_prod_requester()`'s
+docstring for the full decision tree.
 
 Write-allowlist gate: domain modules under `scripts/domains/*.py` each
 declare an ALLOWED_WRITE_DOCTYPES tuple and register it via
@@ -157,23 +155,22 @@ AUDIT_LOG_DOCTYPE = "Qkeee Bot Audit Log"
 # are exempt for the same reason they're in PROD_GATE_EXEMPT_DOCTYPES
 # below (core-infra doctypes managed by qkeee-erp-bot-init / system-admin,
 # not written by a business requester) — kept in sync with that set
-# deliberately, not a coincidence: init_bot.py's Role/DocType bootstrap
-# writes rely on this exemption to stay silent so its own
-# log_role_provisioning() can be the ONE place that logs them (manually,
-# bypassing this exemption on purpose — see that function's docstring).
-# Removing "User"/"DocType"/"Role" here would double-log that bootstrap
-# sequence for no benefit — this set is scoped to the write path only.
+# deliberately: init_bot.py's Role/DocType bootstrap writes rely on this
+# exemption to stay silent so its own log_role_provisioning() can be the
+# ONE place that logs them (manually, bypassing this exemption on purpose
+# — see that function's docstring). Removing "User"/"DocType"/"Role" here
+# would double-log that bootstrap sequence for no benefit — this set is
+# scoped to the write path only.
 #
 # The READ path (_log_read(), consulted by query_resource()/get_resource()/
 # run_query_report()/get_user_roles()) does NOT use this set — see
-# _LOG_READ_RECURSION_EXEMPT_DOCTYPES below (F12,
-# .scratch/hermes-erp-bot-reliability/spec.md): a doctype-keyed exemption
-# was the wrong axis there, since it also silently swallowed a genuine
+# _LOG_READ_RECURSION_EXEMPT_DOCTYPES below: a doctype-keyed exemption is
+# the wrong axis there, since it would also silently swallow a genuine
 # business-intent read of User/Role (e.g. `query User`, `roles <user>`),
-# not just the internal plumbing call it was built to stop from
-# recursing. That plumbing call (resource_exists(), and
+# not just the internal plumbing call it exists to stop from recursing.
+# That plumbing call (resource_exists(), and
 # _fetch_doctype_role_permissions()'s own get_resource(tag, "DocType", ...))
-# is now exempted directly via an `internal=True` kwarg instead.
+# is exempted directly via an `internal=True` kwarg instead.
 AUDIT_EXEMPT_DOCTYPES = {
     AUDIT_LOG_DOCTYPE,
     "Comment",
@@ -182,7 +179,7 @@ AUDIT_EXEMPT_DOCTYPES = {
     "Role",
 }
 
-# Read-path recursion exemption (F12) — deliberately NARROWER than
+# Read-path recursion exemption — deliberately NARROWER than
 # AUDIT_EXEMPT_DOCTYPES above. Only the two doctypes that would actually
 # recurse (logging a read of the audit doctype itself, or of a Comment)
 # stay exempt by doctype. Everything else that needs to skip logging for
@@ -214,15 +211,13 @@ PROD_GATE_EXEMPT_DOCTYPES = {
 }
 
 # Shared closing line for every requester-permission-denial message
-# below (F10, .scratch/hermes-erp-bot-reliability/spec.md — live-
-# observed: an agent facing exactly this refusal offered to re-run the
-# same call as a DIFFERENT requested_by instead of reporting the gap).
-# A user-supplied "run this as someone else instead" is not the channel's
-# own authenticated sender field — accepting it is the same "reconstruct
-# the identity conversationally" failure 00-conventions.md's GRC baseline
-# already forbids, one turn removed. Baked into the exception text itself
-# so the instruction lands at the exact moment an agent decides what to
-# do next, not only in a reference doc it may not re-read mid-incident.
+# below. A user-supplied "run this as someone else instead" is not the
+# channel's own authenticated sender field — accepting it is the same
+# "reconstruct the identity conversationally" failure 00-conventions.md's
+# GRC baseline already forbids, one turn removed. Baked into the
+# exception text itself so the instruction lands at the exact moment an
+# agent decides what to do next, not only in a reference doc it may not
+# re-read mid-incident.
 _NEVER_SUBSTITUTE_REQUESTER = (
     "Do not retry this call with a different requested_by to work around this — "
     "report the missing role/permission to the user (or an admin) so the ACTUAL "
@@ -233,12 +228,12 @@ _NEVER_SUBSTITUTE_REQUESTER = (
 )
 
 # Identities the connector's OWN bot account must never hold — see
-# verify_rbac_precheck_reliable() / PrivilegedBotAccountError. Live-
-# confirmed: under one of these, frappe.client.has_permission doesn't
-# reliably discriminate by the `user=` param it's given, so the RBAC
-# pre-check becomes a no-op that always says "allowed" regardless of who
-# requested_by actually names. "Administrator" is checked by literal
-# username (case-insensitive), independent of role membership.
+# verify_rbac_precheck_reliable() / PrivilegedBotAccountError. Under one
+# of these, frappe.client.has_permission doesn't reliably discriminate by
+# the `user=` param it's given, so the RBAC pre-check becomes a no-op
+# that always says "allowed" regardless of who requested_by actually
+# names. "Administrator" is checked by literal username
+# (case-insensitive), independent of role membership.
 _BOT_FORBIDDEN_ROLES = {"System Manager"}
 
 # mutate_resource()'s action -> frappe.client.has_permission's perm_type.
@@ -348,7 +343,7 @@ class MissingRequesterError(ConnectorError):
 
 class UnvalidatedProdRequesterError(ConnectorError):
     """Raised, on every tag (name reflects a narrower PROD-only origin —
-    the gate is now universal, see _validate_prod_requester()), when
+    the gate is universal, see _validate_prod_requester()), when
     requested_by is missing, isn't a real ERPNext User, or lacks the
     permission this call needs per ERPNext's own
     frappe.client.has_permission check."""
@@ -363,15 +358,14 @@ class UnconfirmedByUserError(ConnectorError):
     """Raised by gated_mutate_resource() when user_confirmation_text is
     missing, or doesn't contain the confirmation_token's derived
     confirmation_code — see confirm_token.confirmation_code()'s own
-    docstring for what this does and doesn't prove (F5, .scratch/
-    hermes-erp-bot-reliability/spec.md). A matching confirmation_token
-    alone (the pre-existing check) proves the payload wasn't tampered
-    with since render; it does NOT prove the render was ever shown to
-    the actual requester — the same process can compute and verify that
+    docstring for what this does and doesn't prove. A matching
+    confirmation_token alone proves the payload wasn't tampered with
+    since render; it does NOT prove the render was ever shown to the
+    actual requester — the same process can compute and verify that
     token in one turn. This is the additional check for gated_mutate_
     resource()'s domain-less write path specifically (a doctype no
     named domain's own mutate() has a chance to layer a stricter rule
-    onto, unlike e.g. procurement's Supplier-KYC gate, F2)."""
+    onto, unlike e.g. procurement's Supplier-KYC gate)."""
 
 
 class DoctypeNotAllowedError(ConnectorError):
@@ -381,25 +375,23 @@ class DoctypeNotAllowedError(ConnectorError):
 
 
 class PrivilegedBotAccountError(ConnectorError):
-    """Historical: was raised when a write was attempted while this
-    connector's OWN authenticated bot identity (not requested_by) is
-    Administrator or holds a role in _BOT_FORBIDDEN_ROLES, or when a live
-    probe shows ERPNext's frappe.client.has_permission doesn't actually
-    discriminate by the `user=` param on this instance — see
-    verify_rbac_precheck_reliable() below, which still detects and warns
-    on exactly this condition.
+    """Not raised anywhere in this module — kept defined only for any
+    external caller that still catches it specifically.
 
-    No longer raised anywhere as of the 2026-09-11 F7 reinforcement:
+    Describes the condition it used to signal: this connector's OWN
+    authenticated bot identity (not requested_by) is Administrator or
+    holds a role in _BOT_FORBIDDEN_ROLES, or a live probe shows ERPNext's
+    frappe.client.has_permission doesn't actually discriminate by the
+    `user=` param on this instance — see verify_rbac_precheck_reliable()
+    below, which still detects and warns on exactly this condition.
     _validate_prod_requester() now refuses via UnvalidatedProdRequesterError
     in this situation instead (whether the local role/DocPerm fallback
     check — see _requester_has_role_permission() — comes back with a
-    confirmed non-grant or couldn't be completed at all), since the
-    underlying problem is the same either way ("requested_by's real
-    permission can't be trusted") and deserves one exception type, not
-    two. Kept defined, not raised, in case anything outside this module
-    still catches it specifically. Provision a genuinely narrow-role
-    dedicated bot account instead (see init_bot.py / 00-conventions.md's
-    bot-account requirement)."""
+    confirmed non-grant or couldn't be completed at all): the underlying
+    problem is the same either way ("requested_by's real permission can't
+    be trusted") and gets one exception type, not two. Provision a
+    genuinely narrow-role dedicated bot account instead (see init_bot.py
+    / 00-conventions.md's bot-account requirement)."""
 
 
 def _tag_env_var(tag: str, suffix: str) -> str:
@@ -489,18 +481,17 @@ def check_user_permission(tag: str, doctype: str, perm_type: str, requested_by: 
     "delete") on `doctype` (and on the specific `docname`, if given, for
     a record-level check; doctype-level only if omitted).
 
-    KNOWN GAP, confirm live before trusting this in production: stock
-    Frappe's `frappe.client.has_permission` whitelisted method checks the
-    CURRENTLY AUTHENTICATED user's own permission by default — passing a
-    `user=` query param to check permission "as" a different user is only
-    honored on some Frappe versions/configurations. This connector always
-    sends `user=<requested_by>` and trusts whatever ERPNext returns, but
-    has NOT been live-validated against a real instance to confirm the
-    target Frappe version actually evaluates permission for `requested_by`
-    rather than silently evaluating for the bot account instead. Confirm
-    this against each target instance before relying on it as an actual
-    per-requester gate rather than the role-membership heuristic
-    get_user_roles() already provides."""
+    KNOWN GAP: stock Frappe's `frappe.client.has_permission` whitelisted
+    method checks the CURRENTLY AUTHENTICATED user's own permission by
+    default — passing a `user=` query param to check permission "as" a
+    different user is only honored on some Frappe versions/configurations.
+    This connector always sends `user=<requested_by>` and trusts whatever
+    ERPNext returns, but that does not confirm the target Frappe version
+    actually evaluates permission for `requested_by` rather than silently
+    evaluating for the bot account instead. Confirm this against each
+    target instance before relying on it as an actual per-requester gate
+    rather than the role-membership heuristic get_user_roles() already
+    provides."""
     result = check_user_permission_raw(tag, doctype, perm_type, requested_by, docname)
     return bool(result.get("message"))
 
@@ -509,27 +500,23 @@ def check_user_permission_raw(tag: str, doctype: str, perm_type: str, requested_
                                docname: str = None) -> dict:
     """Raw response from frappe.client.has_permission, for a caller that
     wants to inspect more than the boolean. See check_user_permission()'s
-    docstring for the live-validation caveat this shares.
+    docstring for the per-instance verification caveat this shares.
 
-    Live-confirmed against a real ERPNext instance: some Frappe builds'
-    `frappe.client.has_permission` has NO default for `docname` —
-    omitting the query param entirely (the previous behavior here, via
-    `if docname: params["docname"] = docname`) 500s with `TypeError:
+    Some Frappe builds' `frappe.client.has_permission` has no default for
+    `docname` — omitting the query param entirely 500s with `TypeError:
     has_permission() missing 1 required positional argument: 'docname'`
     for every doctype-level check (every `create`, and any `query_resource`
     list read). Sending `docname=""` satisfies the positional requirement
-    and correctly falls back to a doctype-level check (confirmed live:
-    returns the same `has_permission` result as a record-level check,
-    doesn't 404 the way a non-empty placeholder like `docname=None`-the-
-    literal-string does). Always send the param now, empty string when no
-    real docname exists yet.
+    and falls back to a doctype-level check, returning the same
+    `has_permission` result as a record-level check (a non-empty
+    placeholder like the literal string `"None"` 404s instead). Always
+    send the param, empty string when no real docname exists yet.
 
-    KNOWN GAP, live-confirmed as a real live gap, not just a theoretical
-    one: at least one tested Frappe build's `has_permission` returns
+    KNOWN GAP: at least one tested Frappe build's `has_permission` returns
     `true` for every `user=` value under a privileged (Administrator or
     System-Manager-holding) caller identity, including a deliberately
     nonexistent user, against a System-Manager-only doctype. See
-    `verify_rbac_precheck_reliable()` below — it live-probes this exact
+    `verify_rbac_precheck_reliable()` below — it probes this exact
     failure mode per target instance and `_validate_prod_requester()`
     refuses to trust this function's result when the probe says the
     check doesn't discriminate."""
@@ -595,7 +582,7 @@ def verify_rbac_precheck_reliable(tag: str) -> dict:
     System Manager) with the live discrimination probe above. Never raises
     on its own; callers decide what to do with an unreliable result —
     _validate_prod_requester() falls back to a local, RPC-independent
-    role/DocPerm check instead (F7) and requires a positively-confirmed
+    role/DocPerm check instead and requires a positively-confirmed
     grant to proceed, regardless of `domain`/advisory-token status (see
     that function's own docstring); health_check() just surfaces it as a
     warning. Called from `hermes qkeee-erp health`
@@ -662,7 +649,7 @@ def _requester_has_role_permission(tag: str, doctype: str, perm_type: str, reque
     doctype's own live DocPerm rows (`_fetch_doctype_role_permissions()`
     above) — instead of trusting `frappe.client.has_permission`'s `user=`
     param, which `verify_rbac_precheck_reliable()` has already confirmed
-    doesn't reliably discriminate under a privileged bot identity (F7).
+    doesn't reliably discriminate under a privileged bot identity.
     Only ever consulted from `_validate_prod_requester()` when that RPC
     is already known unreliable — see the call site for why this isn't
     run unconditionally (a reliable `has_permission` already gives the
@@ -671,8 +658,8 @@ def _requester_has_role_permission(tag: str, doctype: str, perm_type: str, reque
 
     Returns `True`/`False` when both reads succeed and a verdict can
     actually be reached; `None` when either read fails — e.g. this bot
-    ALSO lacks the System-Manager-level DocType read F7/F8 already flag
-    as a real gap on a correctly least-privileged bot — or when
+    also lacks the System-Manager-level DocType read, a common gap on a
+    correctly least-privileged bot — or when
     `get_user_roles()`'s own result is empty (its own docstring: an empty
     roles list is ambiguous, never a confirmed "holds nothing"). Callers
     must treat `None` as "couldn't check," never as either verdict.
@@ -722,43 +709,41 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     (Name reflects a narrower PROD-only origin; the check itself is
     universal.)
 
-    `domain`/`advisory_token_verified` are still accepted (mutate_resource()/
-    gated_mutate_resource() still thread them through — the allowlist and
-    advisory-token-confirm checks that produce them remain real, valuable,
-    INDEPENDENT controls at their own gates: allowlist scopes which
-    doctypes a domain may touch at all, advisory-token-confirm proves a
-    payload matches what was actually shown to and confirmed by a human)
-    but, per an explicit 2026-09-11 decision, NEITHER rescues an
-    unreliable-RBAC-precheck write on its own anymore — see the "not
-    reliable" branch below. They attest a write's SHAPE was reviewed
-    ahead of time; neither one confirms `requested_by` specifically can
-    do it, and once `frappe.client.has_permission` itself can't be
-    trusted, that distinction stopped being good enough to rescue this
-    gate by itself.
+    `domain`/`advisory_token_verified` are still accepted
+    (mutate_resource()/gated_mutate_resource() thread them through — the
+    allowlist and advisory-token-confirm checks that produce them remain
+    real, valuable, INDEPENDENT controls at their own gates: allowlist
+    scopes which doctypes a domain may touch at all, advisory-token-
+    confirm proves a payload matches what was actually shown to and
+    confirmed by a human) but NEITHER rescues an unreliable-RBAC-precheck
+    write on its own — see the "not reliable" branch below. They attest a
+    write's SHAPE was reviewed ahead of time; neither one confirms
+    `requested_by` specifically can do it, and once
+    `frappe.client.has_permission` itself can't be trusted, that
+    distinction isn't good enough to rescue this gate by itself.
 
     `session_id`/`domain_code`/`channel`/`channel_metadata`/
-    `prompt_summary`/`latest_prompt` (F11,
-    .scratch/hermes-erp-bot-reliability/spec.md): carried through purely
-    so the gate-decision Audit Log row this function now writes for every
-    branch (see _log_gate_decision()) has the same session/channel/prompt
-    context every other audit row already gets — no effect on the actual
+    `prompt_summary`/`latest_prompt`: carried through purely so the
+    gate-decision Audit Log row this function writes for every branch
+    (see _log_gate_decision()) has the same session/channel/prompt
+    context every other audit row gets — no effect on the actual
     decision.
 
     No-op for any doctype in PROD_GATE_EXEMPT_DOCTYPES, on every tag.
     Otherwise:
 
     - Presence of `requested_by` is mandatory on EVERY tag, no exceptions.
-      There is no env-var or config default to fall back to (removed —
-      see the module docstring); a caller must resolve the live inbound
-      channel identity and pass it explicitly on every call.
+      There is no env-var or config default to fall back to (see the
+      module docstring); a caller must resolve the live inbound channel
+      identity and pass it explicitly on every call.
     - Whenever `requested_by` is present it is validated as a real
       ERPNext User (resource_exists check), then checked for `perm_type`
       on `doctype`/`docname` — via ERPNext's own `has_permission` RPC
       when `verify_rbac_precheck_reliable()` says that RPC can be
       trusted; otherwise via `_requester_has_role_permission()`'s local,
-      RPC-independent role/DocPerm check instead (F7) — see that
-      function's own docstring, and the "not reliable" branch below, for
-      exactly what changed and why. Every supplied requester gets
+      RPC-independent role/DocPerm check instead — see that function's
+      own docstring, and the "not reliable" branch below, for exactly
+      what that check can and can't see. Every supplied requester gets
       checked, on every tag, one way or the other — a bogus/unauthorized/
       unverifiable requester is never silently accepted.
 
@@ -766,7 +751,7 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     never proceeds unverified. Called from query_resource()/get_resource()/
     run_query_report()/mutate_resource() — every read and write. Every
     raise, and the final allow, is also logged to Qkeee Bot Audit Log as
-    one gate-decision row (F11) — a denial used to leave zero trace."""
+    one gate-decision row — a denial otherwise leaves zero trace."""
     if doctype in PROD_GATE_EXEMPT_DOCTYPES:
         return
 
@@ -805,28 +790,27 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
                 f"WARN: RBAC pre-check is NOT reliable on tag '{tag}' — bot identity "
                 f"{trust['bot_user']!r} is privileged ({trust['privileged_identity']}) "
                 f"and/or the live has_permission probe didn't discriminate a bogus user "
-                f"({not trust['precheck_discriminates']}). Per-requester permission is now "
-                f"verified locally instead (role list + doctype DocPerm rows, F7) — a "
+                f"({not trust['precheck_discriminates']}). Per-requester permission is "
+                f"verified locally instead (role list + doctype DocPerm rows) — a "
                 f"confirmed grant is required to proceed; a `domain` allowlist or a verified "
-                f"advisory token no longer rescues this on their own (2026-09-11 decision — "
-                f"see _requester_has_role_permission()'s docstring). Provision a narrow-role "
+                f"advisory token does not rescue this on their own (see "
+                f"_requester_has_role_permission()'s docstring). Provision a narrow-role "
                 f"dedicated bot account and re-run health() to restore the has_permission RPC "
                 f"itself instead of depending on this fallback.",
                 file=sys.stderr,
             )
-        # F7 reinforcement: has_permission's user= param is known
-        # unreliable here, so ask the same question a different way —
-        # locally, from the requester's own live role list and the
-        # doctype's own live DocPerm rows (never through the broken RPC).
-        # Per explicit 2026-09-11 decision: ONLY a locally-CONFIRMED grant
-        # (True) proceeds. A `domain` allowlist or a verified advisory
-        # token attests this write's shape was reviewed ahead of time —
-        # neither confirms requested_by specifically can do it, so
-        # neither rescues an inconclusive (None) or negative (False)
-        # local verdict anymore; both fail closed the same way. Applies
-        # uniformly to read and write — see _requester_has_role_
-        # permission()'s own docstring for exactly what this can and
-        # can't see.
+        # has_permission's user= param is known unreliable here, so ask
+        # the same question a different way — locally, from the
+        # requester's own live role list and the doctype's own live
+        # DocPerm rows (never through the broken RPC). Only a
+        # locally-CONFIRMED grant (True) proceeds. A `domain` allowlist or
+        # a verified advisory token attests this write's shape was
+        # reviewed ahead of time — neither confirms requested_by
+        # specifically can do it, so neither rescues an inconclusive
+        # (None) or negative (False) local verdict; both fail closed the
+        # same way. Applies uniformly to read and write — see
+        # _requester_has_role_permission()'s own docstring for exactly
+        # what this can and can't see.
         role_verdict = _requester_has_role_permission(tag, doctype, perm_type, requested_by)
         if role_verdict is True:
             _log(True, {"path": "local_role_docperm_fallback", "reason": "rbac_precheck_unreliable"})
@@ -837,38 +821,37 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
                 f"Refusing this call on tag '{tag}': requester '{requested_by}' holds no role "
                 f"with '{perm_type}' permission on '{doctype}' per that doctype's own live "
                 f"DocPerm rows — computed locally (role list + DocPerm rows) since "
-                f"frappe.client.has_permission's user= param is known unreliable on this tag "
-                f"(F7). This is independent, corroborating evidence, not a full "
-                f"reimplementation of Frappe's permission engine (User Permissions / if_owner "
-                f"scoping aren't checked — see _requester_has_role_permission()'s docstring) — "
-                f"but a positive 'no role grants this' verdict overrides even a `domain` "
-                f"allowlist or a verified advisory token, since those exist to cover 'can't "
-                f"verify,' not 'verified, and it's a no.' {_NEVER_SUBSTITUTE_REQUESTER}"
+                f"frappe.client.has_permission's user= param is known unreliable on this tag. "
+                f"This is independent, corroborating evidence, not a full reimplementation of "
+                f"Frappe's permission engine (User Permissions / if_owner scoping aren't "
+                f"checked — see _requester_has_role_permission()'s docstring) — but a positive "
+                f"'no role grants this' verdict overrides even a `domain` allowlist or a "
+                f"verified advisory token, since those exist to cover 'can't verify,' not "
+                f"'verified, and it's a no.' {_NEVER_SUBSTITUTE_REQUESTER}"
             )
         # role_verdict is None: the local check itself couldn't complete
         # (failed to resolve requester roles, or this doctype's live
-        # DocPerm rows — commonly this bot ALSO lacking System-Manager-
-        # level DocType read, the same F7/F8-acknowledged gap on a
-        # correctly least-privileged bot). Per the 2026-09-11 decision, an
-        # unverifiable requester permission is refused outright here too
-        # — a `domain` allowlist or a verified advisory token no longer
-        # rescues this either, since neither confirms requested_by's own
-        # permission, only that the write's shape was reviewed ahead of
-        # time. Trade-off, stated plainly: this makes System-Manager-
-        # level DocType read a hard requirement for ANY write once
-        # has_permission is unreliable, including a domain-scoped one
-        # that used to proceed on the allowlist alone — availability
-        # loss, in exchange for never proceeding without positive,
-        # locally-confirmed evidence.
+        # DocPerm rows — commonly this bot also lacking System-Manager-
+        # level DocType read, a common gap on a correctly least-privileged
+        # bot). An unverifiable requester permission is refused outright
+        # here too — a `domain` allowlist or a verified advisory token
+        # does not rescue this either, since neither confirms
+        # requested_by's own permission, only that the write's shape was
+        # reviewed ahead of time. Trade-off, stated plainly: this makes
+        # System-Manager-level DocType read a hard requirement for ANY
+        # write once has_permission is unreliable, even a domain-scoped
+        # one that could otherwise proceed on the allowlist alone —
+        # availability loss, in exchange for never proceeding without
+        # positive, locally-confirmed evidence.
         _log(False, {"path": "local_role_docperm_fallback", "reason": "inconclusive"})
         raise UnvalidatedProdRequesterError(
             f"Refusing this call on tag '{tag}': requester '{requested_by}''s '{perm_type}' "
             f"permission on '{doctype}' could not be verified at all — this connector's own "
             f"bot identity ({trust['bot_user']!r}) makes frappe.client.has_permission's user= "
-            f"param unreliable on this tag (F7), AND the local role/DocPerm fallback check "
-            f"couldn't complete (failed to resolve requester '{requested_by}''s live roles, or "
-            f"this doctype's live DocPerm rows). A `domain` allowlist or a verified advisory "
-            f"token attests this write's shape was reviewed ahead of time, never that "
+            f"param unreliable on this tag, AND the local role/DocPerm fallback check couldn't "
+            f"complete (failed to resolve requester '{requested_by}''s live roles, or this "
+            f"doctype's live DocPerm rows). A `domain` allowlist or a verified advisory token "
+            f"attests this write's shape was reviewed ahead of time, never that "
             f"'{requested_by}' can actually do it — neither is trusted to rescue an "
             f"unverifiable requester permission by itself. Provision a bot account that can "
             f"read User/DocType metadata (see init_bot.py / 00-conventions.md), or restore a "
@@ -1144,12 +1127,12 @@ def get_resource(tag: str, doctype: str, name: str, strip_noise: bool = True,
                   internal: bool = False) -> dict:
     """Single-resource full-doc GET — the only way to get child-table rows.
 
-    Confirmed live: Frappe's list endpoint (query_resource()) silently
-    drops Table-type (child-table) fields even when named in `fields`,
-    while the single-resource GET ignores `fields` entirely and always
-    returns the full doc. Use get_resource() only when child-table Link
-    validity actually needs checking (e.g. a review-before-submit step) —
-    for reads that don't need child-table data, query_resource() with
+    Frappe's list endpoint (query_resource()) silently drops Table-type
+    (child-table) fields even when named in `fields`, while the
+    single-resource GET ignores `fields` entirely and always returns the
+    full doc. Use get_resource() only when child-table Link validity
+    actually needs checking (e.g. a review-before-submit step) — for
+    reads that don't need child-table data, query_resource() with
     filters+fields is far cheaper.
 
     strip_noise=True (default) drops audit/system metadata and
@@ -1157,11 +1140,11 @@ def get_resource(tag: str, doctype: str, name: str, strip_noise: bool = True,
 
     Every read is logged to Qkeee Bot Audit Log, unconditionally — same as
     query_resource(), see that function's docstring — UNLESS
-    `internal=True` (F12): pass this only when this call is the
-    connector's own plumbing (an existence/metadata check made on behalf
-    of the gate itself, not a business-intent read) — see
-    resource_exists() and _fetch_doctype_role_permissions(), the only two
-    callers that ever set it.
+    `internal=True`: pass this only when this call is the connector's own
+    plumbing (an existence/metadata check made on behalf of the gate
+    itself, not a business-intent read) — see resource_exists() and
+    _fetch_doctype_role_permissions(), the only two callers that ever set
+    it.
     """
     _validate_prod_requester(tag, requested_by, doctype, "read", docname=name,
                               session_id=session_id, domain_code=domain_code,
@@ -1182,10 +1165,8 @@ def get_resource(tag: str, doctype: str, name: str, strip_noise: bool = True,
 
 
 def resource_exists(tag: str, doctype: str, name: str) -> bool:
-    """404-tolerant existence check. Never logged (internal=True — F12
-    made this actually true regardless of doctype, rather than true only
-    because every past caller happened to pass a doctype that was also in
-    AUDIT_EXEMPT_DOCTYPES), never gated (PROD_GATE_EXEMPT_DOCTYPES covers
+    """404-tolerant existence check. Never logged (internal=True,
+    regardless of doctype), never gated (PROD_GATE_EXEMPT_DOCTYPES covers
     "User"/"DocType"/"Role", the only doctypes this is ever called
     against)."""
     try:
@@ -1207,9 +1188,10 @@ def run_query_report(tag: str, report_name: str, filters: dict = None,
     whenever a built-in report covers the need. Read-only in effect (runs
     a report, creates nothing).
 
-    GET + query-string filters, not POST — confirmed live against a real
-    ERPNext v15 instance. `filters` is a plain dict of report-specific
-    filter values; field names vary per report — confirm the exact filter
+    GET + query-string filters, not POST (this is what ERPNext v15's
+    frappe.desk.query_report.run endpoint expects). `filters` is a plain
+    dict of report-specific filter values; field names vary per report —
+    confirm the exact filter
     keys a given report expects by opening it in the ERPNext UI once,
     since this generic endpoint doesn't self-document per-report filter
     schemas.
@@ -1258,10 +1240,8 @@ def get_user_roles(tag: str, user: str = "", *, requested_by: str = None,
     API key belongs to" (Frappe token auth doesn't expose that directly).
 
     Unlike query_resource()/get_resource()/run_query_report(), this
-    doesn't route through those, so it never got audited even for a
-    genuine business-intent lookup (F12,
-    .scratch/hermes-erp-bot-reliability/spec.md) — fixed here: logs to
-    Qkeee Bot Audit Log via `_log_read()` unless `internal=True`. Pass
+    doesn't route through those — it logs to Qkeee Bot Audit Log directly
+    via `_log_read()` unless `internal=True`. Pass
     `internal=True` only from this connector's own RBAC plumbing
     (_bot_identity(), _requester_has_role_permission()) — a caller asking
     on a requester's actual behalf (the CLI `roles` command, a domain
@@ -1312,11 +1292,10 @@ def record_comment(cfg: dict, doctype: str, name: str, content: str) -> bool:
     pasted into chat and echoed verbatim into a Comment would otherwise
     persist there indefinitely.
 
-    `comment_email`/`comment_by`: live-confirmed against a real Frappe 16
-    instance (2026-09-11) — `add_comment()`'s signature there requires
-    both as positional args with no default (`TypeError: add_comment()
-    missing 2 required positional arguments`), where the Frappe 15
-    version this connector was originally built against didn't. Sent as
+    `comment_email`/`comment_by`: on Frappe 16, `add_comment()`'s
+    signature requires both as positional args with no default
+    (`TypeError: add_comment() missing 2 required positional arguments`);
+    Frappe 15 doesn't require them. Always sent as
     this connector's own authenticated bot identity (resolved via
     `_bot_identity()`, already cached per tag) — the Comment's `content`
     string already carries the actual `requested_by` attribution, these
@@ -1386,7 +1365,7 @@ def _session_or_fallback(session_id: str) -> str:
     _audit_insert() swallows all exceptions by design, that failure is
     otherwise invisible (the row is just silently never written).
 
-    Also clamps to SESSION_FIELD_MAX_LEN. Live-observed: a chat-platform
+    Also clamps to SESSION_FIELD_MAX_LEN. A chat-platform
     session_id carried across a long-lived/resumed conversation can drift
     into something oversized or otherwise malformed (unlike requested_by/
     reference_doctype/etc, this value is never validated anywhere upstream
@@ -1488,12 +1467,12 @@ def _audit_submit(cfg: dict, log_name: str) -> bool:
     anything — the row's content is what matters for the audit trail;
     submission is a tamper-evidence nicety on top."""
     if not log_name:
-        # Live-observed: the insert this depends on
-        # already failed and warned (returns None), most commonly a 403 on
-        # Qkeee Bot Audit Log for a requester lacking the Qkeee Bot role.
-        # Without this guard, urllib.parse.quote(None) raises a confusing
-        # second warning ("quote_from_bytes() expected bytes") that masks
-        # the real, already-reported cause.
+        # The insert this depends on already failed and warned (returns
+        # None), most commonly a 403 on Qkeee Bot Audit Log for a
+        # requester lacking the Qkeee Bot role. Without this guard,
+        # urllib.parse.quote(None) raises a confusing second warning
+        # ("quote_from_bytes() expected bytes") that masks the real,
+        # already-reported cause.
         return False
     try:
         path = f"/api/resource/{urllib.parse.quote(AUDIT_LOG_DOCTYPE)}/{urllib.parse.quote(log_name)}"
@@ -1524,14 +1503,13 @@ def _log_read(cfg: dict, doctype: str, name: str, requested_by: str, session_id:
     read happened. Redacted the same way channel_metadata is, then
     truncated (see RESPONSE_PAYLOAD_MAX_LEN).
 
-    `internal=True` (F12, .scratch/hermes-erp-bot-reliability/spec.md):
-    skip logging regardless of doctype — set only by a caller that is
-    itself connector plumbing (an existence/metadata check made on behalf
-    of the gate, not a business-intent read on someone's behalf). This
-    replaced a blanket doctype-based exemption that used to also swallow
-    a genuine business read of User/Role (e.g. `query User`, `roles
-    <user>`) — see _LOG_READ_RECURSION_EXEMPT_DOCTYPES's own comment for
-    why that set stays deliberately narrower than AUDIT_EXEMPT_DOCTYPES."""
+    `internal=True`: skip logging regardless of doctype — set only by a
+    caller that is itself connector plumbing (an existence/metadata check
+    made on behalf of the gate, not a business-intent read on someone's
+    behalf). A doctype-based exemption alone would also swallow a genuine
+    business read of User/Role (e.g. `query User`, `roles <user>`) — see
+    _LOG_READ_RECURSION_EXEMPT_DOCTYPES's own comment for why that set
+    stays deliberately narrower than AUDIT_EXEMPT_DOCTYPES."""
     if internal or doctype in _LOG_READ_RECURSION_EXEMPT_DOCTYPES:
         return
     log_name = _audit_insert(cfg, {
@@ -1577,12 +1555,11 @@ def _log_gate_decision(tag: str, *, perm_type: str, doctype: str, docname: str, 
                         channel: str = None, channel_metadata: dict = None,
                         prompt_summary: str = None, latest_prompt: str = None) -> None:
     """Best-effort insert+submit Audit Log row for ONE requester-
-    permission-gate decision from _validate_prod_requester() (F11,
-    .scratch/hermes-erp-bot-reliability/spec.md) — covers both denials
-    and allows. Before this, a refused call left NO trace anywhere in
-    Qkeee Bot Audit Log: the gate raises before the read/write it's
-    guarding, and never logged itself either. A denial is exactly the
-    row a GRC review most wants to find.
+    permission-gate decision from _validate_prod_requester() — covers
+    both denials and allows. Without this, a refused call would leave no
+    trace anywhere in Qkeee Bot Audit Log: the gate raises before the
+    read/write it's guarding, and doesn't log itself otherwise. A denial
+    is exactly the row a GRC review most wants to find.
 
     Deliberately ONE row per gate call, not one per internal HTTP call
     the gate makes to reach its verdict (resource_exists, the
@@ -1780,7 +1757,7 @@ def mutate_resource(tag: str, doctype: str, action: str, payload: dict = None,
     """
     _VALID_ACTIONS = {"create", "update", "submit", "cancel", "delete"}
     if action not in _VALID_ACTIONS:
-        # Live-observed failure mode: a caller swaps the (doctype, action)
+        # Common failure mode: a caller swaps the (doctype, action)
         # positional args. Catching it here, before any side effect, gives
         # the actual likely cause instead of a symptom.
         hint = (
@@ -1837,23 +1814,16 @@ def mutate_resource(tag: str, doctype: str, action: str, payload: dict = None,
     # Pre-image for Update's field_diff — an extra GET, only when this
     # doctype is actually audited (skip for any AUDIT_EXEMPT_DOCTYPES
     # entry, and skip when the doctype isn't exempt but the target
-    # simply doesn't need diffing, e.g. Create has no "before").
-    #
-    # F13 (.scratch/hermes-erp-bot-reliability/spec.md), live-caught
-    # 2026-09-13 against demo.qkeee.in: this call used to omit
-    # `requested_by` entirely, so get_resource()'s own
-    # _validate_prod_requester("read") gate refused it EVERY time
-    # (missing requester is refused unconditionally, no exception) —
-    # caught here and silently discarded via `except ConnectorError`,
-    # so `payload_before` (and therefore `field_diff`) has been null on
-    # every single Update this connector has ever made against a
-    # non-exempt doctype, for this feature's entire life. Passing the
-    # write's own `requested_by` through fixes it: the pre-image read is
-    # a real, legitimate access made on the requester's behalf (not
-    # connector plumbing — no `internal=True` here), so it should be
-    # gated and logged exactly like any other read, attributed to the
-    # same requester and carrying the same context as the write it's
-    # supporting.
+    # simply doesn't need diffing, e.g. Create has no "before"). Passes
+    # the write's own `requested_by` through (not `internal=True`): the
+    # pre-image read is a real, legitimate access made on the requester's
+    # behalf, so it is gated by _validate_prod_requester() and logged
+    # exactly like any other read, attributed to the same requester and
+    # carrying the same context as the write it's supporting. A
+    # ConnectorError here (e.g. the requester lacks read permission on
+    # this doctype) is swallowed — `payload_before` stays None and the
+    # write proceeds without a `field_diff` rather than failing the write
+    # over a diagnostic-only diff.
     payload_before = None
     if action == "update" and doctype not in AUDIT_EXEMPT_DOCTYPES and name:
         try:
@@ -1903,8 +1873,8 @@ def mutate_resource(tag: str, doctype: str, action: str, payload: dict = None,
     if isinstance(result, dict):
         # Surfaced so a caller (hermes) can proactively flag degraded audit
         # logging to the user instead of relying on someone reading stderr —
-        # live-observed: a stale/malformed session_id silently drops Audit
-        # Log rows for days before anyone notices. "exempt" (doctype in
+        # a stale/malformed session_id can silently drop Audit Log rows
+        # for days before anyone notices. "exempt" (doctype in
         # AUDIT_EXEMPT_DOCTYPES) and "ok" are both healthy; anything else
         # means this write is NOT in the audit trail.
         if doctype in AUDIT_EXEMPT_DOCTYPES:
@@ -1942,9 +1912,8 @@ def gated_mutate_resource(tag: str, doctype: str, action: str, payload: dict = N
     or an old one) is refused here, in code, not just by prompt
     discipline.
 
-    `user_confirmation_text` (F5, .scratch/hermes-erp-bot-reliability/
-    spec.md): the literal text of the user's own reply confirming the
-    rendered draft. Required, and must contain
+    `user_confirmation_text`: the literal text of the user's own reply
+    confirming the rendered draft. Required, and must contain
     `confirm_token.confirmation_code(confirmation_token)` (the short code
     the render step is expected to have shown the user) — see
     UnconfirmedByUserError and confirmation_code()'s own docstring for
@@ -1975,7 +1944,7 @@ def gated_mutate_resource(tag: str, doctype: str, action: str, payload: dict = N
     expected_code = confirmation_code(confirmation_token)
     if not user_confirmation_text:
         raise UnconfirmedByUserError(
-            f"Refusing {action} on '{doctype}': gated_mutate_resource now requires "
+            f"Refusing {action} on '{doctype}': gated_mutate_resource requires "
             f"user_confirmation_text — the literal text of the user's own reply. Show them "
             f"confirmation_code {expected_code!r} in the rendered draft, ask them to include "
             f"it in their confirmation, and pass their actual reply text here. Do not "
@@ -2205,7 +2174,7 @@ def _cli():
     gm.add_argument("--user-confirmation-text", required=True,
                      help="literal text of the user's own reply confirming the rendered draft "
                           "— must contain confirm_token.confirmation_code(confirmation_token); "
-                          "see gated_mutate_resource()'s docstring (F5)")
+                          "see gated_mutate_resource()'s docstring")
 
     args = p.parse_args()
 
@@ -2264,12 +2233,12 @@ def _cli():
                                                prompt_summary=args.prompt_summary,
                                                latest_prompt=args.latest_prompt), indent=2))
         elif args.command == "roles":
-            # Not in the --requested-by-mandatory list above (deliberate,
-            # unchanged): this is the RBAC-computing primitive itself, so
-            # it can't depend on having already passed the gate it feeds.
+            # Not in the --requested-by-mandatory list above (deliberate):
+            # this is the RBAC-computing primitive itself, so it can't
+            # depend on having already passed the gate it feeds.
             # requested_by here is attribution only (who's asking to see
             # the roles), threaded through so a real business-intent
-            # lookup gets a real Audit Log row (F12) — not required.
+            # lookup gets a real Audit Log row — not required.
             print(json.dumps(get_user_roles(args.tag, args.user,
                                              requested_by=effective_requested_by,
                                              session_id=args.session_id,

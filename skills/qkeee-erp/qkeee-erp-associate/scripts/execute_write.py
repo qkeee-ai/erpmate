@@ -3,29 +3,18 @@
 qkeee-erp-associate write CLI — the one entry point for every create/
 update/submit/cancel/delete this skill issues, domain-scoped or not.
 
-## Why this exists (F1, .scratch/hermes-erp-bot-reliability/spec.md)
+## Why this file exists
 
-Before this file, there was no single write path: a domain-scoped write
-needed `from domains import <slug>` first (to trigger
-register_domain_allowlist() at import time — `core/client.py`'s own bare
-`mutate --domain <slug>` CLI subcommand can't do this itself, since it
-never imports any `domains/*.py` module; run standalone, `--domain
-procurement` 404s with "domain has no registered ALLOWED_WRITE_DOCTYPES"
-even though `domains/procurement.py` genuinely declares one). The
-practical result, live-observed on dev-hermes 2026-09-11: an agent
-hand-writes a fresh Python script for every single write instead
-(`from domains import procurement; procurement.mutate(...)`) — and a
-freshly hand-written script is exactly where `session_id`/
-`channel_metadata`/`latest_prompt` keep getting left blank (hardcoded
-`SID = ""`, no `channel_metadata` dict ever built), because nothing
-forces the same context-resolution code to run twice the same way.
-
-This file removes the reason to hand-write that script: it imports every
-`domains/*.py` module up front (so any `--domain` value's allowlist is
-registered before the write fires, regardless of which one), and it
-requires the audit-context flags loudly rather than letting them go
-quietly missing — see `_cli()`'s pre-flight warnings below. It does not
-change `core/client.py` itself; it's a caller, same tier as `discover.py`.
+`core/client.py`'s own bare `mutate --domain <slug>` CLI subcommand
+never imports any `domains/*.py` module, so run standalone it 404s with
+"domain has no registered ALLOWED_WRITE_DOCTYPES" even when that domain
+module genuinely declares one — `register_domain_allowlist()` only runs
+at import time. This file imports every `domains/*.py` module up front
+(so any `--domain` value's allowlist is registered before the write
+fires, regardless of which one), and requires the audit-context flags
+loudly rather than letting them go quietly missing — see `_cli()`'s
+pre-flight warnings below. It does not change `core/client.py` itself;
+it's a caller, same tier as `discover.py`.
 
 ## Two write shapes, one flag decides which
 
@@ -33,8 +22,7 @@ change `core/client.py` itself; it's a caller, same tier as `discover.py`.
   module's own `mutate()`, NOT `core.client.mutate_resource()` directly.
   This matters: a domain module's `mutate()` is where that domain layers
   its own doctype-specific rules on top of the generic allowlist gate —
-  procurement's Supplier-KYC-completeness check (F2, .scratch/
-  hermes-erp-bot-reliability/spec.md) is the first example. Calling
+  procurement's Supplier-KYC-completeness check is one example. Calling
   `mutate_resource(domain=...)` directly would skip that rule entirely;
   going through the domain module's `mutate()` is what makes it
   unbypassable regardless of which caller fires the write. `<slug>` must
@@ -42,50 +30,47 @@ change `core/client.py` itself; it's a caller, same tier as `discover.py`.
   fixed_assets, hr_payroll, inventory, mis, procurement, sales,
   system_admin).
 - `--domain` omitted → `core.client.gated_mutate_resource(...)` — the
-  advisory-token path for a doctype no domain owns (Item today — see F3/
-  issue 01). `--confirmation-token`/`--issued-at` are required in this
-  shape; `gated_mutate_resource()` itself refuses to proceed without
-  them. So is `--user-confirmation-text` now (F5, .scratch/
-  hermes-erp-bot-reliability/spec.md) — the literal text of the user's
-  own reply, which must contain the confirmation code
-  `confirm_token.py`'s CLI prints alongside the token. This is what
-  actually ties execution to a human having seen the rendered draft; the
-  token match alone only proves the payload wasn't altered since render
-  — see `confirm_token.confirmation_code()`'s own docstring for the
-  honest limits of what this does and doesn't prove.
+  advisory-token path for a doctype no domain owns (Item today).
+  `--confirmation-token`/`--issued-at` are required in this shape;
+  `gated_mutate_resource()` itself refuses to proceed without them. So is
+  `--user-confirmation-text` — the literal text of the user's own reply,
+  which must contain the confirmation code `confirm_token.py`'s CLI
+  prints alongside the token. This is what actually ties execution to a
+  human having seen the rendered draft; the token match alone only
+  proves the payload wasn't altered since render — see
+  `confirm_token.confirmation_code()`'s own docstring for the honest
+  limits of what this does and doesn't prove.
 
 ## Audit context is loud here, not silent
 
 `core/client.py`'s own `mutate` CLI subcommand silently substitutes a
 synthetic `local-<timestamp>` session_id when `--session-id` is omitted
 (see `_cli()`'s `if ... not args.session_id: args.session_id =
-_session_or_fallback(None)`) — the exact mechanism that let F1 happen
-without a trace. This script does NOT hide that substitution: omitting
-`--session-id`, `--channel-metadata`, or `--latest-prompt` prints a WARN
-to stderr naming exactly what's missing, before the write fires. Passing
-them is still not code-enforced (F1's decided course was this CLI +
-doc instruction, not a hard `MissingContextError` — see spec.md F1) —
-the loud warning is the middle ground: an agent can still choose to
-proceed, but never by accident or unnoticed.
+_session_or_fallback(None)`). This script does NOT hide that
+substitution: omitting `--session-id`, `--channel-metadata`, or
+`--latest-prompt` prints a WARN to stderr naming exactly what's missing,
+before the write fires. Passing them is still not code-enforced — the
+loud warning is the middle ground: an agent can still choose to proceed,
+but never by accident or unnoticed.
 
 Every result also gets its `_audit_log_status` checked here and, when
 it's anything other than "ok"/"exempt", printed as a second, separate
 warning — `00-conventions.md`'s GRC baseline already says to do this;
 this script does it uniformly so no caller has to remember to.
 
-## `--purchase-sourced-item` (F6, F9)
+## `--purchase-sourced-item`
 
 A thin, Item-specific conditional, not generic write-path logic: when
 `--doctype Item --action create` and this flag is set, the payload is run
 through `item_write_helpers.apply_purchase_sourced_item_defaults()` before
-the write fires — defaults `is_purchase_item=1, is_sales_item=0` (F9:
-nothing in a purchase document supports "the org resells this"), and
-refuses a bare `standard_rate` key outright (F6: that auto-creates a
-Standard SELLING Item Price from what was actually a purchase cost — see
-`item_write_helpers.py`'s own docstring for the fix). See that file
-rather than this one for the actual logic.
+the write fires — defaults `is_purchase_item=1, is_sales_item=0` (nothing
+in a purchase document supports "the org resells this"), and refuses a
+bare `standard_rate` key outright (setting `standard_rate` bare on Item
+create auto-creates a Standard SELLING Item Price in ERPNext — wrong for
+a purchase-sourced item; see `item_write_helpers.py`'s own docstring for
+the fix). See that file rather than this one for the actual logic.
 
-## Schema-first attribute mapping (issue 01, F3/F4 fold-in)
+## Schema-first attribute mapping
 
 Every `--action create`/`update`, for every `--doctype`, unconditionally
 (not opt-in the way `--purchase-sourced-item` is): before dispatch,
@@ -100,7 +85,15 @@ refuse) if the schema fetch itself fails; hard-refuses only when a
 live schema. See `schema_mapping.py`'s own module docstring for the full
 design rationale (why this lives here and not inside
 `mutate_resource()`/`gated_mutate_resource()`, the fuzzy-match
-confirmation story, the F2/F4 interaction decisions).
+confirmation story).
+
+`--kyc`'s own `address`/`contact` sub-payloads get this too, mapped
+separately against Address's/Contact's own live schema before dispatch —
+the top-level `_apply_schema_mapping()` call only ever covers the
+Supplier payload itself, and `--kyc` is forwarded to
+`procurement.mutate()` as its own argument, not folded into `--payload`.
+No `--staged-fields`/`--confirmed-mappings` support for the KYC
+sub-payload; see `_apply_kyc_schema_mapping()`.
 """
 
 import argparse
@@ -160,52 +153,86 @@ def _warn(msg: str) -> None:
 
 
 def _apply_schema_mapping(args, payload: dict, effective_requested_by: str, channel_metadata: dict,
-                           staged_fields: list, confirmed_mappings: dict) -> dict:
-    """issue 01 (schema-first attribute mapping, .scratch/hermes-erp-bot-
-    reliability/issues/01-schema-first-attribute-mapping.md) — runs before
-    every create/update dispatch below. See schema_mapping.py's own module
-    docstring for why this lives here rather than inside
-    mutate_resource()/gated_mutate_resource(). Loud-not-blocking for a
-    schema-fetch failure or a suggested/unmatched field (mirrors
+                           staged_fields: list, confirmed_mappings: dict, *, doctype: str = None) -> dict:
+    """Runs schema-first attribute mapping before every create/update
+    dispatch below. See schema_mapping.py's own module docstring for why
+    this lives here rather than inside mutate_resource()/
+    gated_mutate_resource(). Loud-not-blocking for a schema-fetch failure
+    or a suggested/unmatched field (mirrors
     `_preflight_context_check()`'s posture); hard-refuses only on a
-    `high_risk` field — a staged field that's both low-confidence and
-    unmatched against the live schema (F4's fold-in) — via ConnectorError,
-    caught by this file's existing top-level ConnectorError handler."""
+    `high_risk` field — a field that's both low-confidence and unmatched
+    against the live schema — via ConnectorError, caught by this file's
+    existing top-level ConnectorError handler.
+
+    `doctype` defaults to `args.doctype` — the top-level `--payload`'s own
+    target doctype. `_apply_kyc_schema_mapping()` below passes "Address"/
+    "Contact" explicitly instead, to map the `--kyc` sub-payload's own
+    fields against THEIR live schema rather than Supplier's."""
+    doctype = doctype or args.doctype
     mapping = schema_mapping.map_payload_for_write(
-        args.tag, args.doctype, payload, requested_by=effective_requested_by,
+        args.tag, doctype, payload, requested_by=effective_requested_by,
         staged_fields=staged_fields, confirmed_mappings=confirmed_mappings,
         session_id=args.session_id, domain_code=args.domain_code,
         channel=args.channel, channel_metadata=channel_metadata,
         prompt_summary=args.prompt_summary, latest_prompt=args.latest_prompt,
     )
     if mapping["status"] == "unavailable":
-        _warn(f"schema-first field mapping unavailable for '{args.doctype}' on tag '{args.tag}' "
-              f"({mapping['detail']}) — proceeding with the payload as given, unmapped. See "
-              f"issue 01, .scratch/hermes-erp-bot-reliability/issues/"
-              f"01-schema-first-attribute-mapping.md.")
+        _warn(f"schema-first field mapping unavailable for '{doctype}' on tag '{args.tag}' "
+              f"({mapping['detail']}) — proceeding with the payload as given, unmapped.")
         return payload
     if mapping["suggested_mappings"]:
-        _warn(f"{len(mapping['suggested_mappings'])} field(s) matched a live schema field only "
-              f"via a synonym hint, NOT applied without confirmation: {mapping['suggested_mappings']!r} "
-              f"— re-run with --confirmed-mappings including the ones the user confirms.")
+        _warn(f"{len(mapping['suggested_mappings'])} field(s) on '{doctype}' matched a live schema "
+              f"field only via a synonym hint, NOT applied without confirmation: "
+              f"{mapping['suggested_mappings']!r} — re-run with --confirmed-mappings including the "
+              f"ones the user confirms.")
     if mapping["unmatched"]:
-        _warn(f"field(s) with no matching live schema field on '{args.doctype}', dropped from "
+        _warn(f"field(s) with no matching live schema field on '{doctype}', dropped from "
               f"the payload actually sent: {mapping['unmatched']!r}")
     if mapping["status"] == "high_risk":
         raise ConnectorError(
-            f"Refusing {args.action} on '{args.doctype}': staged field(s) "
+            f"Refusing {args.action} on '{doctype}': staged field(s) "
             f"{mapping['high_risk']!r} are BOTH low-confidence AND unmatched against the live "
-            f"schema — the highest-risk combination (issue 01's F4 fold-in). Resolve manually "
-            f"with the user (correct the source value, or supply the right live fieldname via "
-            f"--confirmed-mappings) before retrying."
+            f"schema — the highest-risk combination. Resolve manually with the user (correct "
+            f"the source value, or supply the right live fieldname via --confirmed-mappings) "
+            f"before retrying."
         )
     return mapping["payload"]
 
 
+def _apply_kyc_schema_mapping(args, kyc: dict, effective_requested_by: str, channel_metadata: dict) -> dict:
+    """The Supplier-KYC flow builds an Address/Contact sub-payload
+    (`--kyc`) that procurement.py's `_create_linked_kyc_record()` writes
+    via `core_client.mutate_resource()` directly — never through this
+    file's own top-level `--payload` path, so it never gets
+    `_apply_schema_mapping()`'s schema-first field mapping otherwise (the
+    call above only ever covers the Supplier's own fields; `kyc` is
+    forwarded separately as `domain_kwargs`, never through
+    `schema_mapping.map_payload_for_write()` at all). Maps
+    `kyc["address"]`/`kyc["contact"]` against Address's/Contact's own
+    live schema BEFORE dispatch, same exact/normalized-match behavior as
+    `_apply_schema_mapping()` above — deliberately no
+    `--staged-fields`/`--confirmed-mappings` support here: the KYC
+    sub-payload has no staged-report shape, and folding a fuzzy-match
+    confirmation for two different doctypes through one shared top-level
+    CLI flag risks confirming the wrong mapping against the wrong
+    doctype. Because `staged_fields` is never given here, `map_payload_
+    for_write()` can never return `high_risk` for this call (that status
+    is staged_fields-only, see schema_mapping.py) — only the unavailable/
+    ok/suggested/unmatched outcomes apply, all warn-not-refuse."""
+    result = dict(kyc)
+    for key, sub_doctype in (("address", "Address"), ("contact", "Contact")):
+        if not result.get(key):
+            continue
+        result[key] = _apply_schema_mapping(
+            args, result[key], effective_requested_by, channel_metadata,
+            staged_fields=None, confirmed_mappings=None, doctype=sub_doctype,
+        )
+    return result
+
+
 def _preflight_context_check(args) -> None:
     """Loud, not blocking — see module docstring. Names exactly what's
-    missing so the caller can't miss it the way F1's hand-written scripts
-    did."""
+    missing so the caller can't miss it."""
     if not args.session_id:
         _warn("--session-id not given — Qkeee Bot Audit Log will fall back to a synthetic "
               "local-<timestamp> session, unrelated to the real platform thread. Resolve the "
@@ -213,8 +240,8 @@ def _preflight_context_check(args) -> None:
               "baseline) and pass it explicitly.")
     if not args.channel_metadata:
         _warn("--channel-metadata not given — the audit row won't carry the platform space/"
-              "thread/channel id this write came from (F1, .scratch/hermes-erp-bot-reliability/"
-              "spec.md). Pass the channel's own tracing detail as a JSON object, e.g. "
+              "thread/channel id this write came from. Pass the channel's own tracing detail "
+              "as a JSON object, e.g. "
               '\'{"space": "spaces/AAQ...", "thread": "threads/HzG..."}\'.')
     if not args.latest_prompt:
         _warn("--latest-prompt not given — only --prompt-summary (a paraphrase) will be on the "
@@ -226,7 +253,7 @@ def _cli():
     p = argparse.ArgumentParser(
         description="qkeee-erp-associate write CLI — the one entry point for every "
                     "create/update/submit/cancel/delete, domain-scoped or not. See this "
-                    "file's own module docstring for why it exists (F1)."
+                    "file's own module docstring for why it exists."
     )
     p.add_argument("--tag", required=True, help="environment tag, from qkeee_erp.active_env")
     p.add_argument("--mode", required=True, choices=["read-only", "read-write"],
@@ -251,8 +278,7 @@ def _cli():
     p.add_argument("--user-confirmation-text",
                    help="required when --domain is omitted (gated_mutate_resource path): literal "
                         "text of the user's own reply, must contain confirm_token."
-                        "confirmation_code(confirmation_token) — see F5, .scratch/"
-                        "hermes-erp-bot-reliability/spec.md. Not applicable to a domain-scoped "
+                        "confirmation_code(confirmation_token). Not applicable to a domain-scoped "
                         "write's own submit/cancel/delete token gate.")
     p.add_argument("--user-approved", action="store_true",
                    help="pass only when this write's confirm stage genuinely ran with the user "
@@ -271,23 +297,23 @@ def _cli():
     p.add_argument("--latest-prompt", help="verbatim most-recent user prompt from the driving chat")
     p.add_argument("--kyc", help='procurement.py-only: JSON object, e.g. \'{"address": {...}, '
                         '"contact": {...}}\' — required (or --kyc-waiver-confirmed) for a '
-                        "Supplier create; see procurement.md's KYC write order (F2)")
+                        "Supplier create; see procurement.md's KYC write order")
     p.add_argument("--kyc-waiver-confirmed", action="store_true",
                    help="procurement.py-only: pass only when the user has explicitly confirmed "
                         "proceeding with a Supplier create without KYC")
     p.add_argument("--purchase-sourced-item", action="store_true",
                    help="Item-only, --action create: apply item_write_helpers."
                         "apply_purchase_sourced_item_defaults() to --payload before writing — "
-                        "defaults is_purchase_item=1/is_sales_item=0 (F9) and refuses a bare "
-                        "standard_rate key (F6). See item_write_helpers.py.")
+                        "defaults is_purchase_item=1/is_sales_item=0 and refuses a bare "
+                        "standard_rate key. See item_write_helpers.py.")
     p.add_argument("--staged-fields",
-                   help="issue 01 (schema-first attribute mapping), --action create/update only: "
+                   help="schema-first attribute mapping, --action create/update only: "
                         "JSON array of doc-extraction's staged-report entries, e.g. "
                         '\'[{"field": "HSN", "value": "84713090", "confidence": "high"}]\' — '
                         "matched against the live doctype schema instead of --payload's own keys "
                         "when given. See schema_mapping.py.")
     p.add_argument("--confirmed-mappings",
-                   help="issue 01: JSON object {candidate_key: live_fieldname} confirming one or "
+                   help="JSON object {candidate_key: live_fieldname} confirming one or "
                         "more schema_mapping.py suggested_mappings entries the user has explicitly "
                         "signed off on — the only way a fuzzy/synonym-matched field ever reaches "
                         "the payload actually sent.")
@@ -326,6 +352,8 @@ def _cli():
         try:
             payload = _apply_schema_mapping(args, payload, effective_requested_by, channel_metadata,
                                              staged_fields, confirmed_mappings)
+            if kyc_applicable and kyc:
+                kyc = _apply_kyc_schema_mapping(args, kyc, effective_requested_by, channel_metadata)
         except ConnectorError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(1)
@@ -361,8 +389,7 @@ def _cli():
             if not args.user_confirmation_text:
                 p.error("--user-confirmation-text is required when --domain is omitted "
                         "(gated_mutate_resource path) — the literal text of the user's own "
-                        "reply, containing the confirmation_code shown in the rendered draft. "
-                        "See F5, .scratch/hermes-erp-bot-reliability/spec.md.")
+                        "reply, containing the confirmation_code shown in the rendered draft.")
             result = gated_mutate_resource(
                 args.tag, args.doctype, args.action,
                 confirmation_token=args.confirmation_token, issued_at=args.issued_at,

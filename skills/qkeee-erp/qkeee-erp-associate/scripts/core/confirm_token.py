@@ -110,14 +110,14 @@ def confirmation_code(token: str) -> str:
     """A short, human-typeable code derived from an advisory_write_token()
     — 6 uppercase hex characters, e.g. "3F0A9C".
 
-    What this closes, and what it deliberately doesn't (F5, .scratch/
-    hermes-erp-bot-reliability/spec.md): advisory_write_token() alone is
-    unsalted and computable by anyone, including the same process that
-    then verifies it — it proves a payload matches what was rendered,
-    never that a human actually reviewed that render. This code is not
-    cryptographically secret either (deriving it from the token an
-    agent already holds is trivial) — it does not defend against an
-    agent that deliberately fabricates a user reply. What it does do:
+    What this closes, and what it deliberately doesn't:
+    advisory_write_token() alone is unsalted and computable by anyone,
+    including the same process that then verifies it — it proves a
+    payload matches what was rendered, never that a human actually
+    reviewed that render. This code is not cryptographically secret
+    either (deriving it from the token an agent already holds is
+    trivial) — it does not defend against an agent that deliberately
+    fabricates a user reply. What it does do:
     it turns "pass the token back" (something an agent can do purely
     from its own state, with no human involved at any point) into "get
     this specific short code into an actual inbound message from the
@@ -184,7 +184,7 @@ def _cli():
         "_note": "For a gated_mutate_resource() (domain-less) write: show confirmation_code to "
                  "the user in the rendered draft and ask them to include it in their reply — "
                  "gated_mutate_resource() additionally requires that code to appear in "
-                 "user_confirmation_text now (F5). Not required for a domain's own "
+                 "user_confirmation_text. Not required for a domain's own "
                  "submit/cancel/delete token gate.",
     }, indent=2))
 

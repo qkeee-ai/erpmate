@@ -1,12 +1,12 @@
 # Domain: doc-extraction (field extraction, no writes)
 
-**Not a connector domain** — there is no
-`scripts/domains/doc_extraction.py` and no `ALLOWED_WRITE_DOCTYPES`
-because this domain has no write path at all, structurally, not by
-allowlist. Turns attached documents — including scanned/photographed
-images — or a shared URL into structured fields shaped for a target
-ERPNext doctype (Supplier, Purchase Invoice, Job Applicant, Employee),
-then stops: it hands back a staged report, never a written record.
+**Not a connector domain** — there is no `scripts/domains/doc_extraction.py`
+and no `ALLOWED_WRITE_DOCTYPES` because this domain has no write path at
+all, structurally, not by allowlist. Turns attached documents — including
+scanned/photographed images — or a shared URL into structured fields
+shaped for a target ERPNext doctype (Supplier, Purchase Invoice, Job
+Applicant, Employee), then stops: it hands back a staged report, never a
+written record.
 
 **Scope note:** this domain's inputs are attached PDFs/DOCX/XLSX/images.
 URL-based extraction is a materially different capability — fetching
@@ -26,8 +26,8 @@ or not.
   output.** Output always lands as a staged, human-reviewable report
   first — this holds regardless of `qkeee_erp.mode`. Not a self-imposed
   restraint on a capability this domain has and chooses not to use: this
-  domain has **no ERPNext connector at all** — no `core.client` import, no
-  `mutate_resource()` call, nothing that can reach ERPNext's write
+  domain has **no ERPNext connector at all** — no `core.client` import,
+  no `mutate_resource()` call, nothing that can reach ERPNext's write
   endpoints. Writing to ERPNext from here isn't refrained from, it's
   structurally impossible. This is the one domain in the library not
   gated by `qkeee_erp.mode` at all — its safety property is structural,
@@ -87,22 +87,20 @@ or not.
    report itself, not just something the agent is trusted to remember to
    mention.
 
-   **Known gap (F4, .scratch/hermes-erp-bot-reliability/spec.md):** no
-   dedicated `render_*.py` staged-report script exists in this tree yet —
-   this step has historically been done inline, which is exactly how F4
-   happened (the confidence-rating/reconciliation-check requirement
-   documented here simply never ran). The confidence/value-key refusal
-   rule IS code-enforced now, one step downstream: when this domain's
-   output is handed to a write path via `execute_write.py --staged-fields`,
-   `schema_mapping.match_staged_report()` (issue 01,
-   `.scratch/hermes-erp-bot-reliability/issues/01-schema-first-attribute-
-   mapping.md`) refuses with `MalformedStagedReportError` on any field
-   missing `confidence` or `value`, and additionally flags a field that's
-   both `confidence: "low"` and unmatched against the live doctype schema
-   as high-risk before any write can proceed. That does not replace a real
-   render step for the report itself (still owed) — it means a downstream
-   write can no longer silently consume a malformed staged report even
-   though nothing currently code-enforces the report's own construction.
+   **Known gap:** no dedicated `render_*.py` staged-report script exists
+   in this tree yet — this step is currently done inline, so the
+   confidence-rating/reconciliation-check requirement above is prompt
+   discipline here, not code-enforced. One step downstream it IS
+   code-enforced: when this domain's output is handed to a write path via
+   `execute_write.py --staged-fields`, `schema_mapping.match_staged_report()`
+   refuses with `MalformedStagedReportError` on any field missing
+   `confidence` or `value`, and additionally flags a field that's both
+   `confidence: "low"` and unmatched against the live doctype schema as
+   high-risk before any write can proceed. That doesn't replace a real
+   render step for the report itself (still owed) — it means a
+   downstream write can no longer silently consume a malformed staged
+   report even though nothing currently code-enforces the report's own
+   construction.
 7. **Hand the staged report back** to the user, or to the calling domain
    if invoked mid-task (e.g. from `domains/procurement.md`'s supplier
    onboarding). The receiving domain is responsible for its own Confirm →

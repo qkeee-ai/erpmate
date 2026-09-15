@@ -1,6 +1,6 @@
 # Domain: fixed-assets (Asset lifecycle)
 
-Code lives in `scripts/domains/fixed_assets.py`
+Code: `scripts/domains/fixed_assets.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Asset", "Asset Movement", "Asset Repair")`),
 which also carries this domain's genuine connector logic:
 `mutate_resource_with_concurrency()`, `call_whitelisted_method()` (see
@@ -25,19 +25,18 @@ of or scrapping an asset, running a physical asset verification.
   rendered confirmation is required, one "yes" never covers both the
   concept and the specifics.
 - **A single depreciation-run call can post more than one period at
-  once** — confirmed live: ERPNext's `make_depreciation_entry` posts every
-  currently-overdue period on a schedule in one call, not one period at a
-  time. Always show exactly how many periods and how much total
-  depreciation are about to post before calling it.
+  once.** ERPNext's `make_depreciation_entry` posts every currently-
+  overdue period on a schedule in one call, not one period at a time.
+  Always show exactly how many periods and how much total depreciation
+  are about to post before calling it.
 - **A transfer's stated source location must be verified against the
-  asset's actual current location before it's staged as ready** —
-  confirmed live: ERPNext does not cross-check `Asset Movement.
-  source_location` against the asset's real `Asset.location` at
-  create/submit time, so a fabricated or stale source would be silently
-  accepted. Fetch the asset's real current `location` immediately before
-  rendering (not a cached value); refuse the draft if the declared
-  `source_location` doesn't match, or if the location snapshot is older
-  than 300 seconds.
+  asset's actual current location before it's staged as ready.** ERPNext
+  does not cross-check `Asset Movement.source_location` against the
+  asset's real `Asset.location` at create/submit time, so a fabricated or
+  stale source would be silently accepted. Fetch the asset's real current
+  `location` immediately before rendering (not a cached value); refuse
+  the draft if the declared `source_location` doesn't match, or if the
+  location snapshot is older than 300 seconds.
 
 ## Procedure
 
@@ -69,11 +68,10 @@ of or scrapping an asset, running a physical asset verification.
    `schedule_date <= today` and an empty `journal_entry` (the "pending"
    rows) first — never guess at what's due. Use the asset's current book
    value from `Asset.finance_books[N].value_after_depreciation`, NOT the
-   top-level `Asset.value_after_depreciation` field, which is confirmed
-   live to NOT update after a run (a stale-field trap). Only after both
-   the render and the second confirmation, call
-   `call_whitelisted_method()` with `"make_depreciation_entry"` and the
-   printed `confirmation_token`.
+   top-level `Asset.value_after_depreciation` field, which does NOT
+   update after a run (a stale-field trap). Only after both the render
+   and the second confirmation, call `call_whitelisted_method()` with
+   `"make_depreciation_entry"` and the printed `confirmation_token`.
 5. **Asset transfer**: see the non-negotiable above for the location
    freshness check. Receipt items are exempt (no prior location to
    check). Present, confirm, `create` (lands `docstatus 0`).

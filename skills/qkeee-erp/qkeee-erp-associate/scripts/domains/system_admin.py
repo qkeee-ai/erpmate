@@ -241,10 +241,10 @@ def get_roles_and_doctypes(tag: str) -> dict:
 def get_permissions(tag: str, doctype: str) -> list:
     """Read-only: every permission row (standard DocPerm rows merged with
     any Custom DocPerm override rows) for a DocType, exactly as the Role
-    Permission Manager page displays them. Confirmed live: querying
-    DocPerm directly via query_resource() fails with a PermissionError —
-    this whitelisted method is the only confirmed working read path for a
-    DocType's permission matrix."""
+    Permission Manager page displays them. Querying DocPerm directly via
+    query_resource() fails with a PermissionError — this whitelisted
+    method is the only working read path for a DocType's permission
+    matrix."""
     cfg = get_env_config(tag)
     result = _request(cfg, "GET", PERMISSION_MANAGER_METHODS["get_permissions"], params={"doctype": doctype})
     return result.get("message", [])
@@ -451,13 +451,13 @@ def gated_config_mutate(tag: str, kind: str, doctype: str, identifier: str, reas
 
 
 def get_scheduler_status(tag: str) -> dict:
-    """Read-only system health signal — confirmed live
+    """Read-only system health signal
     (frappe.utils.scheduler.get_scheduler_status, returns
     {"status": "active"} or "inactive"/"paused"). Combine with Scheduled
     Job Type (query_resource, last_execution/stopped fields) and Error
     Log (query_resource, most recent rows) for the full System health
-    check capability — the RQ Job doctype is NOT usable via this REST API
-    (confirmed live 500 TypeError, unrelated to auth/permissions), so live
+    check capability — the RQ Job doctype is not usable via this REST API
+    (returns a 500 TypeError, unrelated to auth/permissions), so live
     background-job-queue depth cannot be read this way; report that gap
     explicitly rather than silently omitting queue depth from a health
     report."""

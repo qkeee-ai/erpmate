@@ -1,6 +1,6 @@
 # Domain: procurement (Supplier, Address, Contact, PO, RFQ)
 
-Code lives in `scripts/domains/procurement.py`
+Code: `scripts/domains/procurement.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Supplier", "Address", "Contact", "Purchase
 Order", "Request for Quotation", "Supplier Quotation")`).
 
@@ -18,32 +18,29 @@ checking a supplier's performance.
 
 - **Never create a live Supplier record with incomplete mandatory KYC/
   bank fields — code-enforced, not just this document.** This domain's
-  KYC bar is stricter than ERPNext's own (confirmed live: ERPNext's
-  hard-mandatory Supplier fields are only `supplier_name` +
-  `supplier_type`) — the fuller bar (identity/classification, tax ID,
-  bank/payable details) must be enforced before a draft is marked
-  "ready." Incomplete extractions must be flagged, never silently filled
-  with a placeholder. `procurement.mutate(..., "Supplier", "create")`
-  refuses outright (`IncompleteSupplierKYCError`) unless the call carries
-  either `kyc={"address": {...}}` (see "Supplier KYC write order" below)
-  or an explicit `kyc_waiver_confirmed=True` — a live session let this
-  slip once already by treating it as optional scope (F2, `.scratch/
-  hermes-erp-bot-reliability/spec.md`); this is the backstop for that,
-  matching how the other non-negotiables in `00-conventions.md` are
-  code-enforced rather than left to prompt discipline.
+  KYC bar is stricter than ERPNext's own: ERPNext's hard-mandatory
+  Supplier fields are only `supplier_name` + `supplier_type`; the fuller
+  bar here (identity/classification, tax ID, bank/payable details) must
+  be enforced before a draft is marked "ready." Incomplete extractions
+  must be flagged, never silently filled with a placeholder.
+  `procurement.mutate(..., "Supplier", "create")` refuses outright
+  (`IncompleteSupplierKYCError`) unless the call carries either
+  `kyc={"address": {...}}` (see "Supplier KYC write order" below) or an
+  explicit `kyc_waiver_confirmed=True` — code-enforced, matching how the
+  other non-negotiables in `00-conventions.md` are backed by code rather
+  than left to prompt discipline.
 - **Tax ID lives on Address, never on Supplier — do not retry a
   `gstin`/`tax_id` field write against Supplier itself.** ERPNext's
   India-Compliance GSTIN field (and tax ID generally, per country) is a
   field on the **Address** doctype, linked back to Supplier via Frappe's
-  standard Dynamic Link `links` child table — not a field on Supplier.
-  Live-confirmed the wrong way once (F2): a `gstin` write against
-  Supplier was silently dropped (Frappe ignores unrecognized fields
-  rather than rejecting them), and the session concluded — incorrectly —
-  that GSTIN "would need a custom field on Supplier." It doesn't; it
-  needs an Address record, created and linked the normal way. Confirm the
-  live field name for this instance via `discover.py meta "Address"`
-  (`gstin`, `tax_id`, `pan`, or an instance-specific custom field — never
-  assumed) before building the `kyc.address` payload below.
+  standard Dynamic Link `links` child table — not a field on Supplier. A
+  `gstin` write against Supplier is silently dropped (Frappe ignores
+  unrecognized fields rather than rejecting them), which can look like
+  GSTIN "needs a custom field on Supplier." It doesn't — it needs an
+  Address record, created and linked the normal way. Confirm the live
+  field name for this instance via `discover.py meta "Address"` (`gstin`,
+  `tax_id`, `pan`, or an instance-specific custom field — never assumed)
+  before building the `kyc.address` payload below.
 - **Draft-only is the hard default for Purchase Order submission absent
   confirmed submission authority — not just "when unsure."** Where no
   Workflow is configured for Purchase Order, role membership (Purchase

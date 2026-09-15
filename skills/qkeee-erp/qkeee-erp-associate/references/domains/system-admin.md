@@ -2,7 +2,7 @@
 
 This is the widest-blast-radius domain here (user/role/permission changes,
 destructive actions), and it carries the most business logic of any
-domain module. Code lives in `scripts/domains/system_admin.py`
+domain module. Code: `scripts/domains/system_admin.py`
 (`ALLOWED_WRITE_DOCTYPES = ("User", "Role", "Custom Field", "Property
 Setter", "Webhook", "Workflow")`), which also carries
 `_record_attribution_comment()`, `destructive_mutate()`,
@@ -29,14 +29,13 @@ integrations, checking instance health.
   writes with real external-facing risk (Webhook create, Workflow
   `is_active` toggle) get the same token+freshness backstop via
   `create_user()`/`gated_config_mutate()`.
-- **Known limitation of the token gate — read this before treating it as
-  sufficient on its own.** A matching `confirmation_token` proves the call
-  being made is byte-for-byte identical to what a render script last
-  printed, and that it happened within 15 minutes — no more. It does
-  **not** prove a human read the rendered confirmation and said yes.
-  `issued_at`/token must only be used after the user's own reply
-  affirmatively confirms that specific rendered action, one turn later at
-  minimum.
+- **Know the token gate's limit before treating it as sufficient on its
+  own.** A matching `confirmation_token` proves the call being made is
+  byte-for-byte identical to what a render script last printed, and that
+  it happened within 15 minutes — no more. It does **not** prove a human
+  read the rendered confirmation and said yes. `issued_at`/token must
+  only be used after the user's own reply affirmatively confirms that
+  specific rendered action, one turn later at minimum.
 - **Connections must be `https://`.** `get_env_config()` refuses a
   non-`https://` base URL unless `QKEEE_ERP_<TAG>_ALLOW_INSECURE=1` is
   explicitly set — a deliberate opt-out for local/dev, never the default.
@@ -89,11 +88,11 @@ integrations, checking instance health.
    as an opaque create failure. Anything beyond one field/one property is
    a complex case — give step-by-step guidance instead. **Verify by
    re-querying the `Custom Field`/`Property Setter` resource directly by
-   its own name — NOT `DocType/<dt>` meta**: confirmed live, a freshly
-   created Custom Field does not appear in the DocType meta's `fields`
-   array (server-side cache), and cache-clear isn't callable over this
-   REST API even as Administrator. Trust the direct resource query, and
-   confirm the persisted `dt` Link matches what was confirmed.
+   its own name — NOT `DocType/<dt>` meta**: a freshly created Custom
+   Field does not appear in the DocType meta's `fields` array (server-side
+   cache), and cache-clear isn't callable over this REST API even as
+   Administrator. Trust the direct resource query, and confirm the
+   persisted `dt` Link matches what was confirmed.
 6. **Email/notification settings review is read-only** —
    `query_resource("Notification", ...)`.
 7. **Data import/export assist is guidance-first.** `Data Import`'s schema
@@ -113,20 +112,19 @@ integrations, checking instance health.
 9. **System health check**: combine `get_scheduler_status()`, a
    `Scheduled Job Type` query (flag `stopped: 1` or a stale
    `last_execution`), and the most recent `Error Log` rows. **The `RQ Job`
-   doctype is NOT usable via this REST API** — confirmed live 500 with a
-   `TypeError` unrelated to auth/permissions. Report this gap explicitly
-   and point to the fallback (Frappe desk UI's Background Jobs page, or
-   `bench` CLI if the user has server access). `not_applicable` unless a
-   specific numeric check is being made.
+   doctype is NOT usable via this REST API** — it 500s with a `TypeError`
+   unrelated to auth/permissions. Report this gap explicitly and point to
+   the fallback (Frappe desk UI's Background Jobs page, or `bench` CLI if
+   the user has server access). `not_applicable` unless a specific
+   numeric check is being made.
 10. **Disabling/deleting a user, or deleting a Custom Field/Property
     Setter/Webhook/Workflow**, always goes through `destructive_mutate()`
     — and requires asking a second time after showing it. Require a
     stated `reason`. Prefer `disable_user` over `delete_user` unless the
-    account must be gone entirely — disable is reversible; delete is
-    confirmed to fail with `LinkExistsError` on any user who owns/created
-    other records (a never-referenced user deletes cleanly). Only after
-    both confirmations, call `destructive_mutate()` with the printed
-    token.
+    account must be gone entirely — disable is reversible; delete fails
+    with `LinkExistsError` on any user who owns/created other records (a
+    never-referenced user deletes cleanly). Only after both confirmations,
+    call `destructive_mutate()` with the printed token.
 
 ## Quick reference
 

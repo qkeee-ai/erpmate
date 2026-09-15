@@ -262,6 +262,72 @@ class UpdatePreImageAttributionTests(unittest.TestCase):
         self.assertNotIn("internal", mocked_get_resource.call_args.kwargs)
 
 
+class UpdateAuditRowVolumeTests(unittest.TestCase):
+    """Issue 03, .scratch/hermes-erp-bot-reliability/issues/
+    03-update-audit-row-volume.md: F13's fix (mutate_resource()'s Update
+    pre-image fetch now carries requested_by, so it's a real, gated,
+    non-internal read, not connector plumbing) means one allowed Update
+    now writes FOUR Qkeee Bot Audit Log documents, not the two spec.md's
+    own "Comments (F13)" section claims (that claim holds for a plain
+    read/create, not Update): a gate-decision row for the write itself, a
+    gate-decision row for the pre-image read, the pre-image Read row
+    itself, and the write's own Attempted->Success row. This pins that
+    count with a real (mocked-HTTP-only) run through mutate_resource() —
+    not a mocked _validate_prod_requester() — so a future change to this
+    path can't silently change the count again without a test failing.
+    Intentionally takes no side on issue 03's own open question (accept
+    the volume vs. fold the two gate-decision rows into one); it only
+    locks in the currently-accepted behavior."""
+
+    ENV = {
+        "QKEEE_ERP_ROWVOL_BASE_URL": "https://example.com",
+        "QKEEE_ERP_ROWVOL_API_KEY": "key",
+        "QKEEE_ERP_ROWVOL_API_SECRET": "secret",
+    }
+
+    @patch.object(ec, "_audit_submit", return_value=True)
+    @patch.object(ec, "_audit_update", return_value=True)
+    @patch.object(ec, "_audit_insert", return_value="AUDITLOG-ROWVOL")
+    @patch.object(ec, "_do_mutate", return_value={"data": {"name": "SO-0001", "status": "Closed"}})
+    @patch.object(ec, "_request", return_value={"data": {"name": "SO-0001", "status": "Draft"}})
+    @patch.object(ec, "check_user_permission", return_value=True)
+    @patch.object(ec, "verify_rbac_precheck_reliable",
+                   return_value={"reliable": True, "bot_user": "qkeee-erp-bot@org.com",
+                                  "bot_roles": ["Accounts User"], "privileged_identity": False,
+                                  "precheck_discriminates": True})
+    @patch.object(ec, "resource_exists", return_value=True)
+    def test_allowed_update_writes_four_audit_rows(
+            self, mocked_exists, mocked_trust, mocked_perm, mocked_request,
+            mocked_do_mutate, mocked_insert, mocked_update, mocked_submit):
+        with patch.dict("os.environ", self.ENV, clear=True):
+            ec.mutate_resource(
+                "rowvol", "Sales Order", "update", payload={"status": "Closed"},
+                name="SO-0001", mode="read-write", requested_by="priya@org.com",
+                session_id="sess-1", domain_code="sales", channel="Slack",
+                channel_metadata={"x": 1}, prompt_summary="close it",
+                latest_prompt="please close SO-0001",
+            )
+
+        # 4 distinct documents, in the order mutate_resource() actually
+        # produces them: the write's own gate-decision, then the
+        # pre-image read's gate-decision + its real Read row, then the
+        # write's Attempted row (flipped to Success via _audit_update,
+        # not a 5th _audit_insert document).
+        self.assertEqual(mocked_insert.call_count, 4)
+        fields = [call.args[1] for call in mocked_insert.call_args_list]
+        self.assertEqual([f["action"] for f in fields], ["Update", "Read", "Read", "Update"])
+        self.assertEqual(
+            ["gate_check" in (f.get("response_payload") or "") for f in fields],
+            [True, True, False, False],
+        )
+        self.assertEqual(fields[3]["status"], "Attempted")
+        # Exactly one row (the write's own) ever makes the Attempted ->
+        # Success transition — the gate-decision/read rows are each
+        # written once, final, never revisited.
+        mocked_update.assert_called_once()
+        self.assertEqual(mocked_update.call_args.args[2]["status"], "Success")
+
+
 class TestGatedMutateResource(unittest.TestCase):
     """gated_mutate_resource() is this skill's own write entry point,
     merged in from the former qkeee-erp-catch-all skill (2026-08-18) —

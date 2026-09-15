@@ -378,5 +378,100 @@ class SchemaMappingDispatchTests(unittest.TestCase):
         self.assertEqual(mock_map.call_args.kwargs.get("confirmed_mappings"), {"HSN": "gst_hsn_code"})
 
 
+class KycSchemaMappingDispatchTests(unittest.TestCase):
+    """Issue 02 (.scratch/hermes-erp-bot-reliability/issues/
+    02-kyc-subpayload-schema-mapping-gap.md): --kyc's own address/contact
+    sub-payloads must get schema-mapped against THEIR live schema
+    (Address/Contact), separately from the top-level --payload's Supplier
+    mapping — this domain's linked-record write
+    (procurement._create_linked_kyc_record()) never gets a second mapping
+    pass itself, so whatever execute_write.py hands to procurement.mutate()
+    as `kyc` here is exactly what ends up written. Mocked at schema_mapping.
+    map_payload_for_write(), same convention as SchemaMappingDispatchTests
+    above."""
+
+    _run = staticmethod(_run_cli)
+
+    @patch.object(execute_write.procurement, "mutate")
+    def test_kyc_address_and_contact_each_mapped_against_their_own_doctype(self, mock_mutate):
+        mock_mutate.return_value = {"data": {"name": "Acme Supplies"},
+                                     "_audit_log_status": "ok", "_kyc": {"waived": False}}
+        seen_doctypes = []
+
+        def _fake_map(tag, doctype, payload, **kwargs):
+            seen_doctypes.append(doctype)
+            mapped = dict(payload)
+            unmatched = []
+            if doctype == "Address" and "addr_typo" in mapped:
+                del mapped["addr_typo"]
+                unmatched = ["addr_typo"]
+            return {"payload": mapped, "status": "ok", "detail": None,
+                    "suggested_mappings": [], "unmatched": unmatched, "high_risk": []}
+
+        with patch.object(execute_write.schema_mapping, "map_payload_for_write", side_effect=_fake_map):
+            code, out, err = self._run([
+                "--tag", "DEMO_ERP", "--mode", "read-write", "--requested-by", "user@org.com",
+                "--doctype", "Supplier", "--action", "create", "--domain", "procurement",
+                "--payload", '{"supplier_name": "Acme Supplies", "supplier_type": "Company"}',
+                "--kyc", '{"address": {"address_line1": "1 Main St", "gstin": "27AAECG2483J1ZE", '
+                         '"addr_typo": "x"}, "contact": {"first_name": "Jane"}}',
+                "--session-id", "sess-1", "--channel-metadata", '{"space": "x"}',
+                "--latest-prompt", "create this supplier",
+            ])
+
+        self.assertEqual(code, 0)
+        # Supplier's own --payload, plus Address and Contact each mapped
+        # separately — not folded into the Supplier call, not skipped.
+        self.assertEqual(sorted(seen_doctypes), ["Address", "Contact", "Supplier"])
+        sent_kyc = mock_mutate.call_args.kwargs.get("kyc")
+        self.assertNotIn("addr_typo", sent_kyc["address"])
+        self.assertEqual(sent_kyc["address"]["gstin"], "27AAECG2483J1ZE")
+        self.assertEqual(sent_kyc["contact"], {"first_name": "Jane"})
+        self.assertIn("addr_typo", err)  # unmatched-field warning fired for Address specifically
+
+    @patch.object(execute_write.schema_mapping, "map_payload_for_write", new=_passthrough_schema_mapping)
+    @patch.object(execute_write.procurement, "mutate")
+    def test_kyc_waiver_confirmed_skips_kyc_mapping_entirely(self, mock_mutate):
+        """No --kyc given (waiver path, F2) — _apply_kyc_schema_mapping()
+        must not run at all; there's nothing to map."""
+        mock_mutate.return_value = {"data": {"name": "Acme Supplies"},
+                                     "_audit_log_status": "ok", "_kyc": {"waived": True}}
+        with patch.object(execute_write, "_apply_kyc_schema_mapping") as mock_kyc_map:
+            code, out, err = self._run([
+                "--tag", "DEMO_ERP", "--mode", "read-write", "--requested-by", "user@org.com",
+                "--doctype", "Supplier", "--action", "create", "--domain", "procurement",
+                "--payload", '{"supplier_name": "Acme Supplies", "supplier_type": "Company"}',
+                "--kyc-waiver-confirmed",
+                "--session-id", "sess-1", "--channel-metadata", '{"space": "x"}',
+                "--latest-prompt", "create this supplier",
+            ])
+        self.assertEqual(code, 0)
+        mock_kyc_map.assert_not_called()
+
+    @patch.object(execute_write.procurement, "mutate")
+    def test_kyc_contact_only_never_maps_address(self, mock_mutate):
+        mock_mutate.return_value = {"data": {"name": "Acme Supplies"},
+                                     "_audit_log_status": "ok", "_kyc": {"waived": False}}
+        calls = []
+
+        def _fake_map(tag, doctype, payload, **kwargs):
+            calls.append(doctype)
+            return {"payload": dict(payload), "status": "ok", "detail": None,
+                    "suggested_mappings": [], "unmatched": [], "high_risk": []}
+
+        with patch.object(execute_write.schema_mapping, "map_payload_for_write", side_effect=_fake_map):
+            code, out, err = self._run([
+                "--tag", "DEMO_ERP", "--mode", "read-write", "--requested-by", "user@org.com",
+                "--doctype", "Supplier", "--action", "create", "--domain", "procurement",
+                "--payload", '{"supplier_name": "Acme Supplies", "supplier_type": "Company"}',
+                "--kyc", '{"contact": {"first_name": "Jane"}}',
+                "--session-id", "sess-1", "--channel-metadata", '{"space": "x"}',
+                "--latest-prompt", "create this supplier",
+            ])
+        self.assertEqual(code, 0)
+        self.assertNotIn("Address", calls)
+        self.assertIn("Contact", calls)
+
+
 if __name__ == "__main__":
     unittest.main()

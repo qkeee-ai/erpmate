@@ -1,6 +1,6 @@
 # Domain: hr-payroll (HR, leave, payroll batch)
 
-Code lives in `scripts/domains/hr_payroll.py`
+Code: `scripts/domains/hr_payroll.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Employee", "Employee Onboarding", "Employee
 Separation", "Job Offer", "Leave Application")` — see that module's
 docstring). Applies `00-conventions.md` and `01-connectivity.md` in full;
@@ -9,8 +9,7 @@ this file adds what's specific to HR/talent-acquisition work.
 This domain has no unique connector logic of its own — the PII-flagging
 and advisory-only enforcement described below belongs in
 `render_employee_draft.py`/`render_advisory_draft.py`, which don't exist
-in this skill's scripts/ yet. This reference states the target
-procedure.
+in this skill's scripts/ yet. This reference states the target procedure.
 
 ## When this domain applies
 

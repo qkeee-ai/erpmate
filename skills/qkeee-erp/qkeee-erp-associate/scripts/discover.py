@@ -5,68 +5,23 @@ a target ERPNext instance (apps + versions, DocType-to-module-to-app
 mapping, live field schema) so this skill can reason from real metadata
 instead of guessing or trusting static docs or memory of a prior instance.
 
-## Why this file didn't exist until now
+Every read goes through `core.client.get_resource()`/`query_resource()`,
+so every discovery read carries a validated `requested_by` and gets the
+same unconditional `Qkeee Bot Audit Log` row every other read in this
+skill gets.
 
-`references/01-connectivity.md`, `02-environment-assessment.md`,
-`04-erp-doc-lookup.md`, and `domains/manufacturing.md` all document
-`discover.py resolve|meta|modules|apps` as this skill's live-schema check
-— but no `discover.py` ever shipped in this consolidated single-persona
-tree. It existed once, identically, in all ten `qkeee-erp-<persona>/scripts/`
-copies on the old `multi-persona-v1.0` branch (differing only in a
-`--persona-code` default string) and was dropped somewhere in the
-consolidation into this skill, leaving those doc references dangling.
+`apps` (`frappe.utils.change_log.get_versions`) has no DocType behind
+it — same situation `core.client.run_query_report()` is in for a Report
+run. It's a direct `_request()` call, routed through
+`_validate_prod_requester()` and a manual `_log_read()` call first,
+mirroring `run_query_report()`'s own pattern.
 
-Live-observed cost of the gap (dev-hermes, 2026-09-11, see
-`.scratch/hermes-erp-bot-reliability/spec.md` finding F8): with no
-`discover.py`, an agent fell back to querying `DocField` directly as a
-standalone list resource (`client.py query DocField --filters
-'[["parent","=","Supplier"]]'`) to find out whether Supplier has a
-`gstin` field. `DocField` is a child-table doctype (`istable=1`) — Frappe
-grants no role, System Manager included, standalone List permission on a
-table-only doctype; it's readable only embedded inside its parent
-document. That 403'd, was misread as "expected on a least-privileged
-bot" (the bot in question actually held System Manager — the RBAC WARN
-printed one line above said so), and the agent never fell back to the
-one call that was always going to work: a single-resource GET on the
-DocType record itself, which returns its `fields` child table inline.
-That's exactly what `meta`/`resolve` below do.
-
-## What changed in the resurrection, vs. the multi-persona-v1.0 copies
-
-- **Every read now goes through `core.client.get_resource()`/
-  `query_resource()`** instead of hand-rolled `_request()` calls. The old
-  script called `_request()` directly for `meta`/`resolve`/`modules`,
-  which entirely bypassed `_validate_prod_requester()` — this
-  consolidated skill's non-negotiable 2 (`00-conventions.md`) requires
-  every single read/write to carry a validated `requested_by`, no
-  exceptions; the old script's own reads didn't. Routing through
-  `get_resource()`/`query_resource()` fixes that for free, and also
-  means every discovery read gets the same unconditional
-  `Qkeee Bot Audit Log` row every other read in this skill gets.
-- **The old script's own `--debug`-gated `_log()` wrapper is gone.**
-  Audit logging in `core/client.py` is unconditional now — "there is no
-  debug flag gating this" (`01-connectivity.md`) — so a separate opt-in
-  log path for this script's own reads would have been a second,
-  inconsistent logging regime. `--persona-code`/`--debug` are retired in
-  favor of the `session_id`/`domain_code`/`channel`/`channel_metadata`/
-  `prompt_summary`/`latest_prompt` parameters `core/client.py`'s own CLI
-  already exposes, for the same reason: F8's sibling finding, F1 (audit
-  rows losing channel/prompt context because a caller never threads them
-  through), applies just as much to a discovery read as to a write.
-- **`apps` (`frappe.utils.change_log.get_versions`) has no DocType behind
-  it** — same situation `core.client.run_query_report()` is already in
-  for a Report run. Kept as a direct `_request()` call, but now goes
-  through `_validate_prod_requester()` and a manual `_log_read()` call
-  first, mirroring `run_query_report()`'s own established pattern rather
-  than the old script's ungated one.
-- **`modules` uses a large explicit `limit` instead of the old
-  `limit_page_length: 0` (Frappe's "no limit" sentinel).**
-  `query_resource()` doesn't expose that sentinel — it always fetches
-  `limit + 1` and reports `has_more`. 1000 is comfortably above any real
-  org's `Module Def` count; `has_more` is still surfaced so a caller
-  isn't silently handed a truncated list.
-
-## What every caller should already know
+`modules` uses an explicit `limit=1000` instead of Frappe's
+`limit_page_length: 0` ("no limit" sentinel): `query_resource()` doesn't
+expose that sentinel — it always fetches `limit + 1` and reports
+`has_more`. 1000 is comfortably above any real org's `Module Def` count;
+`has_more` is still surfaced so a caller isn't silently handed a
+truncated list.
 
 Requires System Manager–level read access to `DocType` on the target
 instance for `meta`/`resolve` — a correctly least-privileged bot account
@@ -126,13 +81,12 @@ def list_installed_apps(tag: str, *, requested_by: str = None, session_id: str =
     uses (validates against doctype='Report' for a report run that isn't
     itself a DocType record).
 
-    Not verified stable across every Frappe/ERPNext version — if this
-    method name has moved (or is blocked by the instance's whitelist
-    policy entirely: `PermissionError: ... is not whitelisted`, confirmed
-    to happen live on at least one real instance), `_request` raises a
+    Not stable across every Frappe/ERPNext version — if this method name
+    has moved, or is blocked by the instance's whitelist policy entirely
+    (`PermissionError: ... is not whitelisted`), `_request` raises a
     normal ConnectorError, and the `modules` subcommand (a plain REST
-    read, confirmed working even when this RPC is blocked) is the
-    expected next step — not a rare fallback.
+    read that works even when this RPC is blocked) is the expected next
+    step — not a rare fallback.
     """
     _validate_prod_requester(tag, requested_by, "Module Def", "read")
     cfg = get_env_config(tag)
@@ -282,8 +236,8 @@ def _cli():
     p.add_argument("--channel", help="conversation surface, e.g. Google Chat/Discord/Telegram/"
                         "WhatsApp/Email/Web/Slack/CLI/API/Other")
     p.add_argument("--channel-metadata", help="JSON object of channel-specific tracing detail "
-                        "(e.g. the chat space/thread id) — see F1, .scratch/"
-                        "hermes-erp-bot-reliability/spec.md, for why this shouldn't be left blank")
+                        "(e.g. the chat space/thread id) — threaded into the audit row so it "
+                        "isn't left blank")
     p.add_argument("--prompt-summary", help="one-line summary of the user request driving this lookup")
     p.add_argument("--latest-prompt", help="verbatim most-recent user prompt from the driving chat, if any")
     sub = p.add_subparsers(dest="command", required=True)

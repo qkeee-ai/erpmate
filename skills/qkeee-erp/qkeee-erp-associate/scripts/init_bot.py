@@ -11,12 +11,11 @@ Log` DocType — there is no `--bot-email`/bot-user provisioning path in
 this skill; bot-user provisioning needs a separate tool until one is
 added here.
 
-**CODE-ONLY as of this commit** — this script has not been run against
-any live ERPNext instance in this form. The dry-run/confirm-token
-discipline below applies regardless: nothing here executes a write
-without a prior --dry-run's token, and a real run recomputes its plan
-against the target's actual current state before trusting a passed-in
-token.
+CODE-ONLY — this script has not been run against any live ERPNext
+instance in this form. The dry-run/confirm-token discipline below
+applies regardless: nothing here executes a write without a prior
+--dry-run's token, and a real run recomputes its plan against the
+target's actual current state before trusting a passed-in token.
 
 Requires an ELEVATED (System Manager/Administrator) API key for the
 target tag — creating a DocType/Role record needs permission the shared
@@ -24,20 +23,19 @@ qkeee-erp-bot@<org> steady-state service account should not hold.
 
 **The steady-state bot account this provisions FOR must itself never be
 Administrator or hold System Manager once it's created and switched to.**
-Live-confirmed: under a privileged bot identity, ERPNext's
-frappe.client.has_permission doesn't reliably discriminate by the `user=`
-param it's given, which makes core.client's RBAC pre-check
-(_validate_prod_requester()) fall back to a local, RPC-independent role/
-DocPerm check instead (F7) — see core/client.py's
-verify_rbac_precheck_reliable() / _requester_has_role_permission(). This script
-runs under a DIFFERENT (elevated) identity than that steady-state account
-and has no way to provision or verify the steady-state account's own key
-directly (no --bot-email path exists here yet). Once that account's
-credentials are configured in qkeee-erp.env, run `health` under THEM (not
-under this script's elevated key) and confirm the output's
-`rbac_precheck_reliable` is `true` before treating the environment as
-ready for real writes — see run_real()'s final step below for the exact
-reminder printed.
+Under a privileged bot identity, ERPNext's frappe.client.has_permission
+doesn't reliably discriminate by the `user=` param it's given, which
+makes core.client's RBAC pre-check (_validate_prod_requester()) fall
+back to a local, RPC-independent role/DocPerm check instead — see
+core/client.py's verify_rbac_precheck_reliable() /
+_requester_has_role_permission(). This script runs under a DIFFERENT
+(elevated) identity than that steady-state account and has no way to
+provision or verify the steady-state account's own key directly (no
+--bot-email path exists here yet). Once that account's credentials are
+configured in qkeee-erp.env, run `health` under THEM (not under this
+script's elevated key) and confirm the output's `rbac_precheck_reliable`
+is `true` before treating the environment as ready for real writes —
+see run_real()'s final step below for the exact reminder printed.
 
 Usage:
     python init_bot.py --tag qa --requested-by admin@org.com --dry-run
@@ -180,12 +178,12 @@ def log_role_provisioning(tag: str, requested_by: str, role_created: bool, appro
     Only meaningful AFTER the Qkeee Bot Audit Log DocType itself exists
     — call this from run_real() only after the DocType-creation loop,
     never before (the row has nowhere to land otherwise). Because Role
-    is a hard dependency of that DocType's own `permissions` table
-    (live-confirmed: a DocPerm row's `role` is a validated Link — create
-    fails with `LinkValidationError` if the role doesn't already exist),
-    Role is necessarily created FIRST, before the DocType — these audit
-    rows are inserted after the fact, timestamped now, not backdated to
-    when the Role check/creation actually happened.
+    is a hard dependency of that DocType's own `permissions` table (a
+    DocPerm row's `role` is a validated Link — create fails with
+    `LinkValidationError` if the role doesn't already exist), Role is
+    necessarily created FIRST, before the DocType — these audit rows are
+    inserted after the fact, timestamped now, not backdated to when the
+    Role check/creation actually happened.
 
     Logs a Read row unconditionally (the existence check ensure_role()
     always performs, whether or not a Create followed) and a Create row
@@ -326,9 +324,9 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         "credentials and confirm the output's rbac_precheck_reliable is true. "
         "If it's false, most writes on this tag will now be refused outright "
         "(UnvalidatedProdRequesterError) unless the requester's own live roles "
-        "happen to positively confirm the exact permission needed — see F7's "
-        "_requester_has_role_permission() reinforcement in core/client.py — "
-        "until the bot account's roles are fixed."
+        "happen to positively confirm the exact permission needed — see "
+        "core/client.py's _requester_has_role_permission() — until the bot "
+        "account's roles are fixed."
     )
     return summary
 

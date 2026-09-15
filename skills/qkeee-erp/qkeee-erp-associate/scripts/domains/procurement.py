@@ -6,14 +6,11 @@ ALLOWED_WRITE_DOCTYPES covers render_po_draft.py/render_supplier_draft.py's
 target doctypes plus Request for Quotation/Supplier Quotation. Cross-check
 against references/domains/procurement.md before expanding.
 
-`Address`/`Contact` were added here for F2 (.scratch/hermes-erp-bot-
-reliability/spec.md): ERPNext's India-Compliance GSTIN field (and tax ID
-generally) lives on Address, linked to Supplier via the standard Frappe
-Dynamic Link `links` child table — never on Supplier itself. A prior
-session retried GSTIN as a Supplier field, confirmed live it doesn't
-persist there, and told the user it "would need a custom field on
-Supplier" — wrong on both counts. See mutate()'s KYC handling below and
-procurement.md's corrected write order.
+`Address`/`Contact` are included because ERPNext's India-Compliance
+GSTIN field (and tax ID generally) lives on Address, linked to Supplier
+via the standard Frappe Dynamic Link `links` child table — never
+directly on Supplier itself. See mutate()'s KYC handling below and
+procurement.md's write order.
 """
 
 import os
@@ -38,9 +35,9 @@ ALLOWED_WRITE_DOCTYPES = (
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 
-# Submit/cancel now require a fresh confirmation_token from
+# Submit/cancel require a fresh confirmation_token from
 # core/confirm_token.py's advisory-token CLI, verified in mutate_resource()
-# — a real code-level backstop, not prompt discipline alone.
+# — the code-level backstop.
 core_client.register_domain_token_gate(DOMAIN_NAME, {"submit", "cancel"})
 
 # kwargs forwarded from a Supplier 'create' call into its linked Address/
@@ -59,28 +56,25 @@ class IncompleteSupplierKYCError(core_client.ConnectorError):
     """Raised by mutate() when a Supplier 'create' call carries neither
     `kyc={'address': {...}}` nor `kyc_waiver_confirmed=True`.
 
-    This is this domain's own non-negotiable (references/domains/
-    procurement.md): "Never create a live Supplier record with incomplete
-    mandatory KYC/bank fields... tax ID... must be enforced before a
-    draft is marked ready." That rule already existed in the doc before
-    this class did — prompt discipline alone let a session override it
-    mid-task anyway (F2, .scratch/hermes-erp-bot-reliability/spec.md).
-    This is the code-level backstop matching how every other domain
-    non-negotiable in 00-conventions.md is enforced, not left to the doc
-    alone."""
+    This domain's non-negotiable rule (references/domains/
+    procurement.md): never create a live Supplier record with incomplete
+    mandatory KYC/bank fields — a tax ID must be captured, or explicitly
+    waived, before a Supplier record is created. This is the code-level
+    backstop for that rule, matching how every other domain
+    non-negotiable in 00-conventions.md is enforced."""
 
 
 def _create_linked_kyc_record(tag: str, doctype: str, payload: dict, supplier_name: str,
                                **write_kwargs) -> dict:
     """Address/Contact link back to a Supplier via Frappe's standard
     Dynamic Link `links` child table, not a direct Link field on Supplier
-    — see this module's own docstring. Injects that link automatically so
-    a caller's `kyc` payload only needs to carry the Address/Contact
-    doctype's own fields (address_line1, gstin/tax_id/whatever this
-    instance's confirmed tax-ID field actually is, ...) — never a
-    hardcoded field name here (Non-negotiable 4, 00-conventions.md: field
-    shape comes from discover.py meta against the live instance, not
-    assumed by this connector)."""
+    — see this module's docstring. Injects that link automatically so a
+    caller's `kyc` payload only needs to carry the Address/Contact
+    doctype's own fields (address_line1, gstin/tax_id/whichever field
+    this instance actually uses for the tax ID, ...) — never a hardcoded
+    field name here (Non-negotiable 4, 00-conventions.md: field shape
+    comes from discover.py meta against the live instance, not assumed by
+    this connector)."""
     linked_payload = dict(payload)
     linked_payload["links"] = list(payload.get("links", [])) + [
         {"link_doctype": "Supplier", "link_name": supplier_name}
@@ -96,9 +90,9 @@ def mutate(tag: str, doctype: str, action: str, *, kyc: dict = None,
     doctype-specific rule layered on top.
 
     Supplier 'create' additionally requires either:
-      - `kyc={"address": {...fields confirmed live via `discover.py meta
-        "Address"` for this instance, including whichever field actually
-        carries the tax ID here — gstin, tax_id, pan, ...}, "contact":
+      - `kyc={"address": {...fields per `discover.py meta "Address"` for
+        this instance, including whichever field actually carries the
+        tax ID here — gstin, tax_id, pan, ...}, "contact":
         {...} (optional)}` — creates the Supplier, then its linked
         Address (and Contact, if given) as one call, Dynamic Link wired
         automatically; or
@@ -117,14 +111,14 @@ def mutate(tag: str, doctype: str, action: str, *, kyc: dict = None,
     talks about *creating* a live Supplier record), not a block on every
     later patch to an already-onboarded supplier. Backfilling KYC onto an
     existing Supplier is a plain `mutate(tag, "Address", "create", ...)`
-    call — Address is a regular allowlisted doctype in this domain now,
-    not something only reachable through this Supplier-create path.
+    call — Address is a regular allowlisted doctype in this domain, not
+    something only reachable through this Supplier-create path.
     """
     if doctype == "Supplier" and action == "create":
         if not (kyc and kyc.get("address")) and not kyc_waiver_confirmed:
             raise IncompleteSupplierKYCError(
                 "Refusing to create Supplier without KYC: pass kyc={'address': {...}} "
-                "(fields confirmed live via discover.py meta \"Address\" for this instance "
+                "(fields per discover.py meta \"Address\" for this instance "
                 "— this domain's own non-negotiable requires a tax ID, not just a registered "
                 "address) or, only when the user has explicitly confirmed proceeding without "
                 "it, kyc_waiver_confirmed=True. See references/domains/procurement.md."

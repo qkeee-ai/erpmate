@@ -3,11 +3,11 @@
 qkeee-erp-associate — hr-payroll domain (HR, leave, payroll batch).
 
 Offer/onboarding DRAFT composition belongs in render_employee_draft.py /
-render_advisory_draft.py — those advisory-draft scripts don't exist in
-this skill's scripts/ yet. The "never auto-committed" hard block on
-submit/cancel itself IS code-enforced: register_domain_token_gate() below
-opts this domain into core.client.mutate_resource()'s generic
-confirmation-token check — see core/confirm_token.py's advisory-token CLI.
+render_advisory_draft.py; those advisory-draft scripts are not yet part
+of this skill's scripts/. The hard block on submit/cancel is
+code-enforced: register_domain_token_gate() below opts this domain into
+core.client.mutate_resource()'s generic confirmation-token check — see
+core/confirm_token.py's advisory-token CLI.
 
 ALLOWED_WRITE_DOCTYPES covers render_employee_draft.py's target doctypes
 (Employee Onboarding, Job Offer) plus Employee/Leave Application. Cross-check
@@ -35,10 +35,10 @@ ALLOWED_WRITE_DOCTYPES = (
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 
-# Submit/cancel now require a fresh confirmation_token from
+# Submit/cancel require a fresh confirmation_token from
 # core/confirm_token.py's advisory-token CLI, verified in mutate_resource()
-# — a real code-level backstop for "no docstatus document without
-# confirmation" (profile.md), not prompt discipline alone.
+# — the code-level backstop for "no docstatus document without
+# confirmation" (profile.md).
 core_client.register_domain_token_gate(DOMAIN_NAME, {"submit", "cancel"})
 
 

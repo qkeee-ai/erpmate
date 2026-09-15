@@ -1,6 +1,6 @@
 # Domain: inventory (Stock, transfers, reconciliation)
 
-Code lives in `scripts/domains/inventory.py`
+Code: `scripts/domains/inventory.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Stock Entry", "Material Request", "Stock
 Reconciliation")`), which also carries this domain's genuine connector
 logic: `get_bin_qty()`, `get_stock_reconciliation_items()`,
@@ -31,8 +31,8 @@ prompt:
   non-batch item; **not harmless for a batch-tracked item**: ERPNext
   reconciles per batch, and an unresolved current_qty/batch_no risks
   creating a brand-new batch and ADDING to the existing balance instead of
-  correcting it. Confirmed live: this exact mistake inflated a real
-  6-unit balance to 14 units. Always resolve `current_qty` via
+  correcting it — this exact mistake has inflated a real 6-unit balance
+  to 14 units. Always resolve `current_qty` via
   `domains.inventory.get_stock_reconciliation_items()` first — never a
   bare Bin read, never a guess. For a batch-tracked item, that function
   returns one row PER EXISTING BATCH — resolve and pass through each
