@@ -1,13 +1,16 @@
 # Connectivity: REST/Frappe, env resolution, discover.py
 
-The mechanics every domain shares — auth, the environment/tag model, env var
-resolution, and metadata discovery. Domain judgment (what counts as a valid
-GST return, whether an offer letter needs a second approval) does NOT belong
-here — that lives in each `references/domains/<slug>.md` file. If
-`qkeee-erp-associate` ever needs to target a different ERP backend, this
-file and `scripts/core/client.py` are what change; the domain files and
-`00-conventions.md` don't (they're written to be ERP-agnostic in substance,
-ERPNext specifics called out as pointers).
+The mechanics every domain shares — auth, the environment/tag model, env
+var resolution, and metadata discovery. Domain judgment (what counts as a
+valid GST return, whether an offer letter needs a second approval) does
+NOT belong here — that lives in each `references/domains/<slug>.md` file.
+If `qkeee-erp-associate` ever needs to target a different ERP backend,
+this file and `scripts/core/client.py` are what change; the domain files
+and `00-conventions.md` don't (they're written to be ERP-agnostic in
+substance, ERPNext specifics called out as pointers). Worked CLI
+invocations — the copy-paste call shapes, not the mechanics behind them —
+live in `cli-cookbook.md`, latched only once a call is actually about to
+run.
 
 ## Auth
 
@@ -101,18 +104,19 @@ multi-tag case, not as a blanket preference over the native mechanism. Use
 the `${HERMES_SKILL_DIR}` template token for any path a script needs to
 itself, rather than a hardcoded relative path.
 
-**Never read `qkeee-erp.env`'s contents into your own context to "confirm"
-it, and never compose a command that embeds a raw secret value.** If a
-value needs confirming, ask the user to check the file themselves,
-out-of-band. This file is deliberately **not** the profile's main `.env` —
-keeps credentials physically separate from any LLM-provider secret that
-might live there.
+**Ask the user to check a value in `qkeee-erp.env` themselves,
+out-of-band, whenever it needs confirming.** This file is deliberately
+**not** the profile's main `.env` — keeps credentials physically separate
+from any LLM-provider secret that might live there. **Never read its
+contents into your own context to "confirm" it, and never compose a
+command that embeds a raw secret value** — that's exactly what reading
+it into context to work around a missing-var error looks like.
 
 ## Discovering a doctype's live shape — `discover.py`
 
-Never propose a field/doctype shape from general ERPNext knowledge alone
-(Non-negotiable 4 in `00-conventions.md`). Resolve it against the live
-instance first:
+Resolve a doctype's field/shape against the live instance first
+(Non-negotiable 4 in `00-conventions.md`) — never propose it from general
+ERPNext knowledge alone:
 
 - `discover.py resolve "<DocType>"` — module + owning app +
   submittable/custom flags. Run before assuming any doctype is uncovered
@@ -168,13 +172,14 @@ schemas.
 
 Any file this skill's tooling needs to write that isn't the final
 deliverable — a staged artifact genuinely too large to hold in the
-conversation — goes under `<profile>/workspace/qkeee-erp/<env-tag>/`, plain
-file I/O, never `/tmp`. **Not `terminal.cwd`:** the local CLI backend (this
-skill's primary usage path) deliberately ignores that config key and always
-uses the launch directory — only gateway- and cron-driven sessions bridge
-it into a fixed path. `<profile>/workspace/` is the one directory that's
-stable regardless of which backend or invocation mode is running,
-provisioned at profile creation alongside `memories/`, `skills/`, etc. —
+conversation — goes under `<profile>/workspace/qkeee-erp/<env-tag>/`,
+plain file I/O, never `/tmp`. **Not `terminal.cwd`:** the local CLI
+backend (this skill's primary usage path) deliberately ignores that
+config key and always uses the launch directory — only gateway- and
+cron-driven sessions bridge it into a fixed path. `<profile>/workspace/`
+is the one directory that's stable regardless of which backend or
+invocation mode is running, provisioned at profile creation alongside
+`memories/`, `skills/`, etc. —
 see `00-conventions.md`'s naming table. Most tasks need none of this:
 Hermes' own session transcript already retains the working conversation, so
 reach for scratch only when something is genuinely too bulky to keep in
@@ -201,120 +206,8 @@ gracefully if it isn't.
 
 ## CLI usage
 
-`core/client.py` and each `domains/<slug>.py` module are runnable directly
-for manual/ad hoc use. See `core/client.py`'s own `_cli()` for the full
-subcommand list (`health`, `list-envs`, `query`, `get`, `report`, `roles`,
-`mutate`, `gated-mutate`).
-
-**`core/client.py`'s own `mutate`/`gated-mutate` subcommands are
-read-only-safe to explore but not the write entry point — use
-`execute_write.py` for every actual write.** `mutate --domain <slug>` looks
-like the domain-scoped write path, but `core/client.py` never imports any
-`domains/*.py` module itself — run standalone in a fresh process,
-`--domain procurement` 404s with "domain has no registered
-ALLOWED_WRITE_DOCTYPES" even though `domains/procurement.py` genuinely
-declares one (`register_domain_allowlist()` only runs at that module's
-*own* import time). `scripts/execute_write.py` imports every `domains/*.py`
-module up front specifically so this isn't a trap, and it's the one write
-entry point regardless of whether the target doctype belongs to a named
-domain (`--domain <slug>` → `mutate_resource()`) or not (omit `--domain`,
-pass `--confirmation-token`/`--issued-at` → `gated_mutate_resource()`). See
-its own module docstring. It's also where `session_id`/`channel_metadata`/
-`latest_prompt` stop getting left blank: `execute_write.py` WARNs loudly on
-stderr, before the write fires, if any of those three are missing — don't
-route around that warning by constructing the underlying
-`mutate_resource()`/`gated_mutate_resource()` call directly in a
-hand-written script instead.
-
-**Exact path — don't guess it.** The script lives at
-`<profile>/skills/qkeee-erp/qkeee-erp-associate/scripts/core/client.py`
-(the `qkeee-erp-associate/` segment is easy to drop — `skills/qkeee-erp/
-scripts/...` is a real, previously-observed wrong guess that costs a wasted
-round trip). `cd` into `.../qkeee-erp-associate/scripts` first, or prefix
-every command with the full path — verify with one `search_files`/listing
-at the start of a session if there's any doubt, rather than guessing and
-retrying on failure.
-
-**Copy these verbatim, substitute values, don't hand-construct flags from
-memory.** A malformed `--filters`/`--fields` argument is a previously-
-observed wasted round trip (`usage: client.py [-h] [--tag TAG]...` argparse
-error) — these four cover the overwhelming majority of read-only lookups:
-
-```
-# Connectivity + auth check — run first, every session
-python core/client.py --tag <tag> health
-
-# List configured environment tags
-python core/client.py --tag <tag> list-envs
-
-# Filtered, field-scoped list query — the default shape for "fetch X
-# where Y" asks. filters is a JSON list of [field, operator, value]
-# triples; fields is a JSON list of field names (see 01-connectivity.md's
-# "Query cost" section above for why to always scope fields).
-python core/client.py --tag <tag> query <DocType> \
-  --filters '[["supplier", "=", "<value>"], ["company", "=", "<value>"], ["docstatus", "=", 0]]' \
-  --fields '["name", "supplier", "company", "posting_date", "grand_total", "status"]' \
-  --limit 20
-
-# Single-resource GET — full doc including child tables (line items,
-# etc.) — use only when child-table data is actually needed, see "Query
-# cost" above.
-python core/client.py --tag <tag> get <DocType> <name>
-```
-
-`docstatus`: `0` = Draft, `1` = Submitted, `2` = Cancelled — use this in
-`--filters` for any "draft"/"submitted"/"cancelled" phrasing in the request
-rather than a status-name guess.
-
-For a write, see the matching `domains/<slug>.md` file for the exact
-payload shape and required fields — don't freehand a payload from this
-connectivity file alone. Fire the write itself through `execute_write.py`
-(see above), never a hand-written script that reconstructs
-`mutate_resource()`/`gated_mutate_resource()` inline:
-
-```
-# Domain-scoped write — Supplier belongs to procurement's
-# ALLOWED_WRITE_DOCTYPES. Supplier 'create' additionally requires --kyc
-# (creates the linked Address/Contact in the same call — see
-# domains/procurement.md's "Supplier KYC write order") or, only when the
-# user explicitly confirmed proceeding without it, --kyc-waiver-confirmed.
-python execute_write.py --tag <tag> --mode read-write \
-  --requested-by <requester-email> --doctype Supplier --action create \
-  --domain procurement \
-  --payload '{"supplier_name": "<value>", "supplier_type": "Company", ...}' \
-  --kyc '{"address": {"address_line1": "<value>", "<tax-id field confirmed via discover.py meta \"Address\">": "<value>", ...}}' \
-  --session-id <this-logical-session-id> \
-  --channel-metadata '{"space": "<platform-space-id>", "thread": "<platform-thread-id>"}' \
-  --prompt-summary "<one-line paraphrase>" \
-  --latest-prompt "<the user's literal most-recent message>"
-
-# Domain-less write — Item belongs to no domain's allowlist yet. For an
-# item sourced from a purchase document (PO, purchase invoice, GRN), add
-# --purchase-sourced-item: defaults is_purchase_item=1/is_sales_item=0
-# (nothing in a purchase document supports "the org resells this") and
-# refuses a bare standard_rate key (that auto-creates a Standard SELLING
-# Item Price from what was actually a purchase cost; see
-# item_write_helpers.py for the buying-side alternative). Omit --domain,
-# supply the advisory-draft token, AND the user's own literal reply
-# containing confirm_token.py's printed confirmation_code (show them the
-# code in the rendered draft first — never construct this string
-# yourself, see confirmation_code()'s docstring for why that defeats the
-# point).
-python execute_write.py --tag <tag> --mode read-write \
-  --requested-by <requester-email> --doctype Item --action create \
-  --payload '{"item_code": "<value>", ...}' \
-  --confirmation-token <from confirm_token.py> --issued-at <same> \
-  --user-confirmation-text "<the user's actual reply, e.g. 'yes 284D51'>" \
-  --session-id <this-logical-session-id> \
-  --channel-metadata '{"space": "<platform-space-id>", "thread": "<platform-thread-id>"}' \
-  --prompt-summary "<one-line paraphrase>" \
-  --latest-prompt "<the user's literal most-recent message>"
-```
-
-Resolve `--session-id`/`--channel-metadata`/`--latest-prompt` **once**, at
-the start of the logical session, and reuse the same values across every
-write in it — don't re-derive them per call, and don't leave them out
-because the write "feels routine." An audit row with `session` blank or
-`channel_metadata` absent is exactly as unauditable as a write that never
-happened, even though the write itself succeeded — see this skill's own
-GRC baseline.
+`core/client.py` and each `domains/<slug>.py` module are runnable
+directly for manual/ad hoc use — the actual invocations (subcommand
+list, exact path, read-only copy-paste blocks, write examples) are in
+`cli-cookbook.md`, not restated here. Latch that file once a call is
+actually about to run.

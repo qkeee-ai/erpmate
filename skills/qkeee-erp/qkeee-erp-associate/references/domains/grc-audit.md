@@ -47,12 +47,15 @@ unconditionally — neither is debug-gated or PROD-only.
   path, the equivalent exemption (`_LOG_READ_RECURSION_EXEMPT_DOCTYPES`)
   is narrower still and purpose-keyed rather than doctype-keyed — a
   business-intent read of `User`/`Role`/`DocType` (e.g. "who is this
-  person, what can they do") is a real logged row, not silently dropped.
+  person, what can they do") is a real logged row, not silently dropped
+  the way it used to be.
 - Also proves: that a requester was REFUSED, and why. Every
   `_validate_prod_requester()` call — read or write — writes one
   gate-decision row (`response_payload.gate_check: true`), on the denial
-  branches as well as the allow. A permission-denial review is a real
-  query against this log, not a gap to explain away.
+  branches as well as the allow. Before this fix, a
+  denied call left nothing in the trail at all, since the gate raises
+  before the guarded read/write ever runs; a permission-denial review is
+  now a real query against this log, not a gap you have to explain away.
 - Does NOT prove: that a human actually read and approved a
   `user_approved: "Approved"` write — that field is a detection signal
   set by the calling domain after its own confirm stage, not
@@ -72,30 +75,40 @@ unconditionally — neither is debug-gated or PROD-only.
 1. Identify which functional domain(s) the audit actually concerns
    (accounts, fixed-assets, system-admin, etc.) and latch that domain's
    reference alongside this one — this file supplies the audit-trail
-   query pattern, not the underlying business-doctype knowledge.
+   query pattern, not the underlying business-doctype knowledge. **Done
+   when:** the functional domain is named and its reference is latched
+   alongside this one.
 2. Pull the relevant `Qkeee Bot Audit Log` rows via
    `core.client.query_resource()`, filtered by `reference_doctype`,
    `environment_tag`, and a date range on `timestamp`. Report `status`
    distribution (how many `Attempted` rows never resolved to `Success`/
    `Failure` — a crash signature worth flagging on its own) alongside the
-   substantive findings.
+   substantive findings. **Done when:** the `status` distribution is
+   reported alongside the substantive findings, not separately or
+   omitted.
 3. **Redaction is already applied at write time**, not something to
    redo at query time: `core.client.redact_pii()` scrubbed
    `approval_note`/`channel_metadata` free text before it was ever
    written. Never re-introduce raw PII into an audit report by pulling it
    from a source outside the audit log (a linked record's own fields, a
-   chat transcript) without applying the same redaction.
+   chat transcript) without applying the same redaction. **Done when:**
+   no field pulled from outside the audit log lands in the report without
+   the same redaction applied.
 4. **State plainly which GRC guarantees are live vs. still aspirational**
    when a compliance-minded user asks — never imply a control is enforced
    in code before confirming it against this skill's actual
    `core/client.py`. Honesty about what's aspirational vs. live is itself
-   a GRC property this skill should model, not undermine.
+   a GRC property this skill should model, not undermine. **Done when:**
+   every guarantee named in the reply is confirmed live against
+   `core/client.py`, or explicitly marked aspirational.
 5. **Segregation-of-duties questions** ("did the same person both approve
    and execute this write") map to `requested_by` (who asked) vs. whoever
    is actually operating this skill (the bot account, always) — this
    skill cannot itself certify that the human named in `requested_by`
    is different from whoever is prompting it right now; say so if asked,
    rather than implying a guarantee the architecture doesn't provide.
+   **Done when:** the architecture's actual limit is stated, not implied
+   away, when this question is asked.
 
 ## Quick reference
 

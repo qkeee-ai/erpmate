@@ -50,11 +50,14 @@ review, TDS/GST/e-invoicing/e-way-bill questions.
 ## Procedure
 
 1. Follow the activation sequence (`SKILL.md`) and this domain's
-   `ALLOWED_WRITE_DOCTYPES` for any write.
+   `ALLOWED_WRITE_DOCTYPES` for any write. **Done when:** the target
+   doctype is confirmed inside the tuple above before any write is
+   proposed.
 2. For AR/AP aging, sales/purchase registers, or any other built-in
    report, prefer `core.client.run_query_report()` over hand-aggregating
    raw invoice/GL rows. Always check `has_more` before treating a `query`
-   result as complete.
+   result as complete. **Done when:** `has_more` is checked and false, or
+   the truncation is stated.
 3. **Journal Entry drafting** is arithmetic-checked before it's ever
    shown — a draft that doesn't balance, or a line with both/neither
    debit and credit set, must be refused before rendering. Present the
@@ -62,7 +65,9 @@ review, TDS/GST/e-invoicing/e-way-bill questions.
    "create")` (lands `docstatus 0`). Reading the created record's `name`
    back out of the `create` response uses the `"data"` key; a subsequent
    `submit`/`cancel` response uses `"message"` instead — this is exactly
-   the step where reading the wrong key raises a `KeyError`.
+   the step where reading the wrong key raises a `KeyError`. **Done
+   when:** the balance check passed and the user's explicit confirmation
+   was given before `create` fired.
 4. **Save as draft → review the saved draft → submit — three distinct
    steps, never chained.** Re-fetch the JE by `name` via
    `core.client.get_resource()` (not `query_resource` — the list endpoint
@@ -80,19 +85,25 @@ review, TDS/GST/e-invoicing/e-way-bill questions.
    staged-confirmation treatment plus the same token requirement — state
    the impact, confirm, compute the token, then
    `mutate(..., "cancel", confirmation_token=..., issued_at=...)`; never
-   cancel off a bare request with nothing staged first.
+   cancel off a bare request with nothing staged first. **Done when:**
+   every persisted field is checked against the confirmed draft and a
+   fresh token was computed over those exact facts, before `submit`/
+   `cancel` fires.
 5. **3-way match walks PO → Receipt → Invoice in order**, reporting every
    discrepancy found, not just the first — ERPNext's `per_received`/
    `per_billed` fields make this checkable without re-deriving match state
-   by hand.
+   by hand. **Done when:** every PO line has been walked, not just the
+   first discrepancy found.
 6. **Operational reports** (aging, 3-way match, bank reconciliation) need
    a real reconciliation check first — bucket-sum vs party total for
    aging, for example. `reconciliation_checks="not_applicable"` exists
    only for reports with genuinely nothing to tie out, and must carry a
-   reason.
+   reason. **Done when:** a reconciliation check ran, or
+   `not_applicable` carries a stated reason.
 7. **Expense claim review** needs the org's actual policy text, asked for
    explicitly if not already provided in-session — this domain has no
-   built-in expense policy of its own.
+   built-in expense policy of its own. **Done when:** the policy text is
+   in hand, or explicitly requested and awaited before review continues.
 
 ## Quick reference
 

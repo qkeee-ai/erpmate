@@ -36,6 +36,7 @@ place to land.
 | Memory breadcrumb | one line in `<profile>/memories/MEMORY.md` via the `memory` tool | `qkeee-erp env prod-in: ... — see skill qkeee-erp-learned/prod-in` |
 | Working scratch (rare) | `<profile>/workspace/qkeee-erp/<env-tag>/` | disposable, cleared at end of task |
 | Task spec | `./qkeee-erp-specs/<slug>-<YYYYMMDD-HHMM>.md`, relative to the session's actual working directory (`terminal.cwd` on gateway/cron, launch dir on local CLI) | see `references/03-spec-driven-execution.md`; `<profile>/workspace/...` only as a last-resort fallback when neither resolves; disposable across sessions, not mid-task |
+| Questionnaire | `./qkeee-erp-specs/questionnaire-<slug>-<YYYYMMDD-HHMM>.md` | see `qkeee-erp-questionnaire`; same working-directory placement rule as Task spec above |
 | New-learning entries | append under `## Learned <YYYY-MM-DD>` | never edit or delete a prior entry |
 
 **Before any `skill_manage(create)` touching ERPNext/organizational
@@ -162,88 +163,79 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
 
 ## GRC baseline
 
-- **Source the requester identity from the channel's own authenticated
-  sender field, never reconstruct it conversationally.** Hermes' gateway
-  already resolves and authorizes the inbound sender before this skill ever
-  sees the message (platform allowlists, DM pairing — see
+- **Resolve requester identity from the channel's own authenticated
+  sender field, every call — never from what the conversation says.**
+  Hermes' gateway already resolves and authorizes the inbound sender
+  before this skill ever sees the message (platform allowlists, DM
+  pairing — see
   [Security | Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/security)'s
-  "User Authorization" section). Use that already-resolved platform
-  identity (the Google Chat/Discord user id, or the email `From` header) as
-  the input to the ERPNext-`User` lookup below — don't ask the model to
-  infer or restate who's asking from conversation text, and never accept a
-  `requested_by` that didn't originate from that channel-provided field.
-  **When the channel-resolved requester is correctly refused for lacking a
-  role/permission, never offer or accept a substitute `requested_by` as a
-  way around it** — not "tell me a different user to run this as," not
-  picking a fallback identity (e.g. the instance admin) unprompted. A user
-  typing a different email into chat is not the same as that email being
-  the channel's own authenticated sender field — accepting it is exactly
-  the "reconstruct it conversationally" failure this bullet already
-  forbids, one conversational turn removed. The only correct responses to a
-  permission-denied requester: (1) report the gap by name (the missing
-  role, the doctype/action it would need to cover) so the user or an admin
-  can fix the actual requester's role assignment, or (2) decline the
-  request. Never reroute it to a different identity, regardless of who
-  suggests it. `UnvalidatedProdRequesterError`'s own message says so
-  explicitly, for exactly this reason — see `core/client.py`. This is what
-  `resource_exists(tag, "User", requested_by)` and
-  `check_user_permission()` validate *against*; neither can detect a
-  plausible-looking but fabricated identity that was never actually tied to
-  the channel message.
-- **RBAC pre-check, every environment.** The associate runs the same
-  requester-permission check on every environment, every fetch or write,
-  not PROD only: resolve the requester as a real ERPNext `User`, then
+  "User Authorization" section); feed that already-resolved platform
+  identity (the Google Chat/Discord user id, or the email `From` header)
+  into the ERPNext-`User` lookup below. On a permission denial, respond
+  with exactly one of two things: name the gap (the missing role, the
+  doctype/action it needs) so the user or an admin can fix the real
+  requester's role assignment, or decline. **Never substitute a
+  different `requested_by`** — a user-typed alternative email, a
+  fallback identity like the instance admin, anything not the channel's
+  own field — that is the same failure as inferring identity from
+  conversation text, one turn removed, and this connector's own refusal
+  messages (`UnvalidatedProdRequesterError`, `core/client.py`) say so
+  explicitly. `resource_exists(tag, "User", requested_by)`/
+  `check_user_permission()` validate against whatever identity is passed
+  in; they cannot detect a plausible-looking but fabricated one — which
+  is exactly why the identity must come from the channel field, never
+  from anyone's say-so mid-conversation.
+- **Run the same requester-permission check on every environment, every
+  fetch or write.** Resolve the requester as a real ERPNext `User`, then
   confirm via ERPNext's own `frappe.client.has_permission` that they
-  actually hold the permission the call needs. Presence of `requested_by`
-  is mandatory on every tag, no exceptions — no PROD/non-PROD distinction,
-  and no config default to satisfy it with; it must come from the live
-  channel identity, every call. Function/constant names
+  actually hold the permission the call needs — `requested_by` is
+  mandatory on every tag, always resolved from the live channel identity
+  (no PROD/non-PROD split, no config default). Function/constant names
   (`_validate_prod_requester()`, `PROD_GATE_EXEMPT_DOCTYPES`) reflect a
-  narrower PROD-only origin — don't read the name as scope. **When that RPC
-  is known unreliable** (a privileged bot identity, or a
-  non-discriminating `has_permission`), **a second, independent, RPC-free
-  check replaces the domain-allowlist/advisory-token fallback:**
-  `_requester_has_role_permission()` computes locally, from the requester's
-  own live role list and the doctype's own live DocPerm rows, whether any
-  role they hold actually grants the permission in question. Only a `True`
-  result (a locally-confirmed grant) lets the call through — a `False`
-  result (positive evidence of no permission) and an inconclusive `None`
-  result (live read failed, commonly the same System-Manager-level DocType
-  read gap that shows up on a correctly least-privileged bot) both refuse
-  the call outright, uniformly, for read and write alike. A `domain`
-  allowlist or a verified advisory token does not rescue either case: those
+  narrower PROD-only origin — read them by behavior, not by name.
+
+  **When that RPC is known unreliable** (a privileged bot identity, or a
+  non-discriminating `has_permission`), `_requester_has_role_permission()`
+  takes over: a second, independent, RPC-free check computed locally
+  from the requester's own live role list and the doctype's own live
+  DocPerm rows. Only a `True` verdict (a locally-confirmed grant) lets
+  the call through. A `False` verdict (positive evidence of no
+  permission) or an inconclusive `None` (a live read failed — commonly
+  the same System-Manager-level DocType read this skill already flags as
+  a real gap on a correctly least-privileged bot) both refuse the call
+  outright, for read and write alike — a `domain` allowlist or a
+  verified advisory token no longer rescues either case, since those
   attest a write's *shape* was reviewed ahead of time, never that
-  `requested_by` specifically can do it — not enough once `has_permission`
-  itself can't be trusted. Trade-off, stated plainly: this makes
-  System-Manager-level DocType read a hard requirement for any write once
-  precheck is unreliable, including a domain-scoped one — availability
-  loss, in exchange for never proceeding without positive, locally-confirmed
-  evidence. This is a corroborating signal, not a reimplementation of
-  Frappe's permission engine — User Permissions and `if_owner` scoping
-  aren't visible to it; see `_requester_has_role_permission()`'s own
-  docstring in `core/client.py`.
+  `requested_by` specifically can do it. Trade-off, stated plainly: this
+  makes System-Manager-level DocType read a hard requirement for ANY
+  write once precheck is unreliable — availability loss, in exchange for
+  never proceeding without positive, locally-confirmed evidence. A
+  corroborating signal, not a reimplementation of Frappe's permission
+  engine — User Permissions and `if_owner` scoping aren't visible to it;
+  see `_requester_has_role_permission()`'s own docstring in
+  `core/client.py`.
 - **Read audit logging, always on.** Every access gets an audit row in
   `Qkeee Bot Audit Log`, reads included, unconditionally — no debug flag
   gates this in `core/client.py`. The read-path exemption
   (`_LOG_READ_RECURSION_EXEMPT_DOCTYPES`) is narrow and purpose-keyed, not
   doctype-keyed: only a doctype/name check this connector runs on its own
   behalf (`resource_exists()`, `_fetch_doctype_role_permissions()`,
-  `_bot_identity()`) skips logging, via an explicit `internal=True` — never
-  a business-intent read, even of `User`/`Role`/`DocType` (contrast the
-  *write* path's `AUDIT_EXEMPT_DOCTYPES`, which does exempt those doctypes
-  wholesale for `init_bot.py`'s own bootstrap reasons — read and write
-  exemptions are deliberately different sets, don't conflate them).
-- **A denied requester-permission check is logged too, not just an allowed
-  one.** `_validate_prod_requester()` writes one gate-decision row to
-  `Qkeee Bot Audit Log` on every branch — denial or allow — via
-  `_log_gate_decision()`. A refused call raises before any read/write it
-  was guarding ever runs, so without this the gate itself would never log —
-  a denial would leave nothing in the audit trail, the opposite of what a
-  GRC review needs. Look for `response_payload.gate_check: true` to tell a
-  gate-decision row apart from a real read/write row sharing the same
-  action/status vocabulary.
-- **PII/GDPR redaction, single source.** `core.client.redact_pii()` is the
-  one place sensitive fields get scrubbed before display, storage, or
+  `_bot_identity()`) skips logging, via an explicit `internal=True` —
+  never a business-intent read, even of `User`/`Role`/`DocType` — contrast
+  the *write* path's `AUDIT_EXEMPT_DOCTYPES`, which does exempt those
+  doctypes wholesale for `init_bot.py`'s own bootstrap reasons; read and
+  write exemptions are deliberately different sets, don't conflate them.
+- **A denied requester-permission check is logged too, not just an
+  allowed one.** `_validate_prod_requester()` writes one gate-decision
+  row to `Qkeee Bot Audit Log` on every branch — denial or allow — via
+  `_log_gate_decision()`. Before this, a refused call
+  raised before any read/write it was guarding ever ran, and the gate
+  itself never logged — so a denial left literally nothing in the audit
+  trail, the opposite of what a GRC review needs. Look for
+  `response_payload.gate_check: true` to tell a gate-decision row apart
+  from a real read/write row sharing the same action/status vocabulary.
+- **PII/GDPR redaction, single source.** `core.client.redact_pii()` is
+  the one place sensitive fields get scrubbed before display, storage, or
   logging. Never re-implemented per domain.
 - **Requester attribution, on every write, unconditionally.** Every
   `mutate_resource()`/domain `mutate()` call requires a resolved
@@ -268,10 +260,16 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
   than blocking the write.
 - **`session_id`, `channel_metadata`, `latest_prompt` — resolve once per
   logical session, pass on every write, never leave blank because the
-  write "feels routine."** `execute_write.py` (`01-connectivity.md`) is the
-  one write entry point: it WARNs loudly on stderr before firing if any of
-  the three is missing — use it instead of hand-writing a write script, and
-  don't route around its warning.
+  write "feels routine."** Live-observed: hand-writing a fresh one-off
+  Python script per write is exactly how these three keep getting left
+  blank — `session_id` hardcoded to `""`, `channel_metadata` never built
+  at all, `latest_prompt` never passed (only a paraphrased
+  `prompt_summary`), even when the real platform thread id was sitting in
+  context the whole time. `execute_write.py` (`01-connectivity.md`,
+  worked examples in `cli-cookbook.md`) is the fix: it's the one write
+  entry point, and it WARNs loudly on stderr
+  before firing if any of the three is missing — use it instead of
+  hand-writing a write script, and don't route around its warning.
 - **`session_id` specifically — regenerate per platform session, never
   carry forward indefinitely.** A conversation resumed across a long gap
   (a day, a context-compaction event) can hand the connector a `session_id`
@@ -347,10 +345,10 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
   approved it. Never render a confirmation and consume its token in the
   same turn; `confirmation_token`/`issued_at` are only used after the
   user's own reply affirmatively confirms that specific rendered draft.
-- **`gated_mutate_resource()` additionally requires
-  `user_confirmation_text`** — the literal text of the user's own reply.
-  This is the domain-less advisory-token path (a doctype no named domain's
-  `mutate()` has a chance to layer a stricter rule onto, e.g. Item); a
+- **`gated_mutate_resource()` additionally requires `user_confirmation_text`
+  — the literal text of the user's own reply.** This is the domain-less
+  advisory-token path (a doctype no named domain's `mutate()` has a
+  chance to layer a stricter rule onto, e.g. Item); a
   matching `confirmation_token` alone is computable and verifiable by the
   same process in the same turn, proving only that the payload wasn't
   altered since render — same limit as the paragraph above. The render
@@ -363,31 +361,44 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
   (`register_domain_token_gate()`) — scoped to `gated_mutate_resource()`
   specifically.
 - **Non-ERPNext systems** — see `references/non-erpnext-adapter.md`:
-  explicitly request API docs, a user guide, or a URL before attempting any
-  action against a system that isn't ERPNext.
-- **Shipped skill is protected from autonomous drift.** `qkeee-erp-associate`
-  itself must stay outside Hermes' autonomous background-review lifecycle
-  maintenance so it never silently rewrites its own audit/RBAC/redaction
-  logic — only the `qkeee-erp-learned/*` satellite skills stay open to that
-  evolution. Mechanically this is a Hermes profile config decision, not
-  something set in this skill's own frontmatter: per
-  `agent/skill_utils.py`'s `is_external_skill_path()`, a skill directory
-  under `skills.external_dirs`, or a trusted project-local skills dir
-  (`get_project_skills_dirs()`), is treated as externally-owned —
-  discoverable and still editable by a foreground, user-directed tool call,
-  but read-only to the autonomous curator/background-review pass. Whoever
-  owns the target Hermes profile's `config.yaml` needs to confirm this
-  skill's install path resolves under one of those two — this is an
-  operator action, not something `qkeee-erp-associate`'s own code can
-  enforce on itself.
-- **Doc claims about skill-write gating are not self-enforcing — verify
-  `config.yaml` matches them.** `profile.md` states local skill writes are
-  gated by `skills.write_approval` and reviewed before landing; that's only
-  true if `skills.write_approval: true` is actually set in `config.yaml` —
-  the key defaults off (`tools/write_approval.py`), and a profile can drift
-  into having the doc claim without the config backing it. Same for
-  `curator.consolidate` (default off, `agent/curator.py`) — the mechanism
-  that would otherwise merge overlapping agent-created skills back into
-  this one doesn't run unless explicitly turned on. Neither is this
-  skill's own code to enforce; flag a mismatch to the operator if ever
-  discovered, same as the `external_dirs` check above.
+  explicitly request API docs, a user guide, or a URL before attempting
+  any action against a system that isn't ERPNext.
+- **Shipped skill is protected from autonomous drift; verify doc claims
+  against actual config.** `qkeee-erp-associate` must stay outside
+  Hermes' autonomous background-review lifecycle so it never silently
+  rewrites its own audit/RBAC/redaction logic — see
+  `references/governance.md` for the mechanism
+  (`skills.external_dirs`, the background-review write guard) and for
+  the two confirmed cases where a profile drifted into a doc claim its
+  `config.yaml` didn't actually back.
+
+## Report-back
+
+What goes back to the user at the end of a turn or task, every domain,
+every time. A live session shipped a confidently wrong remediation claim
+in its closing message once — this section exists so that doesn't repeat.
+
+1. **Line 1 states the outcome and scope** — what happened, which
+   environment tag, read-only or read-write. No preamble, no restating
+   the request back.
+2. **Records touched are a table**, never prose: doctype, name, action,
+   docstatus. A reader should be able to scan it in one pass, not parse
+   sentences for it.
+3. **Warnings lead, ahead of the detail** — each its own line, before the
+   narrative: `_audit_log_status` not `"ok"`/`"exempt"`, a waived KYC, a
+   `local-*` fallback session, a `has_more` truncation, an unconfirmed
+   field mapping. A warning buried in paragraph three is a warning that
+   didn't fire.
+4. **Verified and assumed never share a sentence.** A field re-fetched and
+   checked against the live record reads differently from one inferred or
+   carried forward from an earlier turn — say which is which, every time,
+   not just when it happens to matter.
+5. **A remediation claim is live-confirmed or labelled a guess.** Never
+   state what a fix would require ("this needs a custom field on X")
+   without having checked it against live schema first — an unconfirmed
+   claim is one sentence away from being wrong in a way the user will act
+   on.
+6. **Done when:** the reply's first line states outcome and scope, every
+   touched record appears in a table, every warning precedes the
+   narrative detail, and no remediation claim in it is unlabelled as
+   verified or guessed.

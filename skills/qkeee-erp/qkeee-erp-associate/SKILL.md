@@ -34,7 +34,10 @@ in `references/00-conventions.md`/`01-connectivity.md` — read those before
 the first ERPNext call of a session, alongside this file, not instead of
 it. Every procedure specific to a domain lives in
 `references/domains/<slug>.md`, latched only when the conversation's
-intent actually needs it.
+intent actually needs it. Two sibling skills handle what this one
+deliberately doesn't: `qkeee-erp-questionnaire` when a write is blocked
+on data only a different person holds, `qkeee-erp-handoff` before a
+context hand-off or compaction.
 
 ## Scope guardrail
 
@@ -54,6 +57,9 @@ action:
    permission error as its own distinct failure mode. State which tag +
    base URL this session is connected to before any read or write, and
    re-surface that statement after a gap or before a batch of writes.
+   **Done when:** the tag + base URL are stated in this reply and
+   `health` came back clean, or the failure is reported as its own
+   distinct step rather than silently retried.
 2. **Check whether a `qkeee-erp-learned/<env-tag>` skill already exists**
    for this tag (Hermes' own skill discovery surfaces it if so). If
    present, latch it like any other reference — it carries this
@@ -71,17 +77,22 @@ action:
    tool-calling loop; see that module's docstring for why). Stop at the
    first failed call and report a partial promotion rather than
    continuing past it. See `references/examples/qkeee-erp-learned-example/`
-   for the exact content shape this produces.
+   for the exact content shape this produces. **Done when:** either a
+   `qkeee-erp-learned/<env-tag>` skill is latched, or environment
+   assessment has run and its findings are fully promoted (or a partial
+   promotion is reported with the failed call named).
 3. **Cross-check the requesting user's identity against an ERPNext `User`
    record.** Resolve the inbound chat/email identity to a real ERPNext
    user id/email — on every environment, every call, no exceptions (see
    `01-connectivity.md`'s requester-identity rule and
    `00-conventions.md`'s GRC baseline). There is no env-var or config
-   default for `requested_by` — nothing to fall back to. Refuse to
-   proceed on a requester this skill cannot resolve. Never invent or
-   guess a requester identity, and never reuse a value resolved for an
-   earlier call/turn — resolve it fresh from the message actually being
-   handled right now.
+   default for `requested_by` — it does not exist as a fallback, so
+   there is nothing to fall back to. Refuse to proceed on a requester
+   this skill cannot resolve. Never invent or guess a requester identity,
+   and never reuse a value resolved for an earlier call/turn — resolve it
+   fresh from the message actually being handled right now. **Done when:**
+   a real ERPNext `User` id/email is resolved and stated, or the request
+   is refused with the reason named.
 4. **Classify intent against the domain table below; latch the matching
    `references/domains/*.md` file into context.** More than one domain
    file may apply mid-conversation (e.g. a procurement onboarding that
@@ -93,13 +104,19 @@ action:
    `domains/*.md` file. Skip `02-environment-assessment.md`,
    `03-spec-driven-execution.md`, and `grc-audit.md` unless step 2's
    staleness check or the intent itself actually needs them — loading
-   every reference file on every turn regardless of complexity wastes
-   input tokens for no benefit.
+   every reference file on every turn regardless of complexity was a
+   confirmed, measurable input-token cost in a token-usage review
+   (observed: 4-5 `skill_view` calls per turn even for a repeat, narrow
+   ask). **Done when:** exactly one matching `domains/*.md` file is
+   latched and named in this reply, or the fallback-investigation path
+   (`02-environment-assessment.md` / `non-erpnext-adapter.md`) is
+   declared instead.
 5. **State scope and mode (read-only / read-write) for the session**
    before taking any action — a short, explicit statement of which
    domain(s) are in play and whether writes are possible this session,
    restated after a gap or before a new batch of writes, same cadence as
-   step 1's environment reminder.
+   step 1's environment reminder. **Done when:** that statement appears
+   in this reply.
 6. **For anything beyond a single read-only lookup, run
    `references/03-spec-driven-execution.md` before acting.** Clarify,
    draft a crisp objective/plan/functional/technical spec, persist it,
@@ -109,7 +126,9 @@ action:
    skips the approval *conversation*, never the spec itself. When a
    functional area or an installed app's behavior is unfamiliar, pull in
    `references/04-erp-doc-lookup.md` to ground the spec against real
-   documentation rather than guessing.
+   documentation rather than guessing. **Done when:** a spec exists at
+   its persisted path, `approved`/`autonomous`, before
+   `03-spec-driven-execution.md`'s own step 6 (execute) starts.
 
 ## Domain table
 
@@ -146,6 +165,9 @@ all** (a third-party tool, an internal API) follows
   baseline. Read first, applies to every domain.
 - `references/01-connectivity.md` — REST/Frappe mechanics, env resolution,
   `discover.py` usage, the `qkeee-erp.env` design decision.
+- `references/cli-cookbook.md` — worked `core/client.py`/`execute_write.py`
+  invocations (copy-paste, not mechanics); latch only once a call is
+  actually about to run.
 - `references/02-environment-assessment.md` — the per-environment-tag
   cataloging procedure this activation sequence's step 2 depends on.
 - `references/03-spec-driven-execution.md` — clarify → spec → persist →
@@ -177,55 +199,8 @@ all** (a third-party tool, an internal API) follows
   illustrative findings — no live `skill_manage` call was exercised to
   create it; see that directory's `README.md`.
 - `qkeee-erp-associate.env.example` — template for `$HERMES_HOME/qkeee-erp.env`.
-
-## Governance: externally-owned, not curator-managed
-
-This shipped skill stays closed to Hermes' autonomous background-review
-pass, which could otherwise "improve" its audit/RBAC/redaction logic
-unsupervised, while the `qkeee-erp-learned/*` satellite skills stay open
-to that same evolution — that's the point of the split. The mechanism is
-`skills.external_dirs` in `config.yaml` (a config entry, not a
-frontmatter flag — `skill_usage.py` deliberately keeps this kind of
-policy out of user-authored SKILL.md content), which the background-
-review write guard (`_background_review_write_guard`) checks first and
-refuses any autonomous `edit`/`patch`/`delete`/`write_file`/`remove_file`
-against, unconditionally: external skills are read-only to the curator.
-This repo's own `config.yaml` lists `skills/qkeee-erp` under
-`skills.external_dirs`, which covers this skill. A foreground,
-user-directed edit is unaffected — the guard only blocks the autonomous
-curator pass. Belt-and-suspenders option for whoever operates the live
-profile: `hermes curator pin qkeee-erp-associate` additionally blocks
-`skill_manage(action="delete")` itself, not just autonomous writes — this
-requires a live profile/CLI, not a repo-side config change.
-
-## Status: what's actually code-enforced
-
-`scripts/core/client.py` and the domain modules with a write path are
-real, tested code, including RBAC-every-environment and always-on read
-audit logging (see `00-conventions.md`'s GRC baseline).
-
-"Advisory-first draft" covers two distinct things, and only one is
-code-enforced today:
-
-- **The double-confirm gate on submit/cancel/delete** (never let a write
-  through without a fresh, exact-match confirmation over what was just
-  shown to the user) is code-enforced, uniformly, via
-  `core.client.mutate_resource()`'s `DOMAIN_TOKEN_GATED_ACTIONS` registry
-  (`register_domain_token_gate()`) for accounts/hr-payroll/sales/
-  procurement/inventory's submit/cancel, and via each domain's own
-  bespoke token scheme for fixed-assets' depreciation/disposal and
-  system-admin's destructive/permission/config actions. Compute the token
-  via `scripts/core/confirm_token.py`'s `advisory-token` CLI (or a
-  domain's own token constructor) over the exact facts confirmed — never
-  hand-construct one.
-- **Composing the draft's actual content** — a Journal Entry's balance
-  check and narration, a cancel's impact statement, a Quotation's
-  presentation — still depends on the `render_*.py` scripts several
-  domain files describe, which are not yet present in this skill's
-  `scripts/` directory. The gate above refuses an unconfirmed
-  submit/cancel either way, but nothing yet code-assists producing the
-  draft itself; that part is still prompt discipline.
-
-Don't claim a capability is fully enforced in code without confirming it
-in `scripts/` — say what's live vs. planned plainly, the same discipline
-`references/domains/grc-audit.md` asks of any GRC-framed conversation.
+- `references/governance.md` — operator/maintainer material: why this
+  skill is externally-owned (curator-drift protection) and which
+  capabilities are actually code-enforced vs. still prompt discipline.
+  Read once at install or when auditing this skill's own health — not
+  needed for a normal session.

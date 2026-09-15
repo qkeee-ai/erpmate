@@ -41,11 +41,15 @@ prompt:
 ## Procedure
 
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
+   **Done when:** the target doctype is confirmed inside the tuple above
+   before any write is proposed.
 2. **Stock level queries**: fetch `Bin` rows via
    `domains.inventory.get_bin_qty()` for every warehouse in scope, sum
    them, and state the reconciliation (sum across queried warehouses vs.
    stated total) explicitly. Stock level is always item + warehouse; a
    "total" figure only means an explicit sum across a named warehouse set.
+   **Done when:** the sum-vs-stated-total reconciliation is stated in the
+   reply.
 3. **Stock transfer** (Issue/Receipt/Transfer/etc.): fetch a fresh
    `get_bin_qty()` balance for every `(item_code, s_warehouse)` pair among
    the drafted lines, convert with `bin_rows_to_actual_source_qty()`, and
@@ -56,7 +60,8 @@ prompt:
    line-items child table) and review every line — quantities and every
    Link field (`item_code`, `s_warehouse`, `t_warehouse`) resolve to real
    records and match what was confirmed — before `submit` as its own
-   step.
+   step. **Done when:** every drafted line's Link fields resolve to real
+   records and quantities match the confirmed draft, before `submit`.
 4. **Stock reconciliation**: resolve `Item.has_batch_no`/
    `Item.has_serial_no` for every item being reconciled first
    (`query_resource("Item", ...)`). Pass `current_valuation_rate` whenever
@@ -69,19 +74,25 @@ prompt:
    items) `batch_no` resolve to real records, and `qty`/`valuation_rate`
    match what was resolved via `get_stock_reconciliation_items()` — this
    review is not optional even when the pre-flight check already refused
-   an unresolved line, given the batch-inflation risk above.
+   an unresolved line, given the batch-inflation risk above. **Done
+   when:** every line's `current_qty`/`batch_no` came from
+   `get_stock_reconciliation_items()`, and the post-save re-fetch matched,
+   before the reconciliation is reported complete.
 5. **Reorder / Material Request triggers**: single-confirm, not double —
    a Material Request is a request, not a commitment; the buy/make
    decision belongs downstream. Recommend (don't require) a target
    `warehouse` for a Purchase-type request. A drafted, unsubmitted
-   Material Request is a complete, valid outcome on its own.
+   Material Request is a complete, valid outcome on its own. **Done
+   when:** one confirmation is given before `create`.
 6. **Batch/serial trace queries**: query `Stock Ledger Entry` filtered to
    the item/batch/serial, chronological order, feed the rows straight
    into the running-balance check — don't hand-reconstruct it. If the
    running balance comes back inconsistent, say so explicitly before
    presenting the trace as complete; usually a query-limit truncation
    (check `has_more`) or a genuine gap worth investigating, not something
-   to paper over.
+   to paper over. **Done when:** `has_more` is checked, and any
+   running-balance inconsistency is named rather than silently presented
+   as clean.
 
 ## Quick reference
 

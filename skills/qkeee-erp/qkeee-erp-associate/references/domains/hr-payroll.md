@@ -41,6 +41,8 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
 ## Procedure
 
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
+   **Done when:** the target doctype is confirmed inside the tuple above
+   before any write is proposed.
 2. **New employee onboarding and Employee updates** stage a draft that
    enforces ERPNext's mandatory fields and the live-discovered
    `status: "Left"` → `relieving_date` requirement, and flags PII fields.
@@ -52,11 +54,14 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
    `reports_to`, `company`, `holiday_list`) resolve to real records.
    Employee has no submit workflow, so this post-save review is the only
    checkpoint — fix via a further `update` and re-review if anything is
-   wrong.
+   wrong. **Done when:** every Link field on the re-fetched record
+   resolves to a real one, and any PII field present is flagged.
 3. **Offer Letter and Employee Onboarding stop at the advisory draft.**
    Do not continue into `create`/`submit` as part of this domain's own
    logic — if the user wants the write performed, that's a separate,
-   explicitly-confirmed step they direct.
+   explicitly-confirmed step they direct. **Done when:** the draft is
+   presented and no `create`/`submit` call has been made from inside this
+   step.
 4. **Leave Application submission needs two live-discovered
    preconditions**, not just declared-mandatory fields: `status` must be
    `Approved` or `Rejected` before submit (a fresh application defaults to
@@ -65,28 +70,37 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
    submission will work, don't rely on remembering it as a mental note.
    **Save-draft-then-review-then-submit:** `create` lands it `Open`/
    `docstatus 0`; re-fetch, set `Approved`/`Rejected` via `update` if
-   needed, re-review, only then `submit` as its own distinct step.
+   needed, re-review, only then `submit` as its own distinct step. **Done
+   when:** both preconditions are confirmed live, not assumed, before
+   `submit` fires.
 5. **Approving/submitting a Leave Application auto-creates an Attendance
    record for the covered dates; cancelling auto-cancels it too.** Explain
    this as expected system behavior. Correct an Attendance discrepancy
    that traces back to a Leave Application via the Leave Application, not
-   by editing the derived Attendance record directly.
+   by editing the derived Attendance record directly. **Done when:** any
+   correction routes through the Leave Application, never a direct edit
+   to the derived Attendance record.
 6. **Job Applicant is autonamed by `email_id`**, not a generated series —
    query/reference by email, and check for an existing record with that
-   email before creating a new one.
+   email before creating a new one. **Done when:** the email-based
+   existence check has run before `create` fires.
 7. **Interview Feedback should only be attributed to interviewers
    actually assigned to that Interview Round** — ERPNext enforces this
-   server-side; don't work around it.
+   server-side; don't work around it. **Done when:** the attributed
+   interviewer is confirmed assigned to the round.
 8. **HR reports** need a real reconciliation check first (department
    headcounts summing to total headcount, for example);
    `not_applicable` is only for reports with genuinely nothing to tie out
    (birthday/anniversary list, probation-ending list) and needs a stated
-   reason.
+   reason. **Done when:** a reconciliation check ran, or `not_applicable`
+   carries a stated reason.
 9. **Warn before delete on any HR record beyond a fresh, never-referenced
    one.** Once a record has any downstream auto-generated link (Leave
    Application → Attendance), delete stays blocked even after every
    record in the chain is cancelled. Prefer cancel over delete, and say so
-   upfront for anything past a bare create.
+   upfront for anything past a bare create. **Done when:** the
+   fresh-vs-referenced check ran, and the warning (or the cancel
+   alternative) was stated before delete is attempted.
 
 ## Quick reference
 

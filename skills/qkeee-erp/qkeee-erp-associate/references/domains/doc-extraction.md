@@ -50,14 +50,18 @@ or not.
    URL-fetch-capable tool, and prefer those over any bundled parsing. If
    the harness exposes no such mechanism at all, degrade gracefully:
    native multimodal reading covers PDF/DOCX/image directly in most
-   Claude-based harnesses; a web-fetch tool covers URLs.
+   Claude-based harnesses; a web-fetch tool covers URLs. **Done when:**
+   the harness's own tools were checked first, before falling back to
+   bundled logic.
 2. **Scanned/photographed images go through the same multimodal reading
    path as clean files** — no separate OCR dependency. Treat image
    quality as a first-class confidence signal: blur, glare, skew,
    handwriting, or a cropped edge push affected fields to `medium`/`low`
    confidence. If a load-bearing field (tax ID, bank account number) is
    illegible, say so explicitly and suggest a clearer capture rather than
-   guessing.
+   guessing. **Done when:** every affected field's confidence reflects
+   actual image quality, and any illegible load-bearing field is named
+   explicitly.
 3. **URLs are fetched, not assumed.** Extract from the returned content
    only. Any one of these signals is enough to mark every field pulled
    from a fetch `confidence: "low"` and say so in `notes` — don't wait for
@@ -65,18 +69,23 @@ or not.
    characters of actual content; it contains literal sign-in/paywall
    strings ("Sign in", "Join LinkedIn", "to see more", "Log in to view");
    or none of the expected section markers (name header, Experience,
-   Education) are present at all.
+   Education) are present at all. **Done when:** any one of the three
+   signals present is checked and, if triggered, every field from that
+   fetch is marked `confidence: "low"` with a `notes` reason.
 4. **Identify the target doctype shape** — Supplier, Invoice/Bill (+ line
    items), or Job Applicant/Employee — from context. Treat any field-
    mapping reference as a starting point, not verified ground truth,
-   unless confirmed against a live ERPNext instance.
+   unless confirmed against a live ERPNext instance. **Done when:** the
+   target shape is named, and any field-mapping reference used is marked
+   unconfirmed unless checked live.
 5. **Extract, and rate every field's confidence** as `high`/`medium`/
    `low`. A field not in the document/page at all is `value: null` — not
    omitted, not guessed. A field genuinely blank in the source is
    `value: ""` — present-but-empty, a different signal from `null`. For a
    repeating line item, tag each field with a `row` identifier (e.g.
    `"items[0]"`) so it renders as one grouped line item instead of
-   colliding into a flat table.
+   colliding into a flat table. **Done when:** every field carries both a
+   `confidence` rating and a `value` key (`null` or `""`, never omitted).
 6. **Render the staged report through a script, not reproduced inline**
    — the enforcement of the confidence/value-key requirements only holds
    if it's actually code-enforced. Refuse to render if any field is
@@ -88,24 +97,28 @@ or not.
    mention.
 
    **Known gap:** no dedicated `render_*.py` staged-report script exists
-   in this tree yet — this step is currently done inline, so the
-   confidence-rating/reconciliation-check requirement above is prompt
-   discipline here, not code-enforced. One step downstream it IS
-   code-enforced: when this domain's output is handed to a write path via
+   in this tree yet — this step has historically been done inline, which
+   is exactly how the confidence-rating/reconciliation-check requirement
+   documented here has gone unrun before. The confidence/value-key
+   refusal rule IS code-enforced now, one step downstream: when this
+   domain's output is handed to a write path via
    `execute_write.py --staged-fields`, `schema_mapping.match_staged_report()`
-   refuses with `MalformedStagedReportError` on any field missing
-   `confidence` or `value`, and additionally flags a field that's both
-   `confidence: "low"` and unmatched against the live doctype schema as
-   high-risk before any write can proceed. That doesn't replace a real
-   render step for the report itself (still owed) — it means a
-   downstream write can no longer silently consume a malformed staged
-   report even though nothing currently code-enforces the report's own
-   construction.
+   refuses with `MalformedStagedReportError` on any field
+   missing `confidence` or `value`, and additionally flags a field that's
+   both `confidence: "low"` and unmatched against the live doctype schema
+   as high-risk before any write can proceed. That does not replace a real
+   render step for the report itself (still owed) — it means a downstream
+   write can no longer silently consume a malformed staged report even
+   though nothing currently code-enforces the report's own construction.
+   **Done when:** an invoice's `reconciliation_check` field is populated,
+   and no field is missing `confidence`/`value` in what's handed
+   onward.
 7. **Hand the staged report back** to the user, or to the calling domain
    if invoked mid-task (e.g. from `domains/procurement.md`'s supplier
    onboarding). The receiving domain is responsible for its own Confirm →
    Execute steps against ERPNext — this domain's job ends at the staged
-   report.
+   report. **Done when:** the staged report is handed back and no write
+   has been attempted from inside this domain.
 8. **Standalone use is fine.** Nothing here assumes an ERPNext context —
    pulling structured fields out of a PDF, scanned image, or shared URL
    for an unrelated purpose is a legitimate, unblocked use.

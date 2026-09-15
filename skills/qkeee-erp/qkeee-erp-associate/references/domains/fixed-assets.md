@@ -41,6 +41,8 @@ of or scrapping an asset, running a physical asset verification.
 ## Procedure
 
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
+   **Done when:** the target doctype/RPC is confirmed inside this
+   domain's scope before any write is proposed.
 2. **Route the four disposal/depreciation RPCs**
    (`make_depreciation_entry`, `scrap_asset`, `restore_asset`,
    `make_sales_invoice`) through
@@ -50,6 +52,9 @@ of or scrapping an asset, running a physical asset verification.
    additionally requires a `confirmation_token` matching what a render
    script computed — the call is refused without it. `restore_asset` is
    mode-gated but not token-gated (a recovery action, not a write-off).
+   **Done when:** the call went through `call_whitelisted_method()`, never
+   a raw request, and (for the three double-confirm methods) carried a
+   fresh matching token.
 3. **Asset capitalization**: a draft is only "ready" when cost basis is
    present and nonzero (or a stated reason for zero), the source is
    unambiguous (a linked purchase document, or `is_existing_asset`
@@ -63,22 +68,31 @@ of or scrapping an asset, running a physical asset verification.
    for the `submit` — never call plain `mutate()` for an Asset submit, or
    the TOCTOU concurrency check is silently skipped. Submitting an Asset
    also submits its auto-created Asset Depreciation Schedule in the same
-   call — the review must cover the schedule config too.
+   call — the review must cover the schedule config too. **Done when:**
+   cost basis, source, and (if applicable) the finance book are all
+   confirmed present, and the schedule config was reviewed before
+   submit.
 4. **Depreciation runs**: fetch every `Depreciation Schedule` row with
    `schedule_date <= today` and an empty `journal_entry` (the "pending"
    rows) first — never guess at what's due. Use the asset's current book
    value from `Asset.finance_books[N].value_after_depreciation`, NOT the
-   top-level `Asset.value_after_depreciation` field, which does NOT
-   update after a run (a stale-field trap). Only after both the render
-   and the second confirmation, call `call_whitelisted_method()` with
-   `"make_depreciation_entry"` and the printed `confirmation_token`.
+   top-level `Asset.value_after_depreciation` field, which is confirmed
+   live to NOT update after a run (a stale-field trap). Only after both
+   the render and the second confirmation, call
+   `call_whitelisted_method()` with `"make_depreciation_entry"` and the
+   printed `confirmation_token`. **Done when:** the pending-rows fetch,
+   the current-book-value read from `finance_books[N]` (never the stale
+   top-level field), and both confirmations all happened before the RPC
+   fired.
 5. **Asset transfer**: see the non-negotiable above for the location
    freshness check. Receipt items are exempt (no prior location to
    check). Present, confirm, `create` (lands `docstatus 0`).
    **Save-draft-then-review-then-submit:** re-fetch via `get_resource()`
    (needed for the per-row child table) and check `asset`,
    `source_location`, `target_location`, `to_employee`/`from_employee`
-   Link fields resolve to real records before `submit`.
+   Link fields resolve to real records before `submit`. **Done when:**
+   every Link field on the re-fetched record resolves to a real record,
+   before `submit`.
 6. **Disposal (scrap or sale)**: require a stated `reason` (never accept a
    bare "dispose it"). For scrap, the entire current book value (from
    `finance_books[]`, not the stale top-level field) is the write-off
@@ -90,18 +104,23 @@ of or scrapping an asset, running a physical asset verification.
    `"make_sales_invoice"` and the printed token. **The sale path
    (`make_sales_invoice` through eventual submission) is not confirmed
    live-tested end to end** — treat its exact field defaults/error modes
-   as unconfirmed until it is.
+   as unconfirmed until it is. **Done when:** a stated reason, the
+   correct book-value/proceeds figure, and both confirmations are in
+   place before the RPC fires.
 7. **Asset maintenance scheduling and Asset Repair** are moderate-risk,
    single-confirm (not double) — they don't carry the same book-value/
    write-off stakes. Stage a normal draft, confirm, `create`/`update` via
    `mutate()`, submit via `mutate_resource_with_concurrency()`. If
    `capitalize_repair_cost` is set on a repair, say so explicitly since it
-   changes the asset's book value going forward.
+   changes the asset's book value going forward. **Done when:** one
+   confirmation is given and, if `capitalize_repair_cost` is set, that
+   impact is stated.
 8. **Asset audit / physical verification checklists**: no single figure
    to tie out — declare `not_applicable` with the reason in `notes`. A
    depreciation-schedule-review report DOES have a tie-out (sum of
    scheduled depreciation amounts vs. depreciable base) — use it, don't
-   hand-check it.
+   hand-check it. **Done when:** a real tie-out ran where one exists, or
+   `not_applicable` carries a stated reason.
 
 ## Quick reference
 

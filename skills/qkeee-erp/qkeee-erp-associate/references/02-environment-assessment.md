@@ -56,13 +56,24 @@ tools.
       app, or genuinely custom.
    b. `discover.py meta "<DocType>"` — live field list, mandatory flags,
       Link targets. Never propose a shape without this.
-   c. Companion Frappe-ecosystem app: fetch its GitHub README/docs (most
-      live under the `frappe` org) for purpose, key doctypes, typical
-      workflows. Cross-check against the live metadata from (b); note any
-      discrepancy rather than silently preferring one source.
-   d. Genuinely org-specific custom app with no public repo: build
-      understanding from live metadata plus what the user explains, and
-      say so explicitly.
+   c. For a companion Frappe-ecosystem app: fetch its GitHub README/docs
+      (most live under the `frappe` GitHub org) for what it's for, its key
+      doctypes, and typical workflows — cross-check against the live
+      metadata from step (b); note any discrepancy rather than silently
+      preferring one source.
+   d. For a genuinely org-specific custom app with no public repo: build
+      the understanding from live metadata + whatever the user explains,
+      and say so explicitly rather than inventing an upstream source.
+   e. **Reproduce red before diagnosing an unexpected result.** A **red**
+      result — an error, a 403, a blocked call — needs a concrete repro
+      that actually fails on the exact thing that's wrong before it gets
+      explained, not a plausible-sounding guess about why it might be
+      expected. Read the rest of the same tool output first: a WARN or
+      status field printed alongside the error outranks any prior
+      assumption about what should be true (a `privileged: true` WARN one
+      line above a 403 means the 403 isn't a low-privilege story, however
+      intuitive that story feels) — never call a failure "expected"
+      without having read everything the call itself already said.
 5. **Cross-check the requester's identity.** Per the activation
    sequence's step 2 (`SKILL.md`) — runs every session, not just first
    contact. First contact is also where "is this bot account a dedicated

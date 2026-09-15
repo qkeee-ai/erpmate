@@ -23,14 +23,17 @@ this domain in the shipped skill yet, full stop. Anything below framed as
 "drafting/creating" a manufacturing doctype describes a future build
 target, not a live capability.
 
-## When this domain would apply (once built)
+## When this domain applies
 
 Building or reviewing a Bill of Materials, planning production (Production
 Plan / MRP), creating or tracking a Work Order, logging shop-floor
 progress via Job Card, or checking raw-material availability against a
-planned production run.
+planned production run — once built; see the intro above.
 
-## Proposed non-negotiables (unvalidated — confirm before trusting)
+## Non-negotiables specific to this domain
+
+Proposed, unvalidated — confirm each against a live instance before
+trusting it, same caveat as the intro above.
 
 - **A BOM change on an already-consumed-in-production item needs the same
   save-draft-then-review-then-submit discipline as any other domain** —
@@ -49,37 +52,51 @@ planned production run.
   transfers — unconfirmed which Job Card actions are submittable vs.
   plain status updates on this ERPNext version family.
 
-## Proposed procedure (draft, needs live confirmation)
+## Procedure
+
+Draft, needs live confirmation — same caveat as the intro above.
 
 1. Before proposing any manufacturing-specific field or workflow, run
    `discover.py resolve "BOM"` / `"Work Order"` / `"Job Card"` and
    `discover.py meta` for each — per `01-connectivity.md`'s non-negotiable
    4, do not carry general ERPNext manufacturing knowledge into a specific
    org's instance without this confirmation, especially here where no
-   prior build has ever done it.
+   prior build has ever done it. **Done when:** every field/doctype
+   claim in the ensuing draft traces to a live `discover.py` result, not
+   general knowledge.
 2. **BOM (Bill of Materials):** review/draft the item/operation/raw-
    material structure. Query existing BOMs for an item before assuming
    none exists (`query_resource("BOM", filters=[["item","=",...]])`).
    Flag (don't silently accept) a BOM with no default marked, or more than
    one active default for the same item — a likely-inconsistent-state
-   signal worth surfacing, not silently picking one.
+   signal worth surfacing, not silently picking one. **Done when:** the
+   existing-BOM check ran and any default-marking ambiguity is flagged,
+   not picked silently.
 3. **Production Plan / MRP:** raw-material requirement aggregation across
    planned Work Orders — prefer any built-in ERPNext report over hand-
    aggregating BOM explosions, per `01-connectivity.md`'s "built-in
    reports vs. hand-aggregated queries" guidance, once one is confirmed to
-   exist for this purpose on a target instance.
+   exist for this purpose on a target instance. **Done when:** a built-in
+   report was checked for first, and only if absent is a hand-aggregation
+   attempted.
 4. **Work Order:** stage a draft (item, BOM, qty, warehouses) and check
    raw-material availability via `domains/inventory.md`'s
    `get_bin_qty()`-style freshness check before marking "ready" — reused
    convention, not yet wired into any manufacturing-specific renderer.
    Save-draft-then-review-then-submit, same as every write-capable domain
    — this is a Non-negotiable in `00-conventions.md` regardless of domain,
-   not something manufacturing gets to skip for being new.
+   not something manufacturing gets to skip for being new. **Done when:**
+   the freshness check ran and the draft was reviewed post-save, before
+   any submit.
 5. **Job Card:** log shop-floor progress against a Work Order's
    operations. Confirm the Job Card's parent Work Order and operation Link
    fields resolve to real records before reporting progress recorded.
+   **Done when:** both Link fields are confirmed resolved before progress
+   is reported.
 
-## Quick reference (proposed, not yet built)
+## Quick reference
+
+Proposed, not yet built — see the intro above.
 
 | Capability | Outcome | Status |
 | --- | --- | --- |
@@ -88,9 +105,13 @@ planned production run.
 | Work Order creation/tracking | Production run drafted/tracked | Not built — needs stock-availability check design, analogous to inventory's |
 | Job Card logging | Shop-floor progress recorded | Not built — submit/status-transition behavior unconfirmed |
 
-## What this domain deliberately doesn't try to do yet
+## Relationships
 
-No write capability ships today. Read-only exploration (via the generic
+Reuses `domains/inventory.md`'s `get_bin_qty()` freshness-check
+convention for Work Order raw-material availability (proposed step 4
+above) rather than reinventing it — the one concrete cross-domain link
+this file has today. **What this domain deliberately doesn't try to do
+yet:** no write capability ships. Read-only exploration (via the generic
 `core.client.query_resource()`/`get_resource()`/`run_query_report()`,
 with `domain=` omitted since there's no allowlist yet to gate against) is
 usable today for a user who just wants to look at BOM/Work Order/Job Card

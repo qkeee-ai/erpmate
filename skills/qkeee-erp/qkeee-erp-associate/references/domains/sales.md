@@ -33,6 +33,8 @@ or Delivery Note stands, a lightweight sales pipeline view.
 ## Procedure
 
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
+   **Done when:** the target doctype is confirmed inside the tuple above
+   before any write is proposed.
 2. **Customer onboarding's 3-step execute order must be followed exactly,
    never parallelized or reordered:**
    1. `mutate Customer create`.
@@ -51,7 +53,8 @@ or Delivery Note stands, a lightweight sales pipeline view.
    `customer_group`/`territory`/`customer_primary_contact` resolve to real
    records and `mobile_no`/`email_id` are actually populated. Neither
    Customer nor Contact is submittable — this post-save re-fetch is the
-   only checkpoint.
+   only checkpoint. **Done when:** all three steps ran in order and the
+   post-save re-fetch confirms `mobile_no`/`email_id` are populated.
 3. **Quotation drafting**: resolve `Item.is_sales_item` for every line's
    `item_code` first (query `Item` directly) — never assume "sales-
    enabled" by default; a non-sales-enabled item line fails live with a
@@ -63,7 +66,9 @@ or Delivery Note stands, a lightweight sales pipeline view.
    via `get_resource()` (the line-item child table check needs it) and
    confirm every Link field resolves to a real record before ever
    offering to submit — submission is a second, distinctly-confirmed call,
-   never bundled with create.
+   never bundled with create. **Done when:** every Link field on the
+   re-fetched Quotation resolves to a real record, before submission is
+   even offered.
 4. **Sales Order status and Delivery Note tracking** use `query_resource`
    with explicit `fields` (`name`, `status`, `delivery_status`,
    `per_delivered`, `billing_status`, `per_billed`, `customer`) — no
@@ -73,7 +78,9 @@ or Delivery Note stands, a lightweight sales pipeline view.
    never collapsed into one "status." When investigating a fulfilment
    mismatch specifically, also query `Delivery Note Item` (`parent`,
    `against_sales_order`, `so_detail`) — a missing `so_detail` is the
-   likely cause of a `per_delivered` mismatch.
+   live-confirmed likely cause of a `per_delivered` mismatch. **Done
+   when:** delivery and billing fulfilment are reported as two separate
+   figures, never collapsed into one.
 5. **Sales pipeline-lite reporting**: query `Quotation` grouped/counted by
    `status` for the quotation-stage side (no dedicated built-in report
    confirmed for this lens — hand-aggregate, and pass the true total row
@@ -81,7 +88,8 @@ or Delivery Note stands, a lightweight sales pipeline view.
    filter bug). For the Sales Order side, prefer the built-in **"Sales
    Order Analysis"** report over hand-reconstructing delay/pending-amount
    math. Never present a failed reconciliation without the specific
-   issues explaining why.
+   issues explaining why. **Done when:** the reconciliation check ran and
+   any failure names the specific issues, not just "doesn't reconcile."
 
 ## Quick reference
 

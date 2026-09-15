@@ -43,11 +43,15 @@ integrations, checking instance health.
 ## Procedure
 
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
+   **Done when:** the target doctype/action is confirmed inside this
+   domain's scope before any write is proposed.
 2. **Permission-related reads go through the dedicated Role Permission
    Manager methods** (`get_roles_and_doctypes()`, `get_permissions()`) —
    plain `query_resource("DocPerm", ...)` fails live with a
    `PermissionError`; these are the only confirmed working read path.
-   Always read-only, never gated.
+   Always read-only, never gated. **Done when:** the read used
+   `get_roles_and_doctypes()`/`get_permissions()`, never a raw
+   `DocPerm` query.
 3. **User creation** goes through `create_user()`. Never infer roles from
    a vague request ("give them access to procurement") — resolve to exact
    role names first (`query_resource("Role", ...)` lists what actually
@@ -63,7 +67,8 @@ integrations, checking instance health.
    `query_resource` — it silently drops the `roles` child table) and check
    that the `roles` table lists exactly the confirmed role names and no
    extra role slipped in. User isn't submittable — this re-fetch is the
-   only checkpoint.
+   only checkpoint. **Done when:** the re-fetched `roles` table matches
+   the confirmed role names exactly, no extra role present.
 4. **Any permission change** goes through `call_permission_manager()` —
    and requires asking a second time after showing it. Four actions, all
    token-gated: `add` (bare new row, every right off — grants nothing by
@@ -81,25 +86,31 @@ integrations, checking instance health.
    `get_permissions()` after every action (not just `remove`) and confirm
    the resulting matrix matches the stated before/after — permission rows
    have no separate submit step, so this post-write re-fetch is the only
-   checkpoint.
+   checkpoint. **Done when:** the re-fetched matrix matches the stated
+   before/after, for every action including `remove`.
 5. **Simple DocType customization** (one Custom Field, or one Property
    Setter value change) — pass `existing_fieldnames` (query `Custom
    Field` filtered by `dt`) so a fieldname collision is caught here, not
    as an opaque create failure. Anything beyond one field/one property is
    a complex case — give step-by-step guidance instead. **Verify by
    re-querying the `Custom Field`/`Property Setter` resource directly by
-   its own name — NOT `DocType/<dt>` meta**: a freshly created Custom
-   Field does not appear in the DocType meta's `fields` array (server-side
-   cache), and cache-clear isn't callable over this REST API even as
-   Administrator. Trust the direct resource query, and confirm the
-   persisted `dt` Link matches what was confirmed.
+   its own name — NOT `DocType/<dt>` meta**: confirmed live, a freshly
+   created Custom Field does not appear in the DocType meta's `fields`
+   array (server-side cache), and cache-clear isn't callable over this
+   REST API even as Administrator. Trust the direct resource query, and
+   confirm the persisted `dt` Link matches what was confirmed. **Done
+   when:** the verification query hit the `Custom Field`/`Property
+   Setter` resource directly, never `DocType/<dt>` meta.
 6. **Email/notification settings review is read-only** —
-   `query_resource("Notification", ...)`.
+   `query_resource("Notification", ...)`. **Done when:** no write call
+   is attempted from inside this step.
 7. **Data import/export assist is guidance-first.** `Data Import`'s schema
    is confirmed live but actual execution needs a binary file upload —
    this connector has no upload primitive, so walk the user through the
    Data Import tool in the ERPNext UI rather than attempting to drive it.
    Reviewing existing Data Import records' status is fully supported.
+   **Done when:** the user has UI-level guidance in hand, or the status
+   review is complete — never an attempt to drive the import itself.
 8. **Integration/webhook config review** — `query_resource("Webhook",
    ...)` lists configured webhooks. Creating a new Webhook is a real
    outbound data-destination change — an attack surface, not a passive
@@ -108,23 +119,29 @@ integrations, checking instance health.
    (`kind="toggle_workflow"`), since it can halt every in-flight approval
    on that document type; anything more (new states/transitions) is
    guidance only. Re-fetch and confirm the persisted fields after either
-   write, same as any other domain's save-then-review discipline.
+   write, same as any other domain's save-then-review discipline. **Done
+   when:** the re-fetched fields are confirmed persisted, for either
+   write path.
 9. **System health check**: combine `get_scheduler_status()`, a
    `Scheduled Job Type` query (flag `stopped: 1` or a stale
    `last_execution`), and the most recent `Error Log` rows. **The `RQ Job`
-   doctype is NOT usable via this REST API** — it 500s with a `TypeError`
-   unrelated to auth/permissions. Report this gap explicitly and point to
-   the fallback (Frappe desk UI's Background Jobs page, or `bench` CLI if
-   the user has server access). `not_applicable` unless a specific
-   numeric check is being made.
+   doctype is NOT usable via this REST API** — confirmed live 500 with a
+   `TypeError` unrelated to auth/permissions. Report this gap explicitly
+   and point to the fallback (Frappe desk UI's Background Jobs page, or
+   `bench` CLI if the user has server access). `not_applicable` unless a
+   specific numeric check is being made. **Done when:** all three signals
+   are combined in the report, or the specific gap (e.g. `RQ Job`) is
+   named with its fallback rather than silently omitted.
 10. **Disabling/deleting a user, or deleting a Custom Field/Property
     Setter/Webhook/Workflow**, always goes through `destructive_mutate()`
     — and requires asking a second time after showing it. Require a
     stated `reason`. Prefer `disable_user` over `delete_user` unless the
-    account must be gone entirely — disable is reversible; delete fails
-    with `LinkExistsError` on any user who owns/created other records (a
-    never-referenced user deletes cleanly). Only after both confirmations,
-    call `destructive_mutate()` with the printed token.
+    account must be gone entirely — disable is reversible; delete is
+    confirmed to fail with `LinkExistsError` on any user who owns/created
+    other records (a never-referenced user deletes cleanly). Only after
+    both confirmations, call `destructive_mutate()` with the printed
+    token. **Done when:** a stated reason and both confirmations are in
+    place before `destructive_mutate()` fires.
 
 ## Quick reference
 

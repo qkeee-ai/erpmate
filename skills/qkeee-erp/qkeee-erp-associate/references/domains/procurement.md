@@ -18,29 +18,32 @@ checking a supplier's performance.
 
 - **Never create a live Supplier record with incomplete mandatory KYC/
   bank fields — code-enforced, not just this document.** This domain's
-  KYC bar is stricter than ERPNext's own: ERPNext's hard-mandatory
-  Supplier fields are only `supplier_name` + `supplier_type`; the fuller
-  bar here (identity/classification, tax ID, bank/payable details) must
-  be enforced before a draft is marked "ready." Incomplete extractions
-  must be flagged, never silently filled with a placeholder.
-  `procurement.mutate(..., "Supplier", "create")` refuses outright
-  (`IncompleteSupplierKYCError`) unless the call carries either
-  `kyc={"address": {...}}` (see "Supplier KYC write order" below) or an
-  explicit `kyc_waiver_confirmed=True` — code-enforced, matching how the
-  other non-negotiables in `00-conventions.md` are backed by code rather
-  than left to prompt discipline.
+  KYC bar is stricter than ERPNext's own (confirmed live: ERPNext's
+  hard-mandatory Supplier fields are only `supplier_name` +
+  `supplier_type`) — the fuller bar (identity/classification, tax ID,
+  bank/payable details) must be enforced before a draft is marked
+  "ready." Incomplete extractions must be flagged, never silently filled
+  with a placeholder. `procurement.mutate(..., "Supplier", "create")`
+  refuses outright (`IncompleteSupplierKYCError`) unless the call carries
+  either `kyc={"address": {...}}` (see "Supplier KYC write order" below)
+  or an explicit `kyc_waiver_confirmed=True` — a live session let this
+  slip once already by treating it as optional scope; this is the
+  backstop for that, matching how the other non-negotiables in
+  `00-conventions.md` are
+  code-enforced rather than left to prompt discipline.
 - **Tax ID lives on Address, never on Supplier — do not retry a
   `gstin`/`tax_id` field write against Supplier itself.** ERPNext's
   India-Compliance GSTIN field (and tax ID generally, per country) is a
   field on the **Address** doctype, linked back to Supplier via Frappe's
-  standard Dynamic Link `links` child table — not a field on Supplier. A
-  `gstin` write against Supplier is silently dropped (Frappe ignores
-  unrecognized fields rather than rejecting them), which can look like
-  GSTIN "needs a custom field on Supplier." It doesn't — it needs an
-  Address record, created and linked the normal way. Confirm the live
-  field name for this instance via `discover.py meta "Address"` (`gstin`,
-  `tax_id`, `pan`, or an instance-specific custom field — never assumed)
-  before building the `kyc.address` payload below.
+  standard Dynamic Link `links` child table — not a field on Supplier.
+  Live-confirmed the wrong way once: a `gstin` write against
+  Supplier was silently dropped (Frappe ignores unrecognized fields
+  rather than rejecting them), and the session concluded — incorrectly —
+  that GSTIN "would need a custom field on Supplier." It doesn't; it
+  needs an Address record, created and linked the normal way. Confirm the
+  live field name for this instance via `discover.py meta "Address"`
+  (`gstin`, `tax_id`, `pan`, or an instance-specific custom field — never
+  assumed) before building the `kyc.address` payload below.
 - **Draft-only is the hard default for Purchase Order submission absent
   confirmed submission authority — not just "when unsure."** Where no
   Workflow is configured for Purchase Order, role membership (Purchase
@@ -53,6 +56,8 @@ checking a supplier's performance.
 ## Procedure
 
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
+   **Done when:** the target doctype is confirmed inside the tuple above
+   before any write is proposed.
 2. **Supplier onboarding — Supplier → Address → Contact, one `mutate()`
    call.** Present the drafted, KYC-complete record (Supplier fields plus
    the Address the tax ID/registered address will carry, and Contact if
@@ -86,7 +91,9 @@ checking a supplier's performance.
    same way if KYC was captured, and confirm the tax-ID field actually
    persisted (don't assume — a field that doesn't exist on this
    instance's Address doctype is silently dropped the same way it is on
-   Supplier).
+   Supplier). **Done when:** the re-fetched Supplier's Link fields
+   resolve to real records, and (if KYC was captured) the tax-ID field is
+   confirmed actually persisted on the re-fetched Address.
 3. **Purchase Order drafting**: check the practical warehouse requirement
    for stock-tracked lines first (not visible in the DocType's `reqd`
    flags). Before treating submission authority as confirmed, check for a
@@ -104,7 +111,8 @@ checking a supplier's performance.
    endpoint silently drops the line-items child table) and review every
    Link field (`supplier`, each line's `item_code`, `warehouse`,
    `cost_center`). Never chain create straight into submit even when
-   authority is confirmed.
+   authority is confirmed. **Done when:** every Link field on the
+   re-fetched PO resolves to a real record, before `submit`.
 4. **RFQ/Supplier Quotation comparison and GRN matching** need a real
    quotation-coverage check (per supplier: was every invited item quoted,
    name exactly what's missing, state that before ranking on price) and a
@@ -113,10 +121,13 @@ checking a supplier's performance.
    where both apply) — don't hand-aggregate coverage or discrepancies
    inline without those two checks. `not_applicable` is only for reports
    with nothing to tie out (a bare PO status lookup) and needs a stated
-   reason.
+   reason. **Done when:** both the coverage check and the GRN-match
+   check have run, or `not_applicable` carries a stated reason.
 5. **Supplier Scorecard queries are documentation-grounded, not
    universally live-tested** — say so on first real use against a new
    instance, and treat that first real query as the effective validation.
+   **Done when:** the documentation-grounded caveat is stated on first
+   real use against a new instance.
 
 ## Quick reference
 
