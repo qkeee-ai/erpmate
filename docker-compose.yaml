@@ -35,6 +35,15 @@ services:
       # - HERMES_PROFILE_GIT_TOKEN_FILE=/run/secrets/gh_token   # docker secret
       # - HERMES_PROFILE_SSH_KEY_FILE=/run/secrets/deploy_key   # git@github.com:... source
       # - HERMES_PROFILE_AUTO_UPDATE=1   # `hermes profile update` on every boot
+      # jev first-boot init (models suggest --write, doctor, /jev routing).
+      # Routing is only enabled once the key is present (doctor passes).
+      - TYPESAFE_API_KEY=${TYPESAFE_API_KEY:-}
+      - JEV_ROUTING_MODE=${JEV_ROUTING_MODE:-on}   # on | shadow | off
+      # Seed routing.json from a host file instead of the baked default
+      # (mount it, then point at the in-container path; never overwrites):
+      # - JEV_ROUTING_FILE=/opt/routing.json         # + volume ./routing.json:/opt/routing.json:ro
+      # - JEV_INIT_PROFILES=qk-prod-erp default      # default: HERMES_PROFILE_NAME
+      # - JEV_INIT_ENABLE=0                          # skip jev init
       # Set to 0 to skip enabling hermes-lcm (context.engine=lcm) at boot:
       # - HERMES_LCM_ENABLE=0
       # Uncomment to forward specific env vars instead of using .env file:

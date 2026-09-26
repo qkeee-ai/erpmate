@@ -1,0 +1,101 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# First-boot jev initialisation, automating the manual steps:
+#   jev models suggest --write   -> draft <profile>/jev/routing.json (once)
+#   jev doctor                   -> validate; exit 0 == API key present
+#   /jev routing on|shadow       -> write <profile>/jev/state.json
+# Runs after 017-jev-skills (jev installed) and 016-profile-install (profile exists).
+#
+# API key: provide TYPESAFE_API_KEY in the container env. jev reads it before the
+# OS secret store, so `jev setup-key` is not needed. Without a key, routing.json
+# is still drafted but routing stays off; the next boot enables it once the key
+# is present.
+#
+#   JEV_INIT_ENABLE=0          skip this hook
+#   JEV_INIT_PROFILES          space-separated profiles ("default" = $HERMES_HOME);
+#                              default: $HERMES_PROFILE_NAME
+#   JEV_ROUTING_MODE           on | shadow | off   (default: on)
+#
+# Idempotent: `models suggest --write` overwrites routing.json, so it runs once
+# per profile (marker file); a routing mode already in state.json (e.g. the
+# operator ran `/jev routing off`) is never overridden. Non-fatal.
+
+[ "${JEV_INIT_ENABLE:-1}" = "0" ] && { echo "[jev-init] disabled via JEV_INIT_ENABLE=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+MODE="${JEV_ROUTING_MODE:-on}"
+TARGETS="${JEV_INIT_PROFILES:-${HERMES_PROFILE_NAME:-qk-prod-erp}}"
+JEV=/opt/jev-skills/bin/jev
+[ -x "$JEV" ] || JEV=jev
+
+case "$MODE" in on|shadow|off) ;; *) echo "[jev-init] WARNING: bad JEV_ROUTING_MODE=$MODE; using shadow" >&2; MODE=shadow ;; esac
+
+# jev resolves the profile from HERMES_HOME (profiles/<name> => that profile).
+jrun() { HOME=/opt/data HERMES_HOME="$H" s6-setuidgid hermes "$@"; }
+
+for name in $TARGETS; do
+    if [ "$name" = default ]; then H="$HERMES_HOME"; else H="$HERMES_HOME/profiles/$name"; fi
+    tag="[jev-init:$name]"
+    [ -d "$H" ] || { echo "$tag WARNING: $H missing (profile not installed?); skipping" >&2; continue; }
+    jrun mkdir -p "$H/jev" || continue
+
+    marker="$H/jev/.docker-init-done"
+
+    # Seed a curated routing.json if the profile has none. Never overwrites an
+    # existing one. Source precedence: JEV_ROUTING_FILE (mounted from the host),
+    # then the default baked into the image.
+    if [ ! -e "$H/jev/routing.json" ]; then
+        src=""
+        if [ -n "${JEV_ROUTING_FILE:-}" ]; then
+            if [ -f "$JEV_ROUTING_FILE" ]; then src="$JEV_ROUTING_FILE"
+            else echo "$tag WARNING: JEV_ROUTING_FILE=$JEV_ROUTING_FILE not found; trying baked default" >&2; fi
+        fi
+        [ -z "$src" ] && [ -f /opt/defaults/jev/routing.json ] && src=/opt/defaults/jev/routing.json
+        if [ -n "$src" ]; then
+            if python3 -m json.tool "$src" >/dev/null 2>&1; then
+                jrun cp "$src" "$H/jev/routing.json" && jrun touch "$marker" \
+                    && echo "$tag seeded routing.json from $src"
+            else
+                echo "$tag WARNING: $src is not valid JSON; not seeding" >&2
+            fi
+        fi
+    fi
+
+    # Only draft one when the profile still has none (suggest --write overwrites).
+    if [ ! -e "$marker" ] && [ ! -e "$H/jev/routing.json" ]; then
+        if out="$(jrun "$JEV" models suggest --write 2>&1)"; then
+            echo "$tag models suggest: $out"
+            jrun touch "$marker"
+        else
+            echo "$tag WARNING: models suggest --write failed (network?); will retry next boot: $out" >&2
+        fi
+    fi
+
+    # Exit 0 iff the API key is present; routing warnings do not fail it.
+    if doc="$(jrun "$JEV" doctor 2>&1)"; then
+        echo "$tag doctor ok: $doc"
+    else
+        echo "$tag WARNING: doctor failed (TYPESAFE_API_KEY missing?); routing left unchanged: $doc" >&2
+        continue
+    fi
+
+    # Equivalent of `/jev routing $MODE`; never overrides an existing choice.
+    jrun python3 - "$H/jev/state.json" "$MODE" <<'PY'
+import json, os, sys
+path, mode = sys.argv[1:3]
+try:
+    with open(path) as f:
+        state = json.load(f)
+except FileNotFoundError:
+    state = {}
+except ValueError:
+    print("state.json unparsable; leaving it alone"); sys.exit(0)
+if "routing" in state:
+    print("routing already %r; leaving it" % state["routing"]); sys.exit(0)
+state["routing"] = mode
+with open(path, "w") as f:
+    json.dump(state, f, indent=2)
+print("routing set to %r" % mode)
+PY
+done
+exit 0

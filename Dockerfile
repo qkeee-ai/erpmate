@@ -29,7 +29,10 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #   017-jev-skills        jev installer; links into every profile, so it must
 #                         run after the profile exists
 #   018-hermes-lcm        link + enable the LCM plugin (default + profiles)
+#   019-jev-init          first-boot jev setup: models suggest, doctor, routing
 #   02-reconcile-profiles (base image) per-profile gateway slots
+COPY docker/defaults/ /opt/defaults/
+RUN chmod -R a+rX,go-w /opt/defaults
 COPY docker/cont-init.d/ /etc/cont-init.d/
-RUN sed -i 's/\r$//' /etc/cont-init.d/016-* /etc/cont-init.d/017-* /etc/cont-init.d/018-* \
-    && chmod 0755 /etc/cont-init.d/016-* /etc/cont-init.d/017-* /etc/cont-init.d/018-*
+RUN sed -i 's/\r$//' /etc/cont-init.d/01[6-9]-* \
+    && chmod 0755 /etc/cont-init.d/01[6-9]-*
