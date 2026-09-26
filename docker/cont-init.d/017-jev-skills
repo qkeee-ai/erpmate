@@ -1,0 +1,16 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Install hermes-jev-skills into $HERMES_HOME on every boot.
+# Runs after the base image's 01-hermes-setup has chowned/seeded the volume.
+# Non-fatal: a failed install must not stop the agent from starting.
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+
+# The hermes user's home is /opt/data, so ~/.local/bin/jev lands on PATH.
+if HOME=/opt/data HERMES_HOME="$HERMES_HOME" \
+    s6-setuidgid hermes python3 /opt/jev-skills/install.py; then
+    echo "[jev-skills] install ok"
+else
+    echo "[jev-skills] WARNING: install.py failed; continuing without jev skills" >&2
+fi
+exit 0

@@ -1,0 +1,43 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Provision the hermes-lcm (lossless context manager) plugin into the default
+# profile and every installed profile. The checkout is baked at /opt/hermes-lcm;
+# this links it into each plugins dir and enables it. Idempotent. Non-fatal.
+# Set HERMES_LCM_ENABLE=0 to skip.
+
+[ "${HERMES_LCM_ENABLE:-1}" = "0" ] && { echo "[hermes-lcm] disabled via HERMES_LCM_ENABLE=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+SRC=/opt/hermes-lcm
+
+run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
+
+# $1 = profile dir, $2 = profile name ("" for default)
+provision() {
+    dir="$1"; name="$2"; label="${name:-default}"
+    dest="$dir/plugins/hermes-lcm"
+
+    run mkdir -p "$dir/plugins" || return 0
+    # Never clobber a real directory (e.g. a manual `git clone` by the operator).
+    if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+        echo "[hermes-lcm:$label] $dest exists and is not a symlink; leaving it in place"
+    else
+        run ln -sfn "$SRC" "$dest" || { echo "[hermes-lcm:$label] WARNING: symlink failed" >&2; return 0; }
+    fi
+
+    if [ -n "$name" ]; then set -- -p "$name"; else set --; fi
+    if run hermes "$@" plugins enable hermes-lcm --no-allow-tool-override \
+        && run hermes "$@" config set context.engine lcm; then
+        echo "[hermes-lcm:$label] enabled, context.engine=lcm"
+    else
+        echo "[hermes-lcm:$label] WARNING: enable/config step failed; continuing" >&2
+    fi
+}
+
+provision "$HERMES_HOME" ""
+
+for p in "$HERMES_HOME"/profiles/*/; do
+    [ -f "${p}config.yaml" ] || continue
+    provision "${p%/}" "$(basename "$p")"
+done
+exit 0

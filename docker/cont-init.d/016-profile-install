@@ -1,0 +1,86 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Install the erpnext-hermes profile distribution on first boot; equivalent to:
+#   hermes profile install <source> --name <name> --alias
+# The profile lives in $HERMES_HOME/profiles/<name> (on the volume), so it
+# persists. Later boots skip the install; set HERMES_PROFILE_AUTO_UPDATE=1 to
+# run `hermes profile update` each boot instead (user data is preserved).
+# Non-fatal.
+#
+# Source selection (first match wins):
+#   HERMES_PROFILE_LOCAL_PATH  local clone mounted into the container; must
+#                              contain distribution.yaml at its root
+#   HERMES_PROFILE_SOURCE      git URL (default: the public qkeee-in repo);
+#                              empty string skips the install entirely
+#
+# Private git URL auth (never written to disk or into the URL):
+#   HTTPS: HERMES_PROFILE_GIT_TOKEN or HERMES_PROFILE_GIT_TOKEN_FILE
+#          (sent as an Authorization header for the source's host only)
+#   SSH:   HERMES_PROFILE_SSH_KEY_FILE with a git@host:org/repo source
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+NAME="${HERMES_PROFILE_NAME:-qk-prod-erp}"
+
+run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
+
+# Never let git block on a credential prompt during boot.
+export GIT_TERMINAL_PROMPT=0
+
+if [ -n "${HERMES_PROFILE_LOCAL_PATH:-}" ]; then
+    SOURCE="$HERMES_PROFILE_LOCAL_PATH"
+    if [ ! -f "$SOURCE/distribution.yaml" ]; then
+        echo "[profile-install] WARNING: $SOURCE/distribution.yaml not found; is the clone mounted? skipping" >&2
+        exit 0
+    fi
+    MODE=local
+else
+    SOURCE="${HERMES_PROFILE_SOURCE-https://github.com/qkeee-in/erpnext-hermes}"
+    [ -n "$SOURCE" ] || { echo "[profile-install] no source configured; skipping"; exit 0; }
+    MODE=git
+
+    case "$SOURCE" in
+        http://*|https://*|git@*|ssh://*) ;;
+        *) SOURCE="https://$SOURCE" ;;   # bare github.com/org/repo, as hermes accepts
+    esac
+
+    # HTTPS token -> per-process git config via env (no file, no URL rewrite,
+    # so the token cannot show up in git's error messages).
+    TOKEN="${HERMES_PROFILE_GIT_TOKEN:-}"
+    if [ -z "$TOKEN" ] && [ -n "${HERMES_PROFILE_GIT_TOKEN_FILE:-}" ]; then
+        TOKEN="$(cat "$HERMES_PROFILE_GIT_TOKEN_FILE" 2>/dev/null)" \
+            || echo "[profile-install] WARNING: cannot read HERMES_PROFILE_GIT_TOKEN_FILE" >&2
+    fi
+    case "$SOURCE" in
+        http://*|https://*)
+            if [ -n "$TOKEN" ]; then
+                host="$(printf '%s' "$SOURCE" | sed -E 's#^https?://([^/]+)/.*#\1#')"
+                basic="$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
+                export GIT_CONFIG_COUNT=1
+                export GIT_CONFIG_KEY_0="http.https://${host}/.extraheader"
+                export GIT_CONFIG_VALUE_0="Authorization: Basic ${basic}"
+            fi ;;
+        git@*|ssh://*)
+            if [ -n "${HERMES_PROFILE_SSH_KEY_FILE:-}" ]; then
+                export GIT_SSH_COMMAND="ssh -i $HERMES_PROFILE_SSH_KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/jev-known-hosts"
+            fi ;;
+    esac
+    unset TOKEN basic
+fi
+
+if [ -d "$HERMES_HOME/profiles/$NAME" ]; then
+    if [ "${HERMES_PROFILE_AUTO_UPDATE:-0}" = "1" ]; then
+        run hermes profile update "$NAME" --yes \
+            && echo "[profile-install] $NAME updated" \
+            || echo "[profile-install] WARNING: update of $NAME failed; continuing" >&2
+    else
+        echo "[profile-install] $NAME already installed"
+    fi
+    exit 0
+fi
+
+if run hermes profile install "$SOURCE" --name "$NAME" --alias --yes; then
+    echo "[profile-install] $NAME installed from $MODE source $SOURCE"
+else
+    echo "[profile-install] WARNING: install of $NAME from $SOURCE failed; continuing" >&2
+fi
+exit 0
