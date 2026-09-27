@@ -15,37 +15,39 @@ services:
       - "9111:9119"
     volumes:
       # Local-clone mode: mount the repo and set HERMES_PROFILE_LOCAL_PATH to the
-      # in-container path (must contain distribution.yaml at its root):
-      # - ./:/opt/profile-src:ro
+      # in-container path, e.g. /opt/erpmate (must contain distribution.yaml at its root):
+      # - ./:/opt/erpmate:ro          # mount name = default profile name
       # - ~/.hermes:/work/storage/hermes/agent-profiles/dvs-prod-erp/hermes-home
       # - /work/storage/hermes/agent-profiles/<custom-profile-name>/hermes-home:/opt/data
       # - /work/storage/hermes/agent-profiles/<custom-profile-name>/cwd:/tmp/<custom-profile-name>-cwd
     networks:
       - hermes-net
     environment:
-      - HERMES_DASHBOARD=1
+      - HERMES_DASHBOARD=${HERMES_DASHBOARD:-1}
       # Profile distribution installed on first boot. Source, first match wins:
       #   1. HERMES_PROFILE_LOCAL_PATH: local clone (mount it, see volumes)
       #   2. HERMES_PROFILE_SOURCE: git URL (empty = skip install)
-      - HERMES_PROFILE_NAME=${HERMES_PROFILE_NAME:-qk-prod-erp}
+      # Profile name. Empty = the source's folder/repo name (erpmate for the URL
+      # below; for local mode, the last segment of HERMES_PROFILE_LOCAL_PATH).
+      - HERMES_PROFILE_NAME=${HERMES_PROFILE_NAME:-}
       - HERMES_PROFILE_SOURCE=${HERMES_PROFILE_SOURCE-https://github.com/qkeee-ai/erpmate.git}
       - HERMES_PROFILE_LOCAL_PATH=${HERMES_PROFILE_LOCAL_PATH:-}
       # Private repo auth (put the values in .env, not here):
       - HERMES_PROFILE_GIT_TOKEN=${HERMES_PROFILE_GIT_TOKEN:-}
-      # - HERMES_PROFILE_GIT_TOKEN_FILE=/run/secrets/gh_token   # docker secret
-      # - HERMES_PROFILE_SSH_KEY_FILE=/run/secrets/deploy_key   # git@github.com:... source
-      # - HERMES_PROFILE_AUTO_UPDATE=1   # `hermes profile update` on every boot
+      - HERMES_PROFILE_GIT_TOKEN_FILE=${HERMES_PROFILE_GIT_TOKEN_FILE:-}   # e.g. /run/secrets/gh_token
+      - HERMES_PROFILE_SSH_KEY_FILE=${HERMES_PROFILE_SSH_KEY_FILE:-}   # for git@github.com:... sources
+      - HERMES_PROFILE_AUTO_UPDATE=${HERMES_PROFILE_AUTO_UPDATE:-0}   # 1 = `hermes profile update` every boot
       # jev first-boot init (models suggest --write, doctor, /jev routing).
       # Routing is only enabled once the key is present (doctor passes).
       - TYPESAFE_API_KEY=${TYPESAFE_API_KEY:-}
       - JEV_ROUTING_MODE=${JEV_ROUTING_MODE:-on}   # on | shadow | off
       # Seed routing.json from a host file instead of the baked default
       # (mount it, then point at the in-container path; never overwrites):
-      # - JEV_ROUTING_FILE=/opt/routing.json         # + volume ./routing.json:/opt/routing.json:ro
-      # - JEV_INIT_PROFILES=qk-prod-erp default      # default: HERMES_PROFILE_NAME
-      # - JEV_INIT_ENABLE=0                          # skip jev init
-      # Set to 0 to skip enabling hermes-lcm (context.engine=lcm) at boot:
-      # - HERMES_LCM_ENABLE=0
+      - JEV_ROUTING_FILE=${JEV_ROUTING_FILE:-}   # e.g. /opt/routing.json + volume ./routing.json:/opt/routing.json:ro
+      - JEV_INIT_PROFILES=${JEV_INIT_PROFILES:-}   # space-separated; empty = the installed profile
+      - JEV_INIT_ENABLE=${JEV_INIT_ENABLE:-1}   # 0 = skip jev init
+      # 0 = skip enabling hermes-lcm (context.engine=lcm) at boot:
+      - HERMES_LCM_ENABLE=${HERMES_LCM_ENABLE:-1}
       # Uncomment to forward specific env vars instead of using .env file:
       # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       # - OPENAI_API_KEY=${OPENAI_API_KEY}

@@ -24,7 +24,9 @@
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 MODE="${JEV_ROUTING_MODE:-on}"
-TARGETS="${JEV_INIT_PROFILES:-${HERMES_PROFILE_NAME:-qk-prod-erp}}"
+# Default target: the profile resolved by 016-profile-install.
+TARGETS="${JEV_INIT_PROFILES:-${HERMES_PROFILE_NAME:-$(cat /run/hermes-profile-name 2>/dev/null)}}"
+[ -n "$TARGETS" ] || { echo "[jev-init] no target profile (016 skipped?); set JEV_INIT_PROFILES" >&2; exit 0; }
 JEV=/opt/jev-skills/bin/jev
 [ -x "$JEV" ] || JEV=jev
 

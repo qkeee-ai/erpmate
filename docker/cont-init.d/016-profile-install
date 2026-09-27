@@ -19,7 +19,7 @@
 #   SSH:   HERMES_PROFILE_SSH_KEY_FILE with a git@host:org/repo source
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
-NAME="${HERMES_PROFILE_NAME:-qk-prod-erp}"
+NAME="${HERMES_PROFILE_NAME:-}"   # empty => derived from the source's folder/repo name below
 
 run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
 
@@ -66,6 +66,16 @@ else
     esac
     unset TOKEN basic
 fi
+
+# Default profile name = last path segment of the source (the repo/folder name):
+#   https://github.com/qkeee-ai/erpmate.git -> erpmate,  /opt/erpmate -> erpmate
+# normalised to a safe profile name (lowercase, [a-z0-9_-]).
+if [ -z "$NAME" ]; then
+    NAME="$(basename "${SOURCE%/}" .git | tr 'A-Z' 'a-z' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+fi
+[ -n "$NAME" ] || { echo "[profile-install] WARNING: cannot derive a profile name from $SOURCE; set HERMES_PROFILE_NAME" >&2; exit 0; }
+# Hand the resolved name to later hooks (/run is tmpfs, so rewritten every boot).
+printf '%s' "$NAME" > /run/hermes-profile-name
 
 if [ -d "$HERMES_HOME/profiles/$NAME" ]; then
     if [ "${HERMES_PROFILE_AUTO_UPDATE:-0}" = "1" ]; then
