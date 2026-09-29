@@ -31,8 +31,12 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #   018-hermes-lcm        link + enable the LCM plugin (default + profiles)
 #   019-jev-init          first-boot jev setup: models suggest, doctor, routing
 #   02-reconcile-profiles (base image) per-profile gateway slots
+#   021-gateway-state     first-boot only: start the custom profile's
+#                         gateway, stop default's — must run after 02- since
+#                         that's what registers the s6 slot `gateway start`
+#                         needs (sorts after "02-..." — see the hyphen)
 COPY docker/defaults/ /opt/defaults/
 RUN chmod -R a+rX,go-w /opt/defaults
 COPY docker/cont-init.d/ /etc/cont-init.d/
-RUN sed -i 's/\r$//' /etc/cont-init.d/01[6-9]-* \
-    && chmod 0755 /etc/cont-init.d/01[6-9]-*
+RUN sed -i 's/\r$//' /etc/cont-init.d/01[6-9]-* /etc/cont-init.d/021-* \
+    && chmod 0755 /etc/cont-init.d/01[6-9]-* /etc/cont-init.d/021-*

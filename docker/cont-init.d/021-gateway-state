@@ -1,0 +1,48 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Promote the custom profile installed by 016-profile-install to the running
+# gateway and demote "default" to stopped, equivalent to:
+#   hermes -p <profile> gateway start
+#   hermes gateway stop
+# Must run after the base image's 02-reconcile-profiles: that's what
+# registers each profile's s6 gateway slot from the persisted
+# gateway_state.json (or "down" when there is none yet, which is the case
+# for a just-installed profile) — `gateway start` needs the slot to already
+# exist. Non-fatal.
+#
+# Runs ONCE per profile: guarded by a marker in the profile dir (on the
+# volume), so an operator's later `hermes gateway start/stop` choice is never
+# fought on a subsequent boot — 02-reconcile-profiles alone then just
+# restores whatever desired_state was last recorded.
+#
+#   GATEWAY_PROMOTE_ENABLE=0     skip this hook
+#   GATEWAY_PROMOTE_PROFILE      profile to promote (default: the profile
+#                                resolved by 016-profile-install)
+
+[ "${GATEWAY_PROMOTE_ENABLE:-1}" = "0" ] && { echo "[gateway-state] disabled via GATEWAY_PROMOTE_ENABLE=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+NAME="${GATEWAY_PROMOTE_PROFILE:-$(cat /run/hermes-profile-name 2>/dev/null)}"
+[ -n "$NAME" ] || { echo "[gateway-state] no target profile (016 skipped?); nothing to promote"; exit 0; }
+
+PROFILE_DIR="$HERMES_HOME/profiles/$NAME"
+marker="$PROFILE_DIR/.docker-gateway-promoted"
+[ -d "$PROFILE_DIR" ] || { echo "[gateway-state] WARNING: $PROFILE_DIR missing; skipping" >&2; exit 0; }
+[ -e "$marker" ] && { echo "[gateway-state] $NAME already promoted; leaving current start/stop state alone"; exit 0; }
+
+hrun() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes hermes "$@"; }
+
+if out="$(hrun -p "$NAME" gateway start 2>&1)"; then
+    echo "[gateway-state] started gateway-$NAME: $out"
+    HOME=/opt/data s6-setuidgid hermes touch "$marker" 2>/dev/null
+else
+    echo "[gateway-state] WARNING: could not start gateway-$NAME (leaving default running, will retry next boot): $out" >&2
+    exit 0
+fi
+
+if out="$(hrun gateway stop 2>&1)"; then
+    echo "[gateway-state] stopped gateway-default: $out"
+else
+    echo "[gateway-state] WARNING: could not stop gateway-default: $out" >&2
+fi
+exit 0
