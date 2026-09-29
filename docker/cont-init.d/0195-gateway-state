@@ -1,0 +1,69 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Make the custom profile installed by 016-profile-install the one that
+# starts, and "default" the one that doesn't — WITHOUT touching s6 directly.
+#
+# Must run BEFORE 02-reconcile-profiles: that script is what creates the s6
+# slots and decides, per profile, whether to write a `down` marker — by
+# reading each profile's gateway_state.json `desired_state`
+# (hermes_cli/container_boot.py: _read_desired_state / _AUTOSTART_STATES).
+# So the fix is a plain filesystem write here, not `hermes gateway start`:
+# at cont-init time /run/service's supervisor isn't listening yet (s6-svc
+# fails with "supervisor not listening" — the s6 slot dirs literally don't
+# have a live s6-supervise attached until s6-rc brings the tree up, which
+# happens AFTER all of cont-init.d finishes). Same reasoning is why
+# container_boot.py's own `_register_service()` uses a `down` file instead
+# of calling s6-svc.
+#
+# Runs ONCE per profile: guarded by a marker in the profile dir (on the
+# volume). After that, 02-reconcile-profiles alone restores whatever
+# desired_state was last recorded (by us here, or by a later operator
+# `hermes gateway start|stop`), so we never fight a manual choice made after
+# this first boot.
+#
+#   GATEWAY_PROMOTE_ENABLE=0     skip this hook
+#   GATEWAY_PROMOTE_PROFILE      profile to promote (default: the profile
+#                                resolved by 016-profile-install)
+
+[ "${GATEWAY_PROMOTE_ENABLE:-1}" = "0" ] && { echo "[gateway-state] disabled via GATEWAY_PROMOTE_ENABLE=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+NAME="${GATEWAY_PROMOTE_PROFILE:-$(cat /run/hermes-profile-name 2>/dev/null)}"
+[ -n "$NAME" ] || { echo "[gateway-state] no target profile (016 skipped?); nothing to promote"; exit 0; }
+
+PROFILE_DIR="$HERMES_HOME/profiles/$NAME"
+marker="$PROFILE_DIR/.docker-gateway-promoted"
+[ -d "$PROFILE_DIR" ] || { echo "[gateway-state] WARNING: $PROFILE_DIR missing; skipping" >&2; exit 0; }
+[ -e "$marker" ] && { echo "[gateway-state] $NAME already promoted; leaving current start/stop state alone"; exit 0; }
+
+set_desired_state() {  # $1 = gateway_state.json path, $2 = running|stopped
+    HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes python3 - "$1" "$2" <<'PY'
+import json, sys
+path, desired = sys.argv[1:3]
+try:
+    with open(path) as f:
+        state = json.load(f)
+except (FileNotFoundError, ValueError):
+    state = {}
+state["desired_state"] = desired
+with open(path, "w") as f:
+    json.dump(state, f, indent=2)
+print("desired_state=%r written to %s" % (desired, path))
+PY
+}
+
+if out="$(set_desired_state "$PROFILE_DIR/gateway_state.json" running 2>&1)"; then
+    echo "[gateway-state] $NAME: $out"
+else
+    echo "[gateway-state] WARNING: could not set $NAME desired_state=running: $out" >&2
+    exit 0
+fi
+
+if out="$(set_desired_state "$HERMES_HOME/gateway_state.json" stopped 2>&1)"; then
+    echo "[gateway-state] default: $out"
+else
+    echo "[gateway-state] WARNING: could not set default desired_state=stopped: $out" >&2
+fi
+
+HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes touch "$marker" 2>/dev/null
+exit 0

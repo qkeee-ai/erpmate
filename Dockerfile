@@ -30,13 +30,16 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #                         run after the profile exists
 #   018-hermes-lcm        link + enable the LCM plugin (default + profiles)
 #   019-jev-init          first-boot jev setup: models suggest, doctor, routing
-#   02-reconcile-profiles (base image) per-profile gateway slots
-#   021-gateway-state     first-boot only: start the custom profile's
-#                         gateway, stop default's — must run after 02- since
-#                         that's what registers the s6 slot `gateway start`
-#                         needs (sorts after "02-..." — see the hyphen)
+#   0195-gateway-state    first-boot only: mark the custom profile
+#                         desired_state=running, default desired_state=stopped
+#                         — a plain gateway_state.json write, must run BEFORE
+#                         02- (see the hook's own header for why: at cont-init
+#                         time there's no live s6 supervisor to `gateway
+#                         start` against yet, only 02-reconcile-profiles'
+#                         registration pass reads this and decides)
+#   02-reconcile-profiles (base image) creates the s6 slots per the above
 COPY docker/defaults/ /opt/defaults/
 RUN chmod -R a+rX,go-w /opt/defaults
 COPY docker/cont-init.d/ /etc/cont-init.d/
-RUN sed -i 's/\r$//' /etc/cont-init.d/01[6-9]-* /etc/cont-init.d/021-* \
-    && chmod 0755 /etc/cont-init.d/01[6-9]-* /etc/cont-init.d/021-*
+RUN sed -i 's/\r$//' /etc/cont-init.d/01[6-9]-* /etc/cont-init.d/0195-* \
+    && chmod 0755 /etc/cont-init.d/01[6-9]-* /etc/cont-init.d/0195-*

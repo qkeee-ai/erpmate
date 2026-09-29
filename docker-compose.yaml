@@ -56,9 +56,10 @@ services:
       - JEV_INIT_ENABLE=${JEV_INIT_ENABLE:-1}   # 0 = skip jev init
       # 0 = skip enabling hermes-lcm (context.engine=lcm) at boot:
       - HERMES_LCM_ENABLE=${HERMES_LCM_ENABLE:-1}
-      # First boot only: start the custom profile's gateway, stop default's
-      # (`hermes -p <profile> gateway start` + `hermes gateway stop`). Runs
-      # once; later boots / a manual `hermes gateway start|stop` are left alone.
+      # First boot only: mark the custom profile desired_state=running and
+      # default desired_state=stopped, so 02-reconcile-profiles starts the
+      # custom one instead of default. Runs once; later boots / a manual
+      # `hermes gateway start|stop` are left alone.
       - GATEWAY_PROMOTE_ENABLE=${GATEWAY_PROMOTE_ENABLE:-1}   # 0 = leave default running
       - GATEWAY_PROMOTE_PROFILE=${GATEWAY_PROMOTE_PROFILE:-}   # empty = the installed profile
       # Uncomment to forward specific env vars instead of using .env file:
