@@ -5,19 +5,27 @@ services:
       args:
         JEV_REF: ${JEV_REF:-main}
         LCM_REF: ${LCM_REF:-main}
-    image: qkeee/erpnext-hermes:latest
-    container_name: dvs-hermes
+    image: qkeee/erpmate:latest
+    # Precedence: HERMES_CONTAINER_NAME, else HERMES_PROFILE_NAME, else
+    # COMPOSE_PROJECT_NAME (compose's own default: this folder's name).
+    # Nested ${:-} defaults are resolved by compose itself, no shell needed.
+    container_name: ${HERMES_CONTAINER_NAME:-${HERMES_PROFILE_NAME:-${COMPOSE_PROJECT_NAME}}}
     restart: unless-stopped
     command: gateway run
+    # No host port pinned: Docker allocates a free ephemeral host port per
+    # container, so multiple agent containers on the same host never clash on
+    # startup. Look up the assigned port with:
+    #   docker compose port hermes 8642   (or 8643 / 9119)
+    #   docker ps --filter name=<container> --format '{{.Ports}}'
+    # Need a stable port instead (e.g. behind a reverse proxy)? Pin it back:
+    #   - "8611:8642"
     ports:
-      - "8611:8642"
-      - "8612:8643"
-      - "9111:9119"
+      - "8642"
+      - "8643"
+      - "9119"
     volumes:
       # Local-clone mode: mount the repo and set HERMES_PROFILE_LOCAL_PATH to the
       # in-container path, e.g. /opt/erpmate (must contain distribution.yaml at its root):
-      # - ./:/opt/erpmate:ro          # mount name = default profile name
-      # - ~/.hermes:/work/storage/hermes/agent-profiles/dvs-prod-erp/hermes-home
       # - /work/storage/hermes/agent-profiles/<custom-profile-name>/hermes-home:/opt/data
       # - /work/storage/hermes/agent-profiles/<custom-profile-name>/cwd:/tmp/<custom-profile-name>-cwd
     networks:
