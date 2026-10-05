@@ -183,7 +183,24 @@ onboarding:
     tool_progress_prompt: true
     busy_input_prompt: true
     profile_build_offered: true
-_config_version: 33
+# 33 -> 41 (2026-10-05). The schema default is 41; shipping 33 meant
+# migrate_config() ran the 34..41 ladder and then, because current_ver <
+# latest_ver, called _persist_migration() -> save_config() -> atomic_yaml_write()
+# — a PyYAML dump that REWRITES this file and destroys every comment in it. This
+# file is distribution_owned, so that happened again after every install/update.
+#
+# Every step in that ladder is a no-op here, checked individually against this
+# file and SOUL.md: 34 needs display.personality / agent.system_prompt (neither
+# set), 35 needs display.background_process_notifications: all (display sets only
+# tool_progress), 36 and 37 need a delegation block (absent), 38 needs
+# plugins.enabled (absent), 39 needs a 'bfl' entry in platform_toolsets (absent),
+# 40 needs model_catalog.ttl_hours (absent), 41 needs the "## Messaging other
+# agents" heading in SOUL.md (absent). So the ladder changed nothing and the
+# rewrite was pure comment loss.
+#
+# Re-verify these preconditions before bumping again — a step that WOULD apply
+# must be allowed to run, or applied by hand here.
+_config_version: 41
 # compression.threshold: default 0.50 (agent/context_compressor.py). The
 # nex-agi/nex-n2-mini context window is large enough that a single turn's
 # accumulated tool-call history rarely crosses 50% before the turn ends —
