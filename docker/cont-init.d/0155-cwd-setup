@@ -1,0 +1,51 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Prepare the agent's working directory (the "cwd" bind mount) so the terminal
+# tool can actually write in it.
+#
+# docker-compose.yaml mounts a host dir at $HERMES_CWD (default /opt/cwd) and
+# exports TERMINAL_CWD=$HERMES_CWD. tools/environments/local.py resolves
+# TERMINAL_CWD and, when the path is not enterable by the gateway's uid, walks
+# up to the nearest usable ancestor — silently relocating the agent to / or
+# /tmp (see _resolve_safe_cwd / #65583). A fresh bind mount is root-owned, so
+# without this hook every session lands outside the mount.
+#
+# Ownership policy matches the base image's stage2 hook: the directory ITSELF
+# is chowned to hermes (enough to create/rename entries inside it); contents
+# are left alone, because a host bind can hold unrelated files that a
+# `chown -R` would rewrite. Non-fatal.
+#
+#   HERMES_CWD   in-container mount point (empty = skip this hook entirely)
+
+CWD_DIR="${HERMES_CWD:-}"
+[ -n "$CWD_DIR" ] || { echo "[cwd-setup] HERMES_CWD unset; nothing to prepare"; exit 0; }
+
+case "$CWD_DIR" in
+    /) echo "[cwd-setup] WARNING: refusing to prepare / as the agent cwd" >&2; exit 0 ;;
+    /*) ;;
+    *) echo "[cwd-setup] WARNING: HERMES_CWD=$CWD_DIR is not absolute; skipping" >&2; exit 0 ;;
+esac
+
+# A symlink here would redirect the chown onto its target (CWE-59).
+if [ -L "$CWD_DIR" ]; then
+    echo "[cwd-setup] WARNING: $CWD_DIR is a symlink; refusing to chown it" >&2
+    exit 0
+fi
+
+mkdir -p "$CWD_DIR" 2>/dev/null \
+    || { echo "[cwd-setup] WARNING: cannot create $CWD_DIR; continuing" >&2; exit 0; }
+
+if [ "$(id -u)" = 0 ]; then
+    chown hermes:hermes "$CWD_DIR" 2>/dev/null \
+        || echo "[cwd-setup] Warning: chown $CWD_DIR failed (rootless container?) — continuing" >&2
+fi
+
+if s6-setuidgid hermes test -w "$CWD_DIR" && s6-setuidgid hermes test -x "$CWD_DIR"; then
+    echo "[cwd-setup] $CWD_DIR ready (TERMINAL_CWD)"
+else
+    echo "[cwd-setup] WARNING: $CWD_DIR is not writable by the hermes user. The agent" >&2
+    echo "[cwd-setup]   will silently fall back to the nearest usable ancestor. Fix the" >&2
+    echo "[cwd-setup]   host directory's ownership, or pass HERMES_UID/HERMES_GID so the" >&2
+    echo "[cwd-setup]   in-container hermes user matches the host owner." >&2
+fi
+exit 0

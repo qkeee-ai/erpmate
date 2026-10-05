@@ -1,0 +1,219 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Make the dashboard's auth gate satisfiable in a container, and stop the
+# crash-loop when it is not.
+#
+# docker/s6-rc.d/dashboard/run (base image) binds 0.0.0.0 by default. A
+# non-loopback bind engages hermes_cli/web_server.py's auth gate, which raises
+# SystemExit when no DashboardAuthProvider registered; s6 restarts the service,
+# which fails identically — hence the SAME eight-line refusal repeating in the
+# logs forever. Three things make this bite even when credentials ARE set:
+#
+#   1. The dashboard service runs with HERMES_HOME=/opt/data, so its
+#      load_config() reads /opt/data/config.yaml — the DEFAULT profile.
+#      Credentials in the custom profile's config.yaml (what this
+#      distribution ships, and what `hermes -p <name> config set` writes) are
+#      never read by the dashboard. This hook mirrors them across.
+#   2. HERMES_DASHBOARD_BASIC_AUTH_* has to be listed in docker-compose.yaml's
+#      `environment:` block to reach the container at all. It is now; this hook
+#      reports which provider it resolved so a typo is visible, not silent.
+#   3. With no secret configured the basic provider mints a RANDOM per-process
+#      signing key, so every dashboard restart invalidates every session. This
+#      hook generates one once and persists it on the volume.
+#
+# If the gate will still engage with no provider, the dashboard is turned OFF
+# for this boot rather than left to crash-loop: one clear block of instructions
+# beats the same refusal every couple of seconds. The agent is unaffected — the
+# gateway does not depend on the dashboard.
+#
+#   HERMES_DASHBOARD_AUTOGUARD=0   leave the dashboard enabled (and
+#                                  crash-looping) when no provider is found
+#   HERMES_DASHBOARD_MIRROR=0      do not copy basic_auth from the custom
+#                                  profile into /opt/data/config.yaml
+# Non-fatal.
+
+case "${HERMES_DASHBOARD:-}" in
+    1|true|TRUE|True|yes|YES|Yes) ;;
+    *) echo "[dashboard-auth] dashboard disabled; nothing to check"; exit 0 ;;
+esac
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+PROFILE="${HERMES_PROFILE_NAME:-$(cat /run/hermes-profile-name 2>/dev/null)}"
+HOST="${HERMES_DASHBOARD_HOST:-0.0.0.0}"
+
+PY=/opt/hermes/.venv/bin/python
+[ -x "$PY" ] || PY=python3
+
+run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" PYTHONPATH=/opt/hermes s6-setuidgid hermes "$@"; }
+
+# --- 1. Mirror the custom profile's dashboard.basic_auth into the default home ---
+# Gap-fill only: a value already in /opt/data/config.yaml wins, and the env vars
+# outrank both (plugins/dashboard_auth/basic/__init__.py::_settings).
+case "${HERMES_DASHBOARD_MIRROR:-1}" in
+    0|false|FALSE|no|NO) ;;
+    *)
+        if [ -n "$PROFILE" ] && [ -f "$HERMES_HOME/profiles/$PROFILE/config.yaml" ]; then
+            run "$PY" - "$HERMES_HOME" "$PROFILE" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+from utils import atomic_roundtrip_yaml_update
+
+home, profile = Path(sys.argv[1]), sys.argv[2]
+MIRRORED = ("username", "password_hash", "password", "secret", "session_ttl_seconds")
+
+
+def basic_auth(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            loaded = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        print("[dashboard-auth] WARNING: cannot read %s: %s" % (path, exc))
+        return {}
+    section = (loaded.get("dashboard") or {}).get("basic_auth") or {}
+    return {k: v for k, v in section.items() if isinstance(v, str) and v.strip()}
+
+
+src = basic_auth(home / "profiles" / profile / "config.yaml")
+if not src:
+    sys.exit(0)
+dest = basic_auth(home / "config.yaml")
+copied = [k for k in MIRRORED if k in src and k not in dest]
+for key in copied:
+    atomic_roundtrip_yaml_update(home / "config.yaml", "dashboard.basic_auth." + key, src[key])
+if copied:
+    print("[dashboard-auth] mirrored dashboard.basic_auth.{%s} from profile %r into %s "
+          "(the dashboard service reads the default home, not the profile)"
+          % (",".join(copied), profile, home / "config.yaml"))
+PY
+        fi ;;
+esac
+
+# --- 2. Resolve whether any auth provider will register ---
+# Mirrors the bundled providers' activation conditions: basic
+# (dashboard.basic_auth), nous + self_hosted (dashboard.oauth[.self_hosted]),
+# drain (dashboard.drain_auth). Env overrides config for all of them.
+PROVIDER="$(run "$PY" - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+
+CONFIG = Path(os.environ.get("HERMES_HOME", "/opt/data")) / "config.yaml"
+try:
+    with open(CONFIG, encoding="utf-8") as fh:
+        CONF = yaml.safe_load(fh) or {}
+except (OSError, yaml.YAMLError):
+    CONF = {}
+
+
+def cfg(*keys):
+    node = CONF
+    for key in keys:
+        if not isinstance(node, dict):
+            return ""
+        node = node.get(key)
+    return node.strip() if isinstance(node, str) else ("" if node is None else str(node))
+
+
+def setting(env_name, *cfg_keys):
+    return os.environ.get(env_name, "").strip() or cfg(*cfg_keys)
+
+
+user = setting("HERMES_DASHBOARD_BASIC_AUTH_USERNAME", "dashboard", "basic_auth", "username")
+secret = (setting("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH", "dashboard", "basic_auth", "password_hash")
+          or setting("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard", "basic_auth", "password"))
+if user and secret:
+    print("basic")
+elif setting("HERMES_DASHBOARD_OAUTH_CLIENT_ID", "dashboard", "oauth", "client_id"):
+    print("oauth")
+elif cfg("dashboard", "oauth", "self_hosted", "client_id"):
+    print("oauth-self-hosted")
+elif cfg("dashboard", "drain_auth", "shared_secret"):
+    print("drain")
+elif user:
+    print("basic-incomplete")
+else:
+    print("none")
+PY
+)" || PROVIDER=unknown
+
+# --- 3. Persist a signing secret so sessions survive a dashboard restart ---
+if [ "$PROVIDER" = basic ] && [ -z "${HERMES_DASHBOARD_BASIC_AUTH_SECRET:-}" ]; then
+    secret_file="$HERMES_HOME/.dashboard-auth-secret"
+    if [ ! -s "$secret_file" ]; then
+        if run "$PY" -c "import secrets,sys;open(sys.argv[1],'w').write(secrets.token_hex(32))" "$secret_file"; then
+            chmod 600 "$secret_file" 2>/dev/null || true
+            echo "[dashboard-auth] generated a persistent session-signing secret at $secret_file"
+        fi
+    fi
+    if [ -s "$secret_file" ]; then
+        mkdir -p /run/s6/container_environment
+        tr -d '\n' < "$secret_file" > /run/s6/container_environment/HERMES_DASHBOARD_BASIC_AUTH_SECRET
+        chmod 600 /run/s6/container_environment/HERMES_DASHBOARD_BASIC_AUTH_SECRET 2>/dev/null || true
+    fi
+fi
+
+# --- 4. Gate check ---
+case "$HOST" in
+    127.0.0.1|localhost|::1)
+        # A non-loopback dashboard.public_url engages the gate even here, so
+        # report rather than claim exemption.
+        echo "[dashboard-auth] loopback bind ($HOST); auth provider: $PROVIDER"
+        exit 0 ;;
+esac
+
+case "$PROVIDER" in
+    basic|oauth|oauth-self-hosted|drain)
+        echo "[dashboard-auth] $HOST bind with auth provider: $PROVIDER"
+        exit 0 ;;
+esac
+
+cat >&2 <<MSG
+[dashboard-auth] ===================================================================
+[dashboard-auth] The dashboard binds $HOST, which ALWAYS requires an auth provider,
+[dashboard-auth] and none is configured. Set in .env:
+[dashboard-auth]
+[dashboard-auth]   HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
+[dashboard-auth]   HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=<a strong password>
+[dashboard-auth]
+[dashboard-auth] To keep the plaintext out of .env, precompute a hash instead:
+[dashboard-auth]
+[dashboard-auth]   docker compose exec hermes /opt/hermes/.venv/bin/python -c \\
+[dashboard-auth]     "from plugins.dashboard_auth.basic import hash_password; \\
+[dashboard-auth]      print(hash_password('your-password'))"
+[dashboard-auth]   HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH=scrypt\$16384\$8\$1\$...
+[dashboard-auth]
+[dashboard-auth] Or OAuth: HERMES_DASHBOARD_OAUTH_CLIENT_ID=... (hermes dashboard register).
+[dashboard-auth] Local-only alternative: HERMES_DASHBOARD_HOST=127.0.0.1 reached over an
+[dashboard-auth] SSH tunnel. There is no unauthenticated public-dashboard option.
+MSG
+
+if [ "$PROVIDER" = basic-incomplete ]; then
+    cat >&2 <<'MSG'
+[dashboard-auth]
+[dashboard-auth] NOTE: a username IS set but no password / password_hash. Basic auth
+[dashboard-auth] needs BOTH — a half-configured block registers nothing, silently.
+MSG
+fi
+
+case "${HERMES_DASHBOARD_AUTOGUARD:-1}" in
+    0|false|FALSE|no|NO)
+        cat >&2 <<'MSG'
+[dashboard-auth] HERMES_DASHBOARD_AUTOGUARD=0 — leaving the dashboard enabled; expect
+[dashboard-auth] the refusal above to repeat on every s6 restart.
+MSG
+        ;;
+    *)
+        mkdir -p /run/s6/container_environment
+        printf '0' > /run/s6/container_environment/HERMES_DASHBOARD
+        cat >&2 <<'MSG'
+[dashboard-auth] Dashboard DISABLED for this boot to avoid a restart loop. The agent
+[dashboard-auth] and gateway are unaffected. Configure auth above, then restart.
+MSG
+        ;;
+esac
+echo "[dashboard-auth] ===================================================================" >&2
+exit 0

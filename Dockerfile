@@ -25,6 +25,10 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 # Boot hooks (s6 cont-init.d, lexicographic order). Everything targets
 # $HERMES_HOME (a volume) so it runs at every boot and is idempotent.
 #   01-hermes-setup       (base image) volume chown + config seed
+#   0155-cwd-setup        create + chown the $HERMES_CWD bind mount so
+#                         TERMINAL_CWD is actually enterable by the gateway
+#                         (a root-owned fresh bind silently relocates the
+#                         agent to the nearest usable ancestor)
 #   016-profile-install   install the erpnext-hermes profile distribution
 #   017-jev-skills        jev installer; links into every profile, so it must
 #                         run after the profile exists
@@ -37,9 +41,22 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #                         time there's no live s6 supervisor to `gateway
 #                         start` against yet, only 02-reconcile-profiles'
 #                         registration pass reads this and decides)
+#   0196-dashboard-auth   mirror the profile's dashboard.basic_auth into the
+#                         default home (the dashboard service reads /opt/data,
+#                         not the profile), persist a session-signing secret,
+#                         and disable the dashboard instead of letting it
+#                         crash-loop when its auth gate has no provider
+#   0197-skills-lockdown  restrict the profile to the skills it ships: opt-out
+#                         marker + prune pristine bundled copies + recompute
+#                         skills.disabled. After 017/018 so skills those hooks
+#                         link into the profile are allowed automatically
 #   02-reconcile-profiles (base image) creates the s6 slots per the above
 COPY docker/defaults/ /opt/defaults/
 RUN chmod -R a+rX,go-w /opt/defaults
 COPY docker/cont-init.d/ /etc/cont-init.d/
-RUN sed -i 's/\r$//' /etc/cont-init.d/01[6-9]-* /etc/cont-init.d/0195-* \
-    && chmod 0755 /etc/cont-init.d/01[6-9]-* /etc/cont-init.d/0195-*
+# Globbed in three parts: `01[6-9]-*` does not match the 4-digit 0155/019x
+# names (the `-` has nothing to match against their 4th character).
+RUN set -eu; for f in /etc/cont-init.d/0155-* /etc/cont-init.d/01[6-9]-* \
+        /etc/cont-init.d/019[5-7]-*; do \
+        sed -i 's/\r$//' "$f" && chmod 0755 "$f"; \
+    done

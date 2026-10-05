@@ -1,0 +1,223 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Restrict a profile to the skills its own distribution ships.
+#
+# A freshly launched profile inherits the base image's bundled skill library
+# (claude-code, manim-video, notion, p5js, xurl, ...) on top of the ~25 skills
+# this distribution ships, because the bundled set is seeded into every
+# profile's skills/ tree. For a single-purpose ERP agent that is 40+ irrelevant
+# skills competing for the model's attention in every skill-selection pass.
+#
+# Hermes exposes two independent levers and this hook drives both, because
+# neither alone is sufficient:
+#
+#   1. The .no-bundled-skills marker (`hermes skills opt-out`) stops FUTURE
+#      seeding — `hermes update` and profile re-sync skip the profile. It does
+#      nothing about skills already on disk.
+#   2. skills.disabled in config.yaml hides a skill from the agent. It is a
+#      DENYLIST — there is no allowlist key — so the list has to be recomputed
+#      from whatever is actually installed, every boot.
+#
+# So: write the marker, delete the pristine bundled copies from disk, then
+# denylist whatever still resolves from outside the profile's own skills/ tree
+# (external dirs, user-modified bundled copies the delete step refuses to
+# touch). Runs on EVERY boot and is idempotent, which is what makes it hold up
+# against HERMES_PROFILE_AUTO_UPDATE=1 — 016 re-pulls the distribution and
+# overwrites config.yaml, and this hook (ordered after it) re-applies.
+#
+# Must run AFTER 017-jev-skills / 018-hermes-lcm: skills those hooks link into
+# the profile live under the profile's own skills/ tree and are therefore
+# allowed automatically. Must run BEFORE 02-reconcile-profiles starts the
+# gateway, so the agent's first prompt already sees the trimmed set.
+#
+#   HERMES_SKILLS_LOCKDOWN=0           skip this hook
+#   HERMES_SKILLS_LOCKDOWN_PROFILES    space-separated profiles ("default" =
+#                                      $HERMES_HOME); default: the profile
+#                                      resolved by 016-profile-install
+#   HERMES_SKILLS_LOCKDOWN_PRUNE=0     keep pristine bundled skills on disk
+#                                      (denylist them only; reversible with
+#                                      `hermes skills opt-in --sync`)
+#   HERMES_SKILLS_KEEP                 space/comma-separated extra skill names
+#                                      to keep enabled regardless of location
+#
+# Plugin-provided skills are NOT touched: they come from plugins this image
+# installs on purpose (hermes-lcm), not from the bundled library. Disable one
+# with HERMES_SKILLS_KEEP's inverse — `hermes plugins disable <name>`.
+# Non-fatal.
+
+[ "${HERMES_SKILLS_LOCKDOWN:-1}" = "0" ] && { echo "[skills-lockdown] disabled via HERMES_SKILLS_LOCKDOWN=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+TARGETS="${HERMES_SKILLS_LOCKDOWN_PROFILES:-${HERMES_PROFILE_NAME:-$(cat /run/hermes-profile-name 2>/dev/null)}}"
+[ -n "$TARGETS" ] || { echo "[skills-lockdown] no target profile (016 skipped?); set HERMES_SKILLS_LOCKDOWN_PROFILES" >&2; exit 0; }
+
+PY=/opt/hermes/.venv/bin/python
+[ -x "$PY" ] || PY=python3
+
+for name in $TARGETS; do
+    if [ "$name" = default ]; then H="$HERMES_HOME"; else H="$HERMES_HOME/profiles/$name"; fi
+    tag="[skills-lockdown:$name]"
+    [ -d "$H" ] || { echo "$tag WARNING: $H missing (profile not installed?); skipping" >&2; continue; }
+
+    # HERMES_HOME is captured at import time by tools/skills_sync.py and
+    # tools/skills_tool.py, so each profile needs its own process (same reason
+    # hermes_cli.profiles.seed_profile_skills() subprocesses).
+    if out="$(HOME=/opt/data HERMES_HOME="$H" PYTHONPATH=/opt/hermes \
+        s6-setuidgid hermes "$PY" - "$tag" 2>&1 <<'PY'
+import os
+import sys
+from pathlib import Path
+
+tag = sys.argv[1]
+home = Path(os.environ["HERMES_HOME"])
+
+
+def log(msg):
+    print(f"{tag} {msg}")
+
+
+def flag(name, default="1"):
+    # An unset compose variable arrives as "" rather than absent, so an empty
+    # value must mean "default", not "off".
+    raw = os.environ.get(name, "").strip() or default
+    return raw.lower() not in ("0", "false", "no", "off")
+
+
+keep_extra = {
+    n for n in os.environ.get("HERMES_SKILLS_KEEP", "").replace(",", " ").split() if n
+}
+
+from agent.skill_utils import is_excluded_skill_path
+from tools.skill_usage import _read_skill_name
+from tools.skills_sync_bundled_ops import remove_pristine_bundled_skills, set_bundled_skills_opt_out
+from tools.skills_tool import _find_all_skills
+from utils import atomic_roundtrip_yaml_update
+
+try:
+    from agent.skill_utils import ESSENTIAL_SKILLS
+except Exception:  # the frozenset is the contract, not the import path
+    ESSENTIAL_SKILLS = frozenset({"hermes-agent"})
+
+# --- Scan the profile's skills/ tree ---------------------------------------
+# os.walk(followlinks=True) rather than Path.rglob: 017-jev-skills and
+# 018-hermes-lcm link their content into the profile as symlinked directories,
+# and pathlib's ** does not descend through a symlink — those skills would scan
+# as absent and get denylisted below.
+skills_root = home / "skills"
+found = {}      # relative dir path -> {names}
+linked = set()  # names whose content lives OUTSIDE the profile (017/018)
+seen_dirs = set()
+for dirpath, dirnames, filenames in os.walk(skills_root, followlinks=True):
+    # followlinks=True loops forever on a symlink cycle; prune a directory whose
+    # real path we have already walked.
+    real = os.path.realpath(dirpath)
+    if real in seen_dirs:
+        dirnames[:] = []
+        continue
+    seen_dirs.add(real)
+    if "SKILL.md" not in filenames:
+        continue
+    skill_md = Path(dirpath) / "SKILL.md"
+    if is_excluded_skill_path(skill_md):
+        continue
+    names = {skill_md.parent.name, _read_skill_name(skill_md, fallback=skill_md.parent.name)}
+    names.discard("")
+    rel = os.path.relpath(dirpath, skills_root).replace(os.sep, "/")
+    found[rel] = names
+    if not Path(real).is_relative_to(os.path.realpath(skills_root)):
+        linked |= names
+
+# --- Allowlist -------------------------------------------------------------
+# Only the distribution's own skills, plus whatever 017/018 linked in from
+# outside the profile (that content is installed on purpose by this image).
+#
+# 016-profile-install records the distribution's inventory as paths relative to
+# skills/, captured from a tree holding only the distribution payload. That
+# record is what makes "distribution skill" decidable: the bundled manifest
+# baselines any distribution skill byte-identical to its bundled namesake, so
+# without it the prune step below would delete skills this profile ships.
+record = home / ".distribution-skills"
+dist_rels = None
+if record.exists():
+    dist_rels = {ln.strip() for ln in record.read_text(encoding="utf-8").splitlines() if ln.strip()}
+
+if dist_rels:
+    allowed = set(linked)
+    for rel, names in found.items():
+        if rel in dist_rels:
+            allowed |= names
+    missing = dist_rels - set(found)
+    if missing:
+        log("WARNING: recorded distribution skills not on disk: " + ", ".join(sorted(missing)))
+else:
+    # Pre-existing profile, or 016 skipped. Fall back to "everything currently
+    # in the tree", which still strips external_dirs and plugin-shadowed names
+    # but cannot prune bundled skills already seeded into the profile.
+    allowed = set(linked)
+    for names in found.values():
+        allowed |= names
+    log("WARNING: no .distribution-skills record; treating the whole skills/ tree as "
+        "the distribution. Re-install the profile (or write the record by hand) to "
+        "prune bundled skills already seeded here.")
+allowed.discard("")
+
+# --- 1. Stop future bundled-skill seeding for this profile -----------------
+res = set_bundled_skills_opt_out(True)
+if not res["ok"]:
+    log(f"WARNING: {res['message']}")
+else:
+    log(f"opt-out marker {'written' if res['changed'] else 'already present'}: {res['marker']}")
+
+# --- 2. Delete bundled copies that are byte-identical to their origin hash --
+# A bundled skill the distribution overrode (this profile ships its own xlsx,
+# docx, pdf, himalaya, ...) differs from the origin hash and is reported as
+# "user-modified (kept)". One the distribution ships VERBATIM does match, so it
+# is protected explicitly by the allowlist check below.
+if not flag("HERMES_SKILLS_LOCKDOWN_PRUNE"):
+    log("prune disabled (HERMES_SKILLS_LOCKDOWN_PRUNE=0); denylisting only")
+elif not dist_rels:
+    # Without the record every tree entry is in the allowlist, so there is no
+    # way to tell a seeded bundled skill from one the distribution ships.
+    # Deleting on that basis could remove the agent's actual skills.
+    log("prune skipped: no .distribution-skills record to protect shipped skills")
+else:
+    preview = remove_pristine_bundled_skills(dry_run=True)
+    protected = sorted(set(preview["removed"]) & allowed)
+    if protected:
+        log("not pruning (shipped by the distribution verbatim): " + ", ".join(protected))
+        # remove_pristine_bundled_skills() has no per-skill filter, so drop the
+        # protected entries from the manifest first: an untracked skill is not a
+        # prune candidate, and sync will not re-manage it either now that the
+        # opt-out marker is in place.
+        from tools.skills_sync import _read_manifest, _write_manifest
+
+        manifest = _read_manifest()
+        for name in protected:
+            manifest.pop(name, None)
+        _write_manifest(manifest)
+    pruned = remove_pristine_bundled_skills(dry_run=False)
+    log(pruned["message"])
+    if pruned["removed"]:
+        log("removed: " + ", ".join(pruned["removed"]))
+
+# --- 3. Denylist whatever still resolves from outside the allowlist --------
+# skip_disabled=True means "ignore the current disabled state", i.e. scan
+# everything — otherwise the denylist would shrink on every boot as already
+# disabled skills dropped out of the scan and got re-enabled.
+installed = {s["name"] for s in _find_all_skills(skip_disabled=True)}
+disabled = sorted(installed - allowed - keep_extra - set(ESSENTIAL_SKILLS))
+
+atomic_roundtrip_yaml_update(home / "config.yaml", "skills.disabled", disabled)
+log(f"{len(installed - set(disabled))} enabled, {len(disabled)} disabled")
+if disabled:
+    log("disabled: " + ", ".join(disabled))
+if keep_extra:
+    log("kept via HERMES_SKILLS_KEEP: " + ", ".join(sorted(keep_extra)))
+PY
+    )"; then
+        printf '%s\n' "$out"
+    else
+        echo "$tag WARNING: lockdown failed; profile keeps its current skill set: $out" >&2
+    fi
+done
+exit 0

@@ -24,14 +24,58 @@ services:
       - "8643"
       - "9119"
     volumes:
+      # Host paths come from .env so one compose file serves many agent
+      # profiles. Defaults keep both under ./data/ beside this file, so a bare
+      # `docker compose up` works with no .env at all.
+      #   HERMES_DATA_DIR -> $HERMES_HOME: profiles, sessions, skills, config
+      #   HERMES_CWD_DIR  -> $HERMES_CWD:  the agent's working directory
+      #                                    (exported as TERMINAL_CWD below)
+      # Per-profile layout, e.g.:
+      #   HERMES_DATA_DIR=/work/storage/hermes/agent-profiles/dev-erp/hermes-home
+      #   HERMES_CWD_DIR=/work/storage/hermes/agent-profiles/dev-erp/cwd
+      - ${HERMES_DATA_DIR:-./data/hermes-home}:/opt/data
+      - ${HERMES_CWD_DIR:-./data/cwd}:${HERMES_CWD:-/opt/cwd}
       # Local-clone mode: mount the repo and set HERMES_PROFILE_LOCAL_PATH to the
       # in-container path, e.g. /opt/erpmate (must contain distribution.yaml at its root):
-      # - /work/storage/hermes/agent-profiles/<custom-profile-name>/hermes-home:/opt/data
-      # - /work/storage/hermes/agent-profiles/<custom-profile-name>/cwd:/tmp/<custom-profile-name>-cwd
+      # - ./:/opt/erpmate:ro
     networks:
       - hermes-net
     environment:
+      # Match the host owner of the bind mounts above, else everything the
+      # container writes there is owned by uid 10000. 0155-cwd-setup warns when
+      # the cwd mount ends up unwritable because these don't line up.
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # In-container mount point of HERMES_CWD_DIR. TERMINAL_CWD is what the
+      # terminal tool actually reads (config `terminal.cwd` is deliberately
+      # unset in config.yaml); HERMES_CWD exists so 0155-cwd-setup can prepare
+      # the same path and the volume line above can reference it.
+      - HERMES_CWD=${HERMES_CWD:-/opt/cwd}
+      - TERMINAL_CWD=${HERMES_CWD:-/opt/cwd}
       - HERMES_DASHBOARD=${HERMES_DASHBOARD:-1}
+      # Dashboard auth. The s6 dashboard service binds 0.0.0.0, and a
+      # non-loopback bind ALWAYS requires a registered auth provider — without
+      # one the service exits and s6 restarts it, repeating the refusal
+      # forever. These env vars outrank config.yaml and, unlike config.yaml,
+      # are read regardless of which profile the dashboard resolves (it runs
+      # against /opt/data, NOT the custom profile). Set username + either
+      # password or password_hash; see 0196-dashboard-auth.
+      - HERMES_DASHBOARD_HOST=${HERMES_DASHBOARD_HOST:-0.0.0.0}
+      - HERMES_DASHBOARD_PORT=${HERMES_DASHBOARD_PORT:-9119}
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH:-}
+      # Empty = 0196-dashboard-auth generates one and persists it on the volume
+      # (sessions then survive a dashboard restart).
+      - HERMES_DASHBOARD_BASIC_AUTH_SECRET=${HERMES_DASHBOARD_BASIC_AUTH_SECRET:-}
+      - HERMES_DASHBOARD_OAUTH_CLIENT_ID=${HERMES_DASHBOARD_OAUTH_CLIENT_ID:-}
+      # Behind a reverse proxy: the external URL. A non-loopback value here
+      # engages the auth gate even on a 127.0.0.1 bind.
+      - HERMES_DASHBOARD_PUBLIC_URL=${HERMES_DASHBOARD_PUBLIC_URL:-}
+      # 0 = don't auto-disable an unauthenticated non-loopback dashboard
+      # (keeps the crash-loop and its repeating refusal visible).
+      - HERMES_DASHBOARD_AUTOGUARD=${HERMES_DASHBOARD_AUTOGUARD:-1}
+      - HERMES_DASHBOARD_MIRROR=${HERMES_DASHBOARD_MIRROR:-1}
       # Profile distribution installed on first boot. Source, first match wins:
       #   1. HERMES_PROFILE_LOCAL_PATH: local clone (mount it, see volumes)
       #   2. HERMES_PROFILE_SOURCE: git URL (empty = skip install)
@@ -62,11 +106,19 @@ services:
       # `hermes gateway start|stop` are left alone.
       - GATEWAY_PROMOTE_ENABLE=${GATEWAY_PROMOTE_ENABLE:-1}   # 0 = leave default running
       - GATEWAY_PROMOTE_PROFILE=${GATEWAY_PROMOTE_PROFILE:-}   # empty = the installed profile
+      # Skill lockdown (0197-skills-lockdown). A new profile otherwise inherits
+      # the base image's whole bundled skill library on top of the ~25 skills
+      # this distribution ships. The hook writes the .no-bundled-skills marker,
+      # deletes pristine bundled copies, and recomputes skills.disabled from
+      # what is actually installed — every boot, so it survives
+      # HERMES_PROFILE_AUTO_UPDATE=1 rewriting config.yaml.
+      - HERMES_SKILLS_LOCKDOWN=${HERMES_SKILLS_LOCKDOWN:-1}   # 0 = keep all builtin skills
+      - HERMES_SKILLS_LOCKDOWN_PROFILES=${HERMES_SKILLS_LOCKDOWN_PROFILES:-}   # empty = the installed profile
+      - HERMES_SKILLS_LOCKDOWN_PRUNE=${HERMES_SKILLS_LOCKDOWN_PRUNE:-1}   # 0 = disable on disk, don't delete
+      - HERMES_SKILLS_KEEP=${HERMES_SKILLS_KEEP:-}   # extra skill names to keep enabled
       # Uncomment to forward specific env vars instead of using .env file:
       # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       # - OPENAI_API_KEY=${OPENAI_API_KEY}
-      # - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_BASIC_AUTH_USERNAME}
-      # - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}
       # - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
     deploy:
       resources:

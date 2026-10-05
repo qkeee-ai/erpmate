@@ -77,11 +77,42 @@ fi
 # Hand the resolved name to later hooks (/run is tmpfs, so rewritten every boot).
 printf '%s' "$NAME" > /run/hermes-profile-name
 
+# Record which skills the DISTRIBUTION owns, as paths relative to <root>/skills.
+# 0197-skills-lockdown needs this to tell a distribution skill apart from a
+# bundled skill seeded into the same tree: it cannot infer the difference from
+# the tree alone, and the bundled manifest baselines (and would therefore let
+# the lockdown delete) any distribution skill that happens to be byte-identical
+# to its bundled namesake.
+#
+# Written from a tree that holds ONLY the distribution payload: right after a
+# fresh install, or from the mounted source in local-clone mode. After a
+# `profile update` of an already-seeded profile there is no such tree — the
+# record is left as-is, which is correct unless the distribution's skill set
+# changed (then re-install, or delete the record and let 0197 fall back).
+record_dist_skills() {  # $1 = tree root containing skills/
+    _root="$1"
+    _record="$HERMES_HOME/profiles/$NAME/.distribution-skills"
+    [ -d "$_root/skills" ] || return 0
+    find "$_root/skills" -name SKILL.md -type f 2>/dev/null \
+        | sed -e "s|^$_root/skills/||" -e 's|/SKILL\.md$||' \
+        | sort -u > "$_record.tmp" || { rm -f "$_record.tmp"; return 0; }
+    if [ -s "$_record.tmp" ]; then
+        mv "$_record.tmp" "$_record"
+        chown hermes:hermes "$_record" 2>/dev/null || true
+        echo "[profile-install] recorded $(wc -l < "$_record" | tr -d ' ') distribution skill(s) in $_record"
+    else
+        rm -f "$_record.tmp"
+    fi
+}
+
 if [ -d "$HERMES_HOME/profiles/$NAME" ]; then
     if [ "${HERMES_PROFILE_AUTO_UPDATE:-0}" = "1" ]; then
-        run hermes profile update "$NAME" --yes \
-            && echo "[profile-install] $NAME updated" \
-            || echo "[profile-install] WARNING: update of $NAME failed; continuing" >&2
+        if run hermes profile update "$NAME" --yes; then
+            echo "[profile-install] $NAME updated"
+            [ "$MODE" = local ] && record_dist_skills "$SOURCE"
+        else
+            echo "[profile-install] WARNING: update of $NAME failed; continuing" >&2
+        fi
     else
         echo "[profile-install] $NAME already installed"
     fi
@@ -90,6 +121,8 @@ fi
 
 if run hermes profile install "$SOURCE" --name "$NAME" --alias --yes; then
     echo "[profile-install] $NAME installed from $MODE source $SOURCE"
+    # The freshly installed profile tree is exactly the distribution payload.
+    record_dist_skills "$HERMES_HOME/profiles/$NAME"
 else
     echo "[profile-install] WARNING: install of $NAME from $SOURCE failed; continuing" >&2
 fi
