@@ -16,8 +16,85 @@ model:
 #      self-improvement mechanism (now safer anyway per skills.write_
 #      approval + curator.consolidate below) without paying main-model
 #      rates for it on every turn.
+#
+# 2026-10-05 follow-up: free_only was silently killing the ENTIRE auxiliary
+# lane, not just the fallback. Every auxiliary task block defaults to
+# provider: "auto", model: "" — which means "inherit the main model", i.e.
+# openrouter/auto-beta (a PAID SKU). _resolve_openrouter_branch() passes that
+# inherited model into _try_openrouter(), where free_only rejects anything not
+# ending in ":free", so each block was skipped before any credential check:
+#
+#   auxiliary.free_only is enabled but the OpenRouter fallback model
+#   'openrouter/auto-beta' is not a :free SKU — skipping the OpenRouter fallback
+#   resolve_provider_client: nous requested but Nous Portal not configured
+#
+# With the Nous lane unauthenticated too, that left NOTHING: compression never
+# ran (so compression.threshold: 0.30 below was dead config and per-turn input
+# cost grew unbounded — the exact problem this file was tuned to fix),
+# background_review never ran, the curator never ran. Only background_review
+# carried an explicit model, which is why only it was ever going to work.
+#
+# Fix: name a :free model on every block that actually fires here. free_only
+# stays true deliberately — it is the guard that makes a block we forgot fail
+# loudly in the log instead of quietly billing main-model rates. Model ids
+# verified against `jev models list` (322-model OpenRouter catalog, 2026-10-05):
+#   nemotron-3.5-lightning:free   1M ctx, no vision — fast/cheap classifiers
+#   nemotron-3-ultra-550b:free    1M ctx, no vision — summarisation, reasoning
+#   thinkingmachines/inkling:free 1M ctx, VISION    — the aux vision lane
+#
+# `review` is deliberately left on "auto": it is a user-invoked /review
+# subagent, not background traffic, and is worth main-model quality.
 auxiliary:
   free_only: true
+  # Context compaction. Needs the large context window and the best
+  # summarisation available on the free tier — a bad summary here loses task
+  # state permanently.
+  compression:
+    provider: openrouter
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
+  # Aux vision lane. MUST be vision-capable: the doc-extraction domain
+  # (qkeee-erp-associate) reads invoice PDFs/images. Free SKUs are rate-limited
+  # — if extraction accuracy or throughput suffers, this is the first block to
+  # move back to a paid model.
+  vision:
+    provider: openrouter
+    model: thinkingmachines/inkling:free
+  # Fast classifiers / short generations. memory_query_rewrite has an 8s
+  # timeout, so it needs the lightning tier, not the 550b.
+  approval:
+    provider: openrouter
+    model: nvidia/nemotron-3.5-lightning:free
+  memory_query_rewrite:
+    provider: openrouter
+    model: nvidia/nemotron-3.5-lightning:free
+  title_generation:
+    provider: openrouter
+    model: nvidia/nemotron-3.5-lightning:free
+  monitor:
+    provider: openrouter
+    model: nvidia/nemotron-3.5-lightning:free
+  skills_hub:
+    provider: openrouter
+    model: nvidia/nemotron-3.5-lightning:free
+  mcp:
+    provider: openrouter
+    model: nvidia/nemotron-3.5-lightning:free
+  profile_describer:
+    provider: openrouter
+    model: nvidia/nemotron-3.5-lightning:free
+  # Longer reasoning / JSON-structure work.
+  goal_judge:
+    provider: openrouter
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
+  triage_specifier:
+    provider: openrouter
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
+  kanban_decomposer:
+    provider: openrouter
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
+  curator:
+    provider: openrouter
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
   background_review:
     provider: openrouter
     model: nvidia/nemotron-3-ultra-550b-a55b:free
