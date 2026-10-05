@@ -11,7 +11,22 @@ services:
     # Nested ${:-} defaults are resolved by compose itself, no shell needed.
     container_name: ${HERMES_CONTAINER_NAME:-${HERMES_PROFILE_NAME:-${COMPOSE_PROJECT_NAME}}}
     restart: unless-stopped
-    command: gateway run
+    # A pure heartbeat, NOT `gateway run`.
+    #
+    # Inside an s6 container `hermes gateway run` does not run a gateway in the
+    # foreground: _maybe_redirect_run_to_s6_supervision() upgrades it to
+    # `gateway start` on the **gateway-default** s6 slot and then becomes
+    # `sleep infinity` anyway. That starts the DEFAULT profile's gateway, which
+    # is exactly what 0195-gateway-state marked desired_state=stopped — so the
+    # CMD and the promotion hook fought each other, two gateways came up (two
+    # "Hermes Gateway Starting" banners) and gateway-default churned on repeated
+    # SIGTERMs from its supervisor.
+    #
+    # The gateway that should run is registered and started by
+    # 02-reconcile-profiles from each profile's desired_state, so the CMD only
+    # has to keep /init alive. With GATEWAY_PROMOTE_ENABLE=0 that is the default
+    # profile; otherwise the installed custom profile.
+    command: ["sleep", "infinity"]
     # No host port pinned: Docker allocates a free ephemeral host port per
     # container, so multiple agent containers on the same host never clash on
     # startup. Look up the assigned port with:
