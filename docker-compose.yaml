@@ -107,7 +107,19 @@ services:
       # jev first-boot init (models suggest --write, doctor, /jev routing).
       # Routing is only enabled once the key is present (doctor passes).
       - TYPESAFE_API_KEY=${TYPESAFE_API_KEY:-}
+      # Which provider serves JEV'S OWN decision calls (the classifier), NOT the
+      # worker models in routing.json — those use your normal provider keys.
+      # TypeSafe wins whenever several keys exist, so an OpenRouter-only setup
+      # must say so explicitly here AND have a key stored for it:
+      #   docker compose exec hermes /opt/data/bin/jev setup-key --provider openrouter
+      # Honored only when that provider actually has a stored key.
+      - JEV_PROVIDER=${JEV_PROVIDER:-}   # empty = typesafe | openrouter | venice | zen
       - JEV_ROUTING_MODE=${JEV_ROUTING_MODE:-on}   # on | shadow | off
+      # 0 = the curated pools in docker/defaults/jev/routing.json win (they are
+      # validated against the catalog and know this agent's workload).
+      # 1 = let `jev models suggest --write` pick pools from the live catalog
+      # instead — price-optimal, but blind to what the work actually is.
+      - JEV_ROUTING_PREFER_SUGGEST=${JEV_ROUTING_PREFER_SUGGEST:-0}
       # Seed routing.json from a host file instead of the baked default
       # (mount it, then point at the in-container path; never overwrites):
       - JEV_ROUTING_FILE=${JEV_ROUTING_FILE:-}   # e.g. /opt/routing.json + volume ./routing.json:/opt/routing.json:ro

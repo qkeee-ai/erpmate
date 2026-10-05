@@ -36,156 +36,119 @@
   "tiers": {
     "simple": {
       "general": [
-        "openrouter:xiaomi/mimo-v2.6-flash",
-        "openrouter:xiaomi/mimo-v2.6-pro",
-        "openrouter:prism-ml/ternary-bonsai-2-27b",
-        "openrouter:z-ai/glm-5.3-flashx",
-        "openrouter:inclusionai/ling-3.0-flash-vl",
-        "openrouter:deepseek/deepseek-v4.1-flash"
+        "openrouter:inclusionai/ling-3.0-flash",
+        "openrouter:openai/gpt-oss-120b",
+        "openrouter:qwen/qwen3-30b-a3b-instruct-2507",
+        "openrouter:nvidia/nemotron-3.5-lightning",
+        "openrouter:upstage/solar-mini4",
+        "openrouter:qwen/qwen3-32b"
       ],
       "vision": [
-        "openrouter:xiaomi/mimo-v2.6-flash",
-        "openrouter:xiaomi/mimo-v2.6-pro",
-        "openrouter:prism-ml/ternary-bonsai-2-27b",
-        "openrouter:z-ai/glm-5.3-flashx",
         "openrouter:inclusionai/ling-3.0-flash-vl",
-        "openrouter:deepseek/deepseek-v4.1-flash"
+        "openrouter:qwen/qwen3.7-flash",
+        "openrouter:google/gemma-4-26b-a4b-it",
+        "openrouter:mistralai/ministral-3b-2512",
+        "openrouter:qwen/qwen3.5-9b",
+        "openrouter:openai/gpt-5-nano"
       ],
       "coding": [
-        "openrouter:qwen/qwen3-coder-next",
-        "openrouter:mistralai/codestral-2508",
-        "openrouter:qwen/qwen3-coder-flash",
-        "openrouter:qwen/qwen3-coder",
+        "openrouter:openai/gpt-oss-120b",
+        "openrouter:qwen/qwen3-30b-a3b-instruct-2507",
+        "openrouter:ibm-granite/granite-4.2-8b",
         "openrouter:qwen/qwen3-coder-30b-a3b-instruct",
-        "openrouter:xiaomi/mimo-v2.6-flash"
+        "openrouter:qwen/qwen3-32b",
+        "openrouter:poolside/laguna-xs-2.1"
       ],
       "writing": [
-        "openrouter:xiaomi/mimo-v2.6-flash",
-        "openrouter:xiaomi/mimo-v2.6-pro",
-        "openrouter:prism-ml/ternary-bonsai-2-27b",
-        "openrouter:z-ai/glm-5.3-flashx",
-        "openrouter:inclusionai/ling-3.0-flash-vl",
-        "openrouter:deepseek/deepseek-v4.1-flash"
+        "openrouter:mistralai/mistral-nemo",
+        "openrouter:inception/mercury-2.5",
+        "openrouter:google/gemma-3-12b-it",
+        "openrouter:upstage/solar-mini4",
+        "openrouter:mistralai/ministral-8b-2512"
       ],
       "research": [
-        "openrouter:xiaomi/mimo-v2.6-flash",
-        "openrouter:xiaomi/mimo-v2.6-pro",
-        "openrouter:prism-ml/ternary-bonsai-2-27b",
-        "openrouter:z-ai/glm-5.3-flashx",
-        "openrouter:inclusionai/ling-3.0-flash-vl",
-        "openrouter:deepseek/deepseek-v4.1-flash"
+        "openrouter:openai/gpt-oss-20b",
+        "openrouter:nvidia/nemotron-3-nano-30b-a3b",
+        "openrouter:upstage/solar-pro4",
+        "openrouter:qwen/qwen3-14b",
+        "openrouter:nvidia/nemotron-3-super-120b-a12b"
       ]
     },
     "medium": {
       "general": [
-        "openrouter:x-ai/grok-4.7",
-        "openrouter:sakana/fugu-max",
-        "openrouter:google/gemini-3.8-flash",
-        "openrouter:meta/muse-spark-1.3",
-        "openrouter:qwen/qwen3.8-max-0902",
-        "openrouter:tencent/hy4-preview"
+        "openrouter:nex-agi/nex-n2.5-pro",
+        "openrouter:bytedance-seed/seed-2.0-mini",
+        "openrouter:z-ai/glm-5.3-flash",
+        "openrouter:deepseek/deepseek-v3.2",
+        "openrouter:minimax/minimax-m2.7",
+        "openrouter:qwen/qwen3.8-flash"
       ],
       "vision": [
-        "openrouter:x-ai/grok-4.7",
-        "openrouter:sakana/fugu-max",
-        "openrouter:google/gemini-3.8-flash",
-        "openrouter:meta/muse-spark-1.3",
-        "openrouter:qwen/qwen3.8-max-0902",
-        "openrouter:qwen/qwen3.8-27b"
+        "openrouter:qwen/qwen3.5-flash-02-23",
+        "openrouter:bytedance-seed/seed-1.6-flash",
+        "openrouter:qwen/qwen3-vl-32b-instruct",
+        "openrouter:xiaomi/mimo-v2.6-flash",
+        "openrouter:qwen/qwen3-vl-30b-a3b-instruct",
+        "openrouter:z-ai/glm-4.6v"
       ],
       "coding": [
-        "openrouter:nex-agi/nex-n2.5-pro",
-        "openrouter:deepseek/deepseek-v4-flash-0731",
-        "openrouter:deepseek/deepseek-v4.1-flash",
-        "openrouter:kwaipilot/kat-coder-pro-v2.5",
-        "openrouter:moonshotai/kimi-k2.7-code",
-        "openrouter:bytedance-seed/seed-2.0-code",
-        "openrouter:mistralai/devstral-2512",
+        "openrouter:qwen/qwen3-coder-next",
+        "openrouter:qwen/qwen3-coder-flash",
+        "openrouter:mistralai/codestral-2508",
+        "openrouter:qwen/qwen3-coder",
         "openrouter:openai/gpt-5.1-codex-mini",
-        "openrouter:openai/gpt-5.1-codex"
+        "openrouter:mistralai/devstral-2512"
       ],
       "writing": [
-        "openrouter:x-ai/grok-4.7",
-        "openrouter:sakana/fugu-max",
-        "openrouter:google/gemini-3.8-flash",
-        "openrouter:meta/muse-spark-1.3",
-        "openrouter:qwen/qwen3.8-max-0902",
-        "openrouter:tencent/hy4-preview"
+        "openrouter:mistralai/mistral-small-2603",
+        "openrouter:cohere/command-a-plus",
+        "openrouter:qwen/qwen3.6-plus",
+        "openrouter:mistralai/mistral-medium-3.1",
+        "openrouter:mistralai/mistral-large-2512"
       ],
       "research": [
-        "openrouter:x-ai/grok-4.7",
-        "openrouter:x-ai/grok-4.6",
-        "openrouter:x-ai/grok-4.5",
-        "openrouter:x-ai/grok-4.3",
-        "openrouter:x-ai/grok-build-0.1",
-        "openrouter:x-ai/grok-4.20"
+        "openrouter:deepseek/deepseek-v4-pro",
+        "openrouter:deepseek/deepseek-v3.1-terminus",
+        "openrouter:minimax/minimax-m3",
+        "openrouter:z-ai/glm-4.6",
+        "openrouter:nvidia/nemotron-3-ultra-550b-a55b"
       ]
     },
     "hard": {
       "general": [
-        "anthropic:claude-opus-5.5",
-        "anthropic:claude-sonnet-5",
-        "openrouter:nex-agi/nex-n2.5-pro",
-        "openrouter:deepseek/deepseek-v4-flash-0731",
-        "openrouter:deepseek/deepseek-v4.1-flash",
-        "openrouter:xiaomi/mimo-v2.6-pro-ultraspeed",
-        "openrouter:unbiased/pareto",
-        "openrouter:sakana/fugu-ultra-v2",
-        "openrouter:openai/gpt-6-astra",
-        "openrouter:openai/gpt-6-astra-pro",
-        "anthropic:claude-fable-5-1"
+        "openrouter:anthropic/claude-opus-5.5",
+        "openrouter:anthropic/claude-sonnet-5.5",
+        "openrouter:google/gemini-3.1-pro-preview",
+        "openrouter:openai/gpt-5.1",
+        "openrouter:moonshotai/kimi-k3"
       ],
       "vision": [
-        "anthropic:claude-opus-5.5",
-        "anthropic:claude-sonnet-5",
-        "openrouter:nex-agi/nex-n2.5-pro",
-        "openrouter:deepseek/deepseek-v4-flash-0731",
-        "openrouter:deepseek/deepseek-v4.1-flash",
-        "openrouter:xiaomi/mimo-v2.6-pro-ultraspeed",
-        "openrouter:unbiased/pareto",
-        "openrouter:sakana/fugu-ultra-v2",
-        "openrouter:openai/gpt-6-astra",
-        "openrouter:openai/gpt-6-astra-pro",
-        "anthropic:claude-fable-5-1"
+        "openrouter:google/gemini-3.1-pro-preview",
+        "openrouter:anthropic/claude-opus-5.5",
+        "openrouter:anthropic/claude-sonnet-5.5",
+        "openrouter:openai/gpt-5.1",
+        "openrouter:qwen/qwen3-vl-235b-a22b-thinking"
       ],
       "coding": [
-        "anthropic:claude-opus-5.5",
-        "anthropic:claude-sonnet-5",
-        "openrouter:nex-agi/nex-n2.5-pro",
-        "openrouter:deepseek/deepseek-v4-flash-0731",
-        "openrouter:deepseek/deepseek-v4.1-flash",
         "openrouter:openai/gpt-5.3-codex",
-        "openrouter:openai/gpt-5.2-codex",
-        "openrouter:xiaomi/mimo-v2.6-pro-ultraspeed",
-        "openrouter:unbiased/pareto",
-        "openrouter:sakana/fugu-ultra-v2",
-        "openrouter:openai/gpt-6-astra"
+        "openrouter:openai/gpt-5.1-codex-max",
+        "openrouter:anthropic/claude-sonnet-5.5",
+        "openrouter:anthropic/claude-opus-5.5",
+        "openrouter:moonshotai/kimi-k2.7-code"
       ],
       "writing": [
-        "anthropic:claude-opus-5.5",
-        "anthropic:claude-sonnet-5",
-        "openrouter:nex-agi/nex-n2.5-pro",
-        "openrouter:deepseek/deepseek-v4-flash-0731",
-        "openrouter:deepseek/deepseek-v4.1-flash",
-        "openrouter:xiaomi/mimo-v2.6-pro-ultraspeed",
-        "openrouter:unbiased/pareto",
-        "openrouter:sakana/fugu-ultra-v2",
-        "openrouter:openai/gpt-6-astra",
-        "openrouter:openai/gpt-6-astra-pro",
-        "anthropic:claude-fable-5-1"
+        "openrouter:anthropic/claude-sonnet-5.5",
+        "openrouter:anthropic/claude-opus-5.5",
+        "openrouter:openai/gpt-6-sol",
+        "openrouter:google/gemini-3.1-pro-preview",
+        "openrouter:mistralai/mistral-medium-3-5"
       ],
       "research": [
-        "anthropic:claude-opus-5.5",
-        "anthropic:claude-sonnet-5",
-        "openrouter:nex-agi/nex-n2.5-pro",
-        "openrouter:deepseek/deepseek-v4-flash-0731",
-        "openrouter:deepseek/deepseek-v4.1-flash",
-        "openrouter:xiaomi/mimo-v2.6-pro-ultraspeed",
-        "openrouter:unbiased/pareto",
-        "openrouter:sakana/fugu-ultra-v2",
-        "openrouter:openai/gpt-6-astra",
-        "openrouter:openai/gpt-6-astra-pro",
-        "anthropic:claude-fable-5-1"
+        "openrouter:openai/gpt-5.1",
+        "openrouter:google/gemini-2.5-pro",
+        "openrouter:openai/o3",
+        "openrouter:anthropic/claude-sonnet-5",
+        "openrouter:anthropic/claude-opus-5.5"
       ]
     }
   }

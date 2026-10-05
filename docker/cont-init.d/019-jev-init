@@ -46,40 +46,79 @@ for name in $TARGETS; do
     # Seed a curated routing.json if the profile has none. Never overwrites an
     # existing one. Source precedence: JEV_ROUTING_FILE (mounted from the host),
     # then the default baked into the image.
-    if [ ! -e "$H/jev/routing.json" ]; then
+    # Key state decides the ORDER of the two sources below, so resolve it first.
+    # doctor exits 0 iff a key is present; routing warnings do not fail it.
+    if doc="$(jrun "$JEV" doctor 2>&1)"; then
+        key_present=1
+        echo "$tag doctor ok: $doc"
+    else
+        key_present=0
+        echo "$tag WARNING: doctor failed (no jev key stored?); see 'jev setup-key': $doc" >&2
+    fi
+
+    seeded_marker="$H/jev/.routing-from-defaults"
+
+    # Source precedence: the curated file (JEV_ROUTING_FILE, else the baked
+    # default) WINS, and `models suggest --write` is the fallback for when there
+    # is no curated source at all.
+    #
+    # Rationale: suggest optimises purely for catalog price. It cannot know that
+    # vision turns here are ERPNext document extraction, or that the hard tier
+    # should lead a frontier model. The curated pools encode that, and they are
+    # validated against the catalog (monotonic price per specialty, no dead
+    # specialty cells, no blind model in a vision pool). Flip the order with
+    # JEV_ROUTING_PREFER_SUGGEST=1 when you would rather have price-optimal
+    # pools chosen from whatever the catalog holds today.
+    #
+    # The marker records "this routing.json came from our defaults, not from the
+    # operator", so a later boot may regenerate it; a routing.json with no marker
+    # was authored in the volume and is never overwritten.
+    seed_curated() {
         src=""
         if [ -n "${JEV_ROUTING_FILE:-}" ]; then
             if [ -f "$JEV_ROUTING_FILE" ]; then src="$JEV_ROUTING_FILE"
             else echo "$tag WARNING: JEV_ROUTING_FILE=$JEV_ROUTING_FILE not found; trying baked default" >&2; fi
         fi
         [ -z "$src" ] && [ -f /opt/defaults/jev/routing.json ] && src=/opt/defaults/jev/routing.json
-        if [ -n "$src" ]; then
-            if python3 -m json.tool "$src" >/dev/null 2>&1; then
-                jrun cp "$src" "$H/jev/routing.json" && jrun touch "$marker" \
-                    && echo "$tag seeded routing.json from $src"
-            else
-                echo "$tag WARNING: $src is not valid JSON; not seeding" >&2
-            fi
+        [ -n "$src" ] || return 1
+        if ! python3 -m json.tool "$src" >/dev/null 2>&1; then
+            echo "$tag WARNING: $src is not valid JSON; not seeding" >&2
+            return 1
         fi
-    fi
+        jrun cp "$src" "$H/jev/routing.json" || return 1
+        jrun touch "$seeded_marker"
+        echo "$tag seeded routing.json from $src"
+    }
 
-    # Only draft one when the profile still has none (suggest --write overwrites).
-    if [ ! -e "$marker" ] && [ ! -e "$H/jev/routing.json" ]; then
+    suggest() {
+        [ "$key_present" = 1 ] || { echo "$tag models suggest needs a jev key; skipped" >&2; return 1; }
         if out="$(jrun "$JEV" models suggest --write 2>&1)"; then
             echo "$tag models suggest: $out"
-            jrun touch "$marker"
-        else
-            echo "$tag WARNING: models suggest --write failed (network?); will retry next boot: $out" >&2
+            jrun touch "$seeded_marker" "$marker"
+            return 0
         fi
+        echo "$tag WARNING: models suggest --write failed (empty catalog / network?): $out" >&2
+        return 1
+    }
+
+    prefer_suggest=0
+    case "${JEV_ROUTING_PREFER_SUGGEST:-0}" in 1|true|TRUE|True|yes|YES|Yes) prefer_suggest=1 ;; esac
+
+    if [ ! -e "$H/jev/routing.json" ]; then
+        if [ "$prefer_suggest" = 1 ]; then
+            suggest || seed_curated || echo "$tag no routing.json and no source for one" >&2
+        else
+            seed_curated || suggest || echo "$tag no routing.json and no source for one" >&2
+        fi
+    elif [ -e "$seeded_marker" ] && [ "$prefer_suggest" = 1 ]; then
+        # The file on disk came from our defaults, not the operator, and the
+        # operator has asked for catalog-chosen pools: regenerate.
+        echo "$tag regenerating routing.json from the live model catalog"
+        suggest || echo "$tag keeping the seeded routing.json" >&2
     fi
 
-    # Exit 0 iff the API key is present; routing warnings do not fail it.
-    if doc="$(jrun "$JEV" doctor 2>&1)"; then
-        echo "$tag doctor ok: $doc"
-    else
-        echo "$tag WARNING: doctor failed (TYPESAFE_API_KEY missing?); routing left unchanged: $doc" >&2
-        continue
-    fi
+    # Routing can only be switched on once jev can actually answer.
+    [ "$key_present" = 1 ] || { echo "$tag routing left unchanged (no key)" >&2; continue; }
 
     # Equivalent of `/jev routing $MODE`; never overrides an existing choice.
     jrun python3 - "$H/jev/state.json" "$MODE" <<'PY'
