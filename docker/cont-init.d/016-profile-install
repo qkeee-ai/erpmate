@@ -84,37 +84,73 @@ printf '%s' "$NAME" > /run/hermes-profile-name
 # the lockdown delete) any distribution skill that happens to be byte-identical
 # to its bundled namesake.
 #
-# Written from a tree that holds ONLY the distribution payload: right after a
-# fresh install, or from the mounted source in local-clone mode. After a
-# `profile update` of an already-seeded profile there is no such tree — the
-# record is left as-is, which is correct unless the distribution's skill set
-# changed (then re-install, or delete the record and let 0197 fall back).
-record_dist_skills() {  # $1 = tree root containing skills/
-    _root="$1"
-    _record="$HERMES_HOME/profiles/$NAME/.distribution-skills"
-    [ -d "$_root/skills" ] || return 0
-    find "$_root/skills" -name SKILL.md -type f 2>/dev/null \
-        | sed -e "s|^$_root/skills/||" -e 's|/SKILL\.md$||' \
-        | sort -u > "$_record.tmp" || { rm -f "$_record.tmp"; return 0; }
-    if [ -s "$_record.tmp" ]; then
-        mv "$_record.tmp" "$_record"
-        chown hermes:hermes "$_record" 2>/dev/null || true
-        echo "[profile-install] recorded $(wc -l < "$_record" | tr -d ' ') distribution skill(s) in $_record"
-    else
-        rm -f "$_record.tmp"
+# Derived from a tree that holds ONLY the distribution payload. A freshly
+# installed profile IS such a tree; an already-seeded one is not, so there the
+# inventory is read back from the source instead — the mounted clone in local
+# mode, or a blobless shallow clone in git mode (tree listing only, no file
+# contents). That keeps an existing profile self-healing: the common case is a
+# profile installed on an earlier boot, which otherwise never gets a record and
+# leaves 0197 unable to prune anything.
+
+RECORD="$HERMES_HOME/profiles/$NAME/.distribution-skills"
+
+install_skill_record() {  # relative skill dir paths on stdin
+    sort -u > "$RECORD.tmp" || { rm -f "$RECORD.tmp"; return 1; }
+    if [ ! -s "$RECORD.tmp" ]; then
+        rm -f "$RECORD.tmp"
+        return 1
     fi
+    mv "$RECORD.tmp" "$RECORD"
+    chown hermes:hermes "$RECORD" 2>/dev/null || true
+    echo "[profile-install] recorded $(wc -l < "$RECORD" | tr -d ' ') distribution skill(s) in $RECORD"
+}
+
+list_tree_skills() {  # $1 = root containing skills/
+    [ -d "$1/skills" ] || return 0
+    find "$1/skills" -name SKILL.md -type f 2>/dev/null \
+        | sed -e "s|^$1/skills/||" -e 's|/SKILL\.md$||'
+}
+
+# Tree listing only: --filter=blob:none --no-checkout fetches no file contents,
+# so this costs one small request even on a large repo. Auth env (GIT_CONFIG_*
+# / GIT_SSH_COMMAND) was already exported above for git sources.
+list_git_skills() {  # $1 = git source
+    _t="$(mktemp -d 2>/dev/null)" || return 1
+    if git clone --depth 1 --filter=blob:none --no-checkout --quiet "$1" "$_t/src" 2>/dev/null; then
+        git -C "$_t/src" ls-tree -r --name-only HEAD \
+            | sed -n 's|^skills/\(.*\)/SKILL\.md$|\1|p'
+        rm -rf "$_t"
+        return 0
+    fi
+    rm -rf "$_t"
+    return 1
+}
+
+# Rebuild the record from whatever view of the distribution we can still reach.
+record_from_source() {
+    if [ "$MODE" = local ]; then
+        list_tree_skills "$SOURCE" | install_skill_record && return 0
+    else
+        list_git_skills "$SOURCE" | install_skill_record && return 0
+    fi
+    echo "[profile-install] WARNING: could not read the distribution's skill list from" >&2
+    echo "[profile-install]   $SOURCE — 0197-skills-lockdown will denylist but not prune." >&2
+    return 1
 }
 
 if [ -d "$HERMES_HOME/profiles/$NAME" ]; then
     if [ "${HERMES_PROFILE_AUTO_UPDATE:-0}" = "1" ]; then
         if run hermes profile update "$NAME" --yes; then
             echo "[profile-install] $NAME updated"
-            [ "$MODE" = local ] && record_dist_skills "$SOURCE"
+            record_from_source   # the update may have changed the skill set
         else
             echo "[profile-install] WARNING: update of $NAME failed; continuing" >&2
         fi
     else
         echo "[profile-install] $NAME already installed"
+        # Backfill for a profile installed before this hook existed. Skipped once
+        # present, so a boot with no network keeps working.
+        [ -s "$RECORD" ] || record_from_source
     fi
     exit 0
 fi
@@ -122,7 +158,8 @@ fi
 if run hermes profile install "$SOURCE" --name "$NAME" --alias --yes; then
     echo "[profile-install] $NAME installed from $MODE source $SOURCE"
     # The freshly installed profile tree is exactly the distribution payload.
-    record_dist_skills "$HERMES_HOME/profiles/$NAME"
+    list_tree_skills "$HERMES_HOME/profiles/$NAME" | install_skill_record \
+        || echo "[profile-install] WARNING: no skills found in the installed profile" >&2
 else
     echo "[profile-install] WARNING: install of $NAME from $SOURCE failed; continuing" >&2
 fi

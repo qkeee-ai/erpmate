@@ -139,7 +139,14 @@ for dirpath, dirnames, filenames in os.walk(skills_root, followlinks=True):
 record = home / ".distribution-skills"
 dist_rels = None
 if record.exists():
-    dist_rels = {ln.strip() for ln in record.read_text(encoding="utf-8").splitlines() if ln.strip()}
+    # 016 records every SKILL.md it finds, including ones inside a skill's own
+    # support dirs (references/, examples/ — qkeee-erp-associate ships one).
+    # The tree scan above drops those via is_excluded_skill_path, so filter the
+    # record the same way or they read as "recorded but not on disk" forever.
+    dist_rels = {
+        rel for rel in (ln.strip() for ln in record.read_text(encoding="utf-8").splitlines())
+        if rel and not is_excluded_skill_path(skills_root / rel / "SKILL.md")
+    }
 
 if dist_rels:
     allowed = set(linked)
