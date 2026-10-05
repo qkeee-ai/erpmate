@@ -10,8 +10,13 @@
 # Source selection (first match wins):
 #   HERMES_PROFILE_LOCAL_PATH  local clone mounted into the container; must
 #                              contain distribution.yaml at its root
-#   HERMES_PROFILE_SOURCE      git URL (default: the public qkeee-in repo);
-#                              empty string skips the install entirely
+#   HERMES_PROFILE_SOURCE      git URL; empty string skips the install entirely.
+#                              docker-compose.yaml always sets this, so the
+#                              fallback below only applies to a bare `docker
+#                              run`. Keep the two spellings in sync — they
+#                              drifted once (this hook still pointed at a repo
+#                              that had been renamed), which would have
+#                              installed nothing outside compose.
 #
 # Private git URL auth (never written to disk or into the URL):
 #   HTTPS: HERMES_PROFILE_GIT_TOKEN or HERMES_PROFILE_GIT_TOKEN_FILE
@@ -34,7 +39,7 @@ if [ -n "${HERMES_PROFILE_LOCAL_PATH:-}" ]; then
     fi
     MODE=local
 else
-    SOURCE="${HERMES_PROFILE_SOURCE-https://github.com/qkeee-in/erpnext-hermes}"
+    SOURCE="${HERMES_PROFILE_SOURCE-https://github.com/qkeee-ai/erpmate.git}"
     [ -n "$SOURCE" ] || { echo "[profile-install] no source configured; skipping"; exit 0; }
     MODE=git
 
