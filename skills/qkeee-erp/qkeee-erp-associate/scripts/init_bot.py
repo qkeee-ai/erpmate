@@ -482,7 +482,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         "  1. Confirm the steady-state QKEEE_ERP_<TAG>_API_KEY/SECRET in "
         "qkeee-erp.env belong to a dedicated bot user that is NOT Administrator "
         "and does NOT hold System Manager.\n"
-        "  2. Run `python core/client.py --tag " + tag + " health` under THOSE "
+        "  2. Run `python scripts/core/client.py --tag " + tag + " health` under THOSE "
         "credentials and confirm the output's rbac_precheck_reliable is true. "
         "If it's false, most writes on this tag will now be refused outright "
         "(UnvalidatedProdRequesterError) unless the requester's own live roles "

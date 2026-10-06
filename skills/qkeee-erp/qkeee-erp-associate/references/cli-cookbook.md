@@ -16,14 +16,15 @@ the full subcommand list (`health`, `list-envs`, `query`, `get`, `report`,
 
 **`core/client.py` has no write subcommand. Use `execute_write.py` for every write.** It imports every `domains/*.py` module up front, so every domain's allowlist and operations are registered before the write runs, and it runs a named operation (`--op`, or the `--domain`/`--doctype`/`--action` shorthand for a `<domain>.generic` operation — `unscoped.generic` when `--domain` is omitted). See "Write calls" below. Never route around it by calling the pipeline or a domain function from a hand-written script. In Python (tests, other skills' scripts), the write API is `core/operations.py`: `run_operation(op_key, args, WriteContext(...))`, `prepare_only()` to render, and `call_generic()` as the keyword-style spelling for a generic operation — `core/client.py` has no write function.
 
-**Exact path — don't guess it.** The script lives at
-`<profile>/skills/qkeee-erp/qkeee-erp-associate/scripts/core/client.py`
-(the `qkeee-erp-associate/` segment is easy to drop — `skills/qkeee-erp/
-scripts/...` is a real, previously-observed wrong guess that costs a
-wasted round trip). `cd` into `.../qkeee-erp-associate/scripts` first, or
-prefix every command with the full path — verify with one `search_files`/
-listing at the start of a session if there's any doubt, rather than
-guessing and retrying on failure.
+**Exact path — don't guess it.** Every command below is written
+relative to the skill directory (`scripts/...`). Run it with the skill
+directory prefixed — the absolute path, e.g.
+`python <profile>/skills/qkeee-erp/qkeee-erp-associate/scripts/core/client.py`
+(SKILL.md gives it as `${HERMES_SKILL_DIR}`). **Never `cd` into `scripts/`:**
+the terminal keeps its working directory between calls, so the next
+`scripts/...` path becomes `scripts/scripts/...` and fails (observed live,
+2026-10-06). Don't drop the `qkeee-erp-associate/` segment either —
+`skills/qkeee-erp/scripts/...` is another observed wrong guess.
 
 ## Read-only calls
 
@@ -35,16 +36,16 @@ read-only lookups:
 
 ```
 # Connectivity + auth check — run first, every session
-python core/client.py --tag <tag> health
+python scripts/core/client.py --tag <tag> health
 
 # List configured environment tags
-python core/client.py --tag <tag> list-envs
+python scripts/core/client.py --tag <tag> list-envs
 
 # Filtered, field-scoped list query — the default shape for "fetch X
 # where Y" asks. filters is a JSON list of [field, operator, value]
 # triples; fields is a JSON list of field names (see 01-connectivity.md's
 # "Query cost" section for why to always scope fields).
-python core/client.py --tag <tag> query <DocType> \
+python scripts/core/client.py --tag <tag> query <DocType> \
   --filters '[["supplier", "=", "<value>"], ["company", "=", "<value>"], ["docstatus", "=", 0]]' \
   --fields '["name", "supplier", "company", "posting_date", "grand_total", "status"]' \
   --limit 20
@@ -52,7 +53,7 @@ python core/client.py --tag <tag> query <DocType> \
 # Single-resource GET — full doc including child tables (line items,
 # etc.) — use only when child-table data is actually needed, see
 # 01-connectivity.md's "Query cost" section.
-python core/client.py --tag <tag> get <DocType> <name>
+python scripts/core/client.py --tag <tag> get <DocType> <name>
 ```
 
 `docstatus`: `0` = Draft, `1` = Submitted, `2` = Cancelled — use this in
@@ -81,7 +82,7 @@ the exact payload shape and required fields, see the matching
 ```
 # Every operation, its arguments, whether it needs a confirmation, and a
 # ready-to-edit worked example (`example_args`) for each one
-python execute_write.py --list-ops
+python scripts/execute_write.py --list-ops
 ```
 
 Start every write from that operation's `example_args`: replace the
@@ -106,7 +107,7 @@ need no token. `--list-ops` shows each operation's rule.
    `confirmation_code`:
 
    ```
-   python core/confirm_token.py render --op <op> --args '<json>' \
+   python scripts/core/confirm_token.py render --op <op> --args '<json>' \
      --tag <tag> --requested-by <requester-email>
    ```
 
@@ -115,7 +116,7 @@ need no token. `--list-ops` shows each operation's rule.
 3. **Execute.** Pass the printed values and the user's own reply:
 
    ```
-   python execute_write.py --tag <tag> --mode read-write \
+   python scripts/execute_write.py --tag <tag> --mode read-write \
      --requested-by <requester-email> --op <op> --args '<printed args>' \
      --confirmation-token <printed> --issued-at <printed> \
      --user-confirmation-text "<the user's actual reply>" \
@@ -157,13 +158,13 @@ instead. Never retry the delete.
 
 ```
 # Draft create on a domain doctype — shorthand for --op sales.generic
-python execute_write.py --tag <tag> --mode read-write --requested-by <email> \
+python scripts/execute_write.py --tag <tag> --mode read-write --requested-by <email> \
   --domain sales --doctype "Sales Order" --action create \
   --payload '{"customer": "<value>", "items": [...]}' \
   --session-id <s> --channel-metadata '<json>' --latest-prompt "<msg>"
 
 # Submit it later: render binds the record's current `modified`
-python core/confirm_token.py render --op sales.generic \
+python scripts/core/confirm_token.py render --op sales.generic \
   --args '{"doctype": "Sales Order", "action": "submit", "name": "SAL-ORD-0001"}' \
   --tag <tag> --requested-by <email>
 # ...show, get the reply, then execute with the printed args/token/issued_at
@@ -172,7 +173,7 @@ python core/confirm_token.py render --op sales.generic \
 # tax_id/pan), or kyc_waiver_confirmed only when the user explicitly
 # waived it. Linked Address/Contact are created in the same operation and
 # the Supplier is rolled back if they fail. See domains/procurement.md.
-python execute_write.py --tag <tag> --mode read-write --requested-by <email> \
+python scripts/execute_write.py --tag <tag> --mode read-write --requested-by <email> \
   --domain procurement --doctype Supplier --action create \
   --payload '{"supplier_name": "<value>", "supplier_type": "Company"}' \
   --kyc '{"address": {"address_line1": "<v>", "city": "<v>", "country": "<v>", "gstin": "<v>"}}' \
@@ -182,12 +183,12 @@ python execute_write.py --tag <tag> --mode read-write --requested-by <email> \
 # confirmed. For an item sourced from a purchase document add
 # "purchase_sourced_item": true (is_purchase_item=1/is_sales_item=0; a
 # bare standard_rate is refused — see item_write_helpers.py).
-python core/confirm_token.py render --op unscoped.generic \
+python scripts/core/confirm_token.py render --op unscoped.generic \
   --args '{"doctype": "Item", "action": "create", "purchase_sourced_item": true, "payload": {"item_code": "<v>", ...}}' \
   --tag <tag> --requested-by <email>
 
 # A bespoke gated operation
-python core/confirm_token.py render --op system_admin.disable_user \
+python scripts/core/confirm_token.py render --op system_admin.disable_user \
   --args '{"name": "<user email>", "reason": "<stated reason>"}' \
   --tag <tag> --requested-by <email>
 ```

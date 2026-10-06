@@ -264,7 +264,7 @@ def _verify_token(op: Operation, policy: str, req: PreparedRequest, ctx: WriteCo
     if not ctx.confirmation_token or ctx.issued_at is None:
         raise _c.ConfirmationRequiredError(
             f"Refusing {req.action} on '{req.doctype}' ({op.key}): a confirmation_token + "
-            f"issued_at are required. Render it first — `confirm_token.py render --op {op.key} "
+            f"issued_at are required. Render it first — `scripts/core/confirm_token.py render --op {op.key} "
             f"--args ...` — show the rendered request and confirmation code to the user, and "
             f"pass the printed args/token/issued_at back unchanged. Never hand-construct one."
         )

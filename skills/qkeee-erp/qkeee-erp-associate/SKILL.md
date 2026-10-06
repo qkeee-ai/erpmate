@@ -46,6 +46,18 @@ opinion, small talk) gets a short, polite redirect back to this scope —
 never an attempt to answer it anyway. Stated once, in
 `references/00-conventions.md`; every domain file inherits it.
 
+## Running the scripts
+
+Run every script by its absolute path under this skill's directory:
+`python ${HERMES_SKILL_DIR}/scripts/core/client.py ...`,
+`python ${HERMES_SKILL_DIR}/scripts/execute_write.py ...`. Never `cd` into
+`scripts/` first: the terminal keeps its working directory between calls,
+so a later `scripts/...` path resolves to `scripts/scripts/...` and fails
+(observed live, 2026-10-06). Script names in the references
+(`core/client.py`, `core/confirm_token.py`, `execute_write.py`,
+`discover.py`, `init_bot.py`) all live under
+`${HERMES_SKILL_DIR}/scripts/`.
+
 ## Activation sequence
 
 Run this every session, in order, before taking any domain-specific
