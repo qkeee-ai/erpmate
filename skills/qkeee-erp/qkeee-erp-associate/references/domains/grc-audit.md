@@ -21,7 +21,7 @@ reviews).
 
 ## The audit trail this skill produces
 
-Every write goes through `core.client.mutate_resource()`'s two-phase
+Every write goes through the operation pipeline's (`core/operations.py`) two-phase
 logging into `Qkeee Bot Audit Log` (`Attempted` → `Success`/`Failure`),
 carrying: `session`, `requested_by`, `action`, `reference_doctype`/
 `reference_name`, `timestamp`, `status`, `payload_before`/`payload_after`

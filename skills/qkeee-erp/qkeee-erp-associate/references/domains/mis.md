@@ -13,12 +13,11 @@ question over ERPNext's accounts data.
 ## Non-negotiables specific to this domain
 
 - **Read-only, always — enforced in code, not by omission.**
-  `core.client.mutate_resource()` is one shared function used by every
-  domain, so this domain's read-only guarantee is a **runtime
-  write-allowlist gate**, not a missing write path: `domains/mis.py`
-  registers an empty `ALLOWED_WRITE_DOCTYPES` tuple, so
-  `core.client.mutate_resource(..., domain="mis")` refuses every doctype,
-  unconditionally, via `DoctypeNotAllowedError`. Treat any proposal to
+  Every write runs through one shared pipeline, so this domain's
+  read-only guarantee is a **runtime write-allowlist gate**, not a missing
+  write path: `domains/mis.py` registers an empty `ALLOWED_WRITE_DOCTYPES`
+  tuple, so operation `mis.generic` refuses every doctype,
+  unconditionally, via `DoctypeNotAllowedError` — before any read. Treat any proposal to
   add a doctype to this domain's allowlist as a decision that
   contradicts this domain's entire purpose, not a routine capability
   expansion. `domains.mis.mutate()` exists only for interface symmetry

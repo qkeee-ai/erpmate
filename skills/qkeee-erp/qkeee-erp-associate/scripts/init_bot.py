@@ -17,9 +17,20 @@ applies regardless: nothing here executes a write without a prior
 --dry-run's token, and a real run recomputes its plan against the
 target's actual current state before trusting a passed-in token.
 
-Requires an ELEVATED (System Manager/Administrator) API key for the
-target tag — creating a DocType/Role record needs permission the shared
-qkeee-erp-bot@<org> steady-state service account should not hold.
+Requires the tag's ELEVATED admin key pair —
+QKEEE_ERP_<TAG>_ADMIN_API_KEY/_ADMIN_API_SECRET (decision D1, write-path
+hardening) — held by a System Manager account: creating a DocType/Role
+record needs permission the shared qkeee-erp-bot@<org> steady-state
+service account must not hold. The two creates run as the provisioning
+operations below (core/operations.py pipeline: requester gate + audit),
+restricted to exactly the Role and Audit Log DocType this script defines,
+and are not reachable from execute_write.py.
+
+`--requested-by` must be a real ERPNext User who holds create permission
+on Role and DocType (in practice: System Manager). Role/DocType writes
+are no longer exempt from core.client's requester gate — see
+core/client.py's WRITE_GATE_EXEMPT_DOCTYPES — so a requester without
+that permission is refused before anything is created.
 
 **The steady-state bot account this provisions FOR must itself never be
 Administrator or hold System Manager once it's created and switched to.**
@@ -54,9 +65,45 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from core import client as core_client
+from core import operations
 from core.client import ConnectorError, _qkeee_env_file_path, _audit_insert, _audit_submit, _now_iso
 from core.confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECONDS
 from doctype_defs import ALL_DOCTYPES, ROLE_NAME, ROLE_PAYLOAD
+
+
+# ---------------------------------------------------------------------------
+# Provisioning operations — exactly two records, nothing else
+# ---------------------------------------------------------------------------
+# Token policy "none": this script's own dry-run plan token (verified in
+# run_real() before either runs) is the confirmation. Each prepare() refuses
+# anything but the exact Role / DocType definitions in doctype_defs.py, so
+# these can't be used to create arbitrary Roles or DocTypes. cli=False:
+# execute_write.py never lists or runs them (it doesn't import this file).
+
+def _provision_role_prepare(args, ctx):
+    if set(args) != {"role"} or args["role"] != ROLE_NAME:
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.create_role only creates the {ROLE_NAME!r} Role.")
+    return operations.PreparedRequest(transport="resource", doctype="Role", action="create",
+                                      body=dict(ROLE_PAYLOAD))
+
+
+def _provision_doctype_prepare(args, ctx):
+    defs = {d["name"]: d for d in ALL_DOCTYPES}
+    if set(args) != {"doctype_name"} or args["doctype_name"] not in defs:
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.create_doctype only creates {sorted(defs)}.")
+    return operations.PreparedRequest(transport="resource", doctype="DocType", action="create",
+                                      body=dict(defs[args["doctype_name"]]))
+
+
+for _key, _prep, _summary in (
+        ("provisioning.create_role", _provision_role_prepare, f"create the {ROLE_NAME} Role"),
+        ("provisioning.create_doctype", _provision_doctype_prepare, "create the audit DocType")):
+    operations.register_operation(operations.Operation(
+        key=_key, domain=None, summary=_summary, prepare=_prep,
+        token_policy=operations.POLICY_NONE, credential="admin", allowlist_domain=None,
+        cli=False, audit=False))  # log_role_provisioning() is this flow's one audit record
 
 
 def ensure_qkeee_env_file_skeleton() -> bool:
@@ -137,11 +184,9 @@ def ensure_role(tag: str, requested_by: str, approval_note: str) -> bool:
     if core_client.resource_exists(tag, "Role", ROLE_NAME):
         print(f"Role '{ROLE_NAME}' already exists — skipping.")
         return False
-    core_client.mutate_resource(
-        tag, "Role", "create", payload=ROLE_PAYLOAD,
-        mode="read-write", requested_by=requested_by,
-        user_approved=True, approval_note=approval_note,
-    )
+    operations.run_operation("provisioning.create_role", {"role": ROLE_NAME}, operations.WriteContext(
+        tag=tag, mode="read-write", requested_by=requested_by,
+        user_approved=True, approval_note=approval_note))
     print(f"Created Role '{ROLE_NAME}'.")
     return True
 
@@ -151,11 +196,11 @@ def ensure_doctype(tag: str, doctype_def: dict, requested_by: str, approval_note
     if core_client.resource_exists(tag, "DocType", name):
         print(f"DocType '{name}' already exists — skipping.")
         return False
-    core_client.mutate_resource(
-        tag, "DocType", "create", payload=doctype_def,
-        mode="read-write", requested_by=requested_by,
-        user_approved=True, approval_note=approval_note,
-    )
+    operations.run_operation("provisioning.create_doctype", {"doctype_name": name},
+                             operations.WriteContext(tag=tag, mode="read-write",
+                                                     requested_by=requested_by,
+                                                     user_approved=True,
+                                                     approval_note=approval_note))
     print(f"Created DocType '{name}'.")
     return True
 

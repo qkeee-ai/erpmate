@@ -179,9 +179,12 @@ all** (a third-party tool, an internal API) follows
 - `references/non-erpnext-adapter.md` — procedure for a non-ERPNext
   target system.
 - `references/domains/*.md` — one per domain slug above, lazily latched.
-- `scripts/core/client.py` — the shared connector: ~37 functions plus the
-  write-allowlist gate (`register_domain_allowlist()`,
-  `mutate_resource(..., domain=...)`).
+- `scripts/core/client.py` — the shared connector: reads, the requester
+  gate, audit logging, transport, and the write-allowlist registry
+  (`register_domain_allowlist()`).
+- `scripts/core/operations.py` — the one write pipeline and the registry of
+  named write operations; `scripts/execute_write.py` is its only CLI
+  (`--list-ops`), `scripts/core/confirm_token.py render` its render step.
 - `scripts/domains/*.py` — one per domain with a write path (nine of
   eleven — `mis` registers an empty allowlist, `doc-extraction` has no
   connector, `manufacturing` has no module yet).

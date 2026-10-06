@@ -3,7 +3,8 @@
 Code: `scripts/domains/inventory.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Stock Entry", "Material Request", "Stock
 Reconciliation")`), which also carries this domain's genuine connector
-logic: `get_bin_qty()`, `get_stock_reconciliation_items()`,
+logic (both reads are gated and audit-logged — pass `requested_by=` and
+the session context): `get_bin_qty()`, `get_stock_reconciliation_items()`,
 `bin_rows_to_actual_source_qty()`.
 
 ## When this domain applies
@@ -54,7 +55,8 @@ prompt:
    `get_bin_qty()` balance for every `(item_code, s_warehouse)` pair among
    the drafted lines, convert with `bin_rows_to_actual_source_qty()`, and
    use it as the freshness check above requires. Present, confirm, then
-   `domains.inventory.mutate(..., "create")` (lands `docstatus 0`).
+   `inventory.generic` `create` (lands `docstatus 0`; submit needs a
+   rendered confirmation — `cli-cookbook.md`).
    **Save-draft-then-review-then-submit:** re-fetch via
    `core.client.get_resource()` (the list endpoint silently drops the
    line-items child table) and review every line — quantities and every

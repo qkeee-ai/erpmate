@@ -34,7 +34,7 @@ code; "Planned" = documented but no code exists yet.
 | Health check (connectivity + auth verification, distinct from permission checks) | **Live** | `core/client.py`: `health_check()` |
 | List configured environment tags | **Live** | `core/client.py`: `list_configured_tags()` |
 | Environment-assessment procedure: run once per tag on first contact, and re-run when live metadata looks stale vs. durable memory | Prompt-only (procedure) | `02-environment-assessment.md` |
-| Manual/debug CLI for the core connector (`health`, `list-envs`, `query`, `get`, `report`, `roles`, `mutate`, `gated-mutate`) | **Live** | `core/client.py`: `_cli()`; worked examples in `cli-cookbook.md` |
+| Manual/debug CLI for the core connector (`health`, `list-envs`, `query`, `get`, `report`, `roles` — read-only; the `mutate`/`gated-mutate` write subcommands were removed 2026-10-06) | **Live** | `core/client.py`: `_cli()`; worked examples in `cli-cookbook.md` |
 
 ## 3. Live-metadata / anti-guessing discipline
 
@@ -66,14 +66,14 @@ code; "Planned" = documented but no code exists yet.
 | Privileged-bot-account detection (bot must never be Administrator/System Manager) | **Live** (detection) | `core/client.py`: `_bot_identity()`, `_BOT_FORBIDDEN_ROLES` |
 | Missing-requester hard stop — no write without a resolved `requested_by` | **Live** | `core/client.py`: `MissingRequesterError` |
 | **Confirmation-token primitives** — deterministic short token computed over the exact facts just shown to the user; freshness window (15 min default) with clock-skew tolerance | **Live** | `confirm_token.py`: `compute_token()`, `is_fresh()`, `DEFAULT_TOKEN_TTL_SECONDS` |
-| Domain-scoped **submit/cancel token gate**, registered per domain (accounts, hr-payroll, sales, procurement, inventory) | **Live** | `core/client.py`: `register_domain_token_gate()`; each domain's `core_client.register_domain_token_gate(...)` call |
+| **One write pipeline** — every write is a named operation (`execute_write.py --list-ops`); submit/cancel/delete in every domain, every bespoke fixed-assets/system-admin operation and every unscoped write need a rendered token over the exact request plus the user's reply with its confirmation code | **Live** | `core/operations.py`: `run_operation()`, `operation_token()`, `prepare_only()`; `core/confirm_token.py render` |
 | **Domain-less advisory write gate** for doctypes with no owning domain (e.g. Item) — additionally requires the literal text of the user's own confirming reply, not a self-constructed string | **Live** | `core/client.py`: `gated_mutate_resource()`, `_require_advisory_token()`, `UnconfirmedByUserError` |
 | Human-typeable short confirmation code derived from a token, for the render step to show the user | **Live** | `confirm_token.py`: `confirmation_code()` |
-| **Double-confirm for wide-blast-radius/irreversible actions** (depreciation runs, asset disposal, destructive sysadmin actions, elevated user/permission changes, config changes) — a second explicit confirmation after the first render, never in the same turn | **Live** (token machinery) + Prompt-only (the "ask again" step) | `fixed_assets.py`: `depreciation_run_token()`, `disposal_token()`, `call_whitelisted_method()` · `system_admin.py`: `permission_change_token()`, `destructive_action_token()`, `elevated_user_token()`, `config_change_token()`, `destructive_mutate()`, `call_permission_manager()`, `create_user()`, `gated_config_mutate()` |
-| Concurrency-checked mutate wrapper for Fixed Assets (guards against a stale-state double-apply) | **Live** | `fixed_assets.py`: `mutate_resource_with_concurrency()` |
+| **Double-confirm for wide-blast-radius/irreversible actions** (depreciation runs, asset disposal, destructive sysadmin actions, user/role/permission changes, config changes) — a second explicit confirmation after the render, never in the same turn | **Live** (token + user code) + Prompt-only (the "ask again" step) | `fixed_assets.py`: `fixed_assets.depreciation_run`/`scrap`/`restore`/`sell` · `system_admin.py`: `system_admin.create_user`/`set_user_roles`/`disable_user`/`delete`/`create_webhook`/`toggle_workflow`/`permission_*` |
+| Concurrency check on every submit/cancel/delete (refused if the record changed since render) | **Live** | `core/operations.py`: `check_not_modified_since_render()` |
 | Save-draft-then-review-then-submit for every docstatus-bearing document, no exceptions for urgency/batch size/confidence | Prompt-only | `SOUL.md`, `profile.md` |
 | Offer Letter and Employee Onboarding: advisory-only, never auto-committed, no exceptions | Prompt-only | `profile.md`, `hr_payroll` domain docs |
-| One `execute_write.py` entry point for every actual write (domain-scoped or advisory-gated) — the bare `core/client.py mutate --domain` CLI subcommand is read-only-safe to explore but not a real write path standalone (a documented footgun it closes) | **Live** | `execute_write.py` |
+| One `execute_write.py` entry point for every actual write (domain-scoped or advisory-gated) — `core/client.py` has no write subcommand (removed 2026-10-06) | **Live** | `execute_write.py` |
 | Loud (non-blocking) warning if a write is about to fire missing `session_id`/`channel_metadata`/`latest_prompt` | **Live** | `execute_write.py`: `_preflight_context_check()` |
 | No auth fallbacks (session-cookie/password) that would bypass token auth or drop audit attribution | Prompt-only | `SOUL.md`, `profile.md` |
 

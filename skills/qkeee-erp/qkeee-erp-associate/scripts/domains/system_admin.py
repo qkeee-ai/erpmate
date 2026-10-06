@@ -2,31 +2,31 @@
 """
 qkeee-erp-associate — system-admin domain (Users, roles, permissions).
 
-This is the widest-blast-radius, heaviest-GRC domain, and it carries the
-most business logic of any domain module: _record_attribution_comment(),
-destructive_mutate(), get_roles_and_doctypes(), get_permissions(),
-call_permission_manager(), create_user(), gated_config_mutate(), and
-get_scheduler_status().
+The widest-blast-radius, heaviest-GRC domain. Every write is a named
+operation in core/operations.py's pipeline, sent with the separate ADMIN
+credential (QKEEE_ERP_<TAG>_ADMIN_API_KEY/_SECRET, decision D1), and every
+one — system_admin.generic included — needs a rendered token plus the
+user's own confirmation code:
 
-permission_change_token(), destructive_action_token(),
-elevated_user_token(), and config_change_token() live here (not in
-core/confirm_token.py — see that module's docstring for why
-capability-specific token constructors stay with their owning domain)
-alongside their consumers.
+| Operation                        | Write                                             |
+|----------------------------------|---------------------------------------------------|
+| system_admin.create_user         | User create (roles must exist; elevated roles flagged in the render) |
+| system_admin.disable_user        | User update, body exactly {"enabled": 0}           |
+| system_admin.set_user_roles      | User update of the roles table; refused if roles changed since render |
+| system_admin.delete              | delete a User/Role/Custom Field/Property Setter/Webhook/Workflow |
+| system_admin.create_webhook      | Webhook create; https + public host only           |
+| system_admin.toggle_workflow     | Workflow update, body exactly {"is_active": 0|1}   |
+| system_admin.permission_add/update/remove/reset | Role Permission Manager RPCs        |
+| system_admin.generic             | Role create/update, Custom Field/Property Setter create/update (confirmed too) |
 
-ALLOWED_WRITE_DOCTYPES covers the doctypes this domain's business logic
-actually targets: User (create_user/destructive_mutate), Role, Custom
-Field/Property Setter (customization), Webhook/Workflow
-(gated_config_mutate's two CONFIG_CHANGE_KINDS). destructive_mutate()/
-call_permission_manager()/gated_config_mutate() route through
-mutate_resource(domain="system_admin") for their underlying write (or,
-for call_permission_manager, a whitelisted-method RPC outside
-mutate_resource() entirely, same as fixed_assets.call_whitelisted_method())
-— see each function's docstring.
+The requester must hold the matching permission (User/Role/DocType
+writes are never exempt from the requester gate) — in practice System
+Manager. Reads (get_roles_and_doctypes, get_permissions,
+get_scheduler_status) are gated and logged like any other read and use
+the admin credential, since the Role Permission Manager and scheduler
+methods are System-Manager-only.
 """
 
-import hashlib
-import json
 import os
 import sys
 
@@ -35,12 +35,8 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from core import client as core_client
-from core.client import (
-    ConnectorError, ReadOnlyModeError, MissingRequesterError, StaleConfirmationError,
-    SKILL_LABEL, get_env_config, mutate_resource, record_comment,
-    record_audit_log_start, record_audit_log_finish, _request,
-)
-from core.confirm_token import is_fresh
+from core import operations
+from core.operations import Operation, PreparedRequest, require_args
 
 DOMAIN_NAME = "system_admin"
 
@@ -58,409 +54,296 @@ core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 # The single highest-privilege grant this domain can make.
 ELEVATED_ROLES = {"System Manager", "Administrator"}
 
-# The two moderate-but-real-risk config writes gated by gated_config_mutate().
-CONFIG_CHANGE_KINDS = {"create_webhook", "toggle_workflow"}
+DELETABLE_DOCTYPES = ("User", "Role", "Custom Field", "Property Setter", "Webhook", "Workflow")
+
+_READ_CTX = ("session_id", "domain_code", "channel", "channel_metadata",
+             "prompt_summary", "latest_prompt")
+
+# Role / Custom Field / Property Setter writes need System Manager too, so
+# the generic operation also sends with the admin credential — and because
+# it holds the admin key, EVERY action needs the rendered confirmation +
+# the user's reply code, drafts included (unlike other domains' generic
+# operations, whose create/update are ungated drafts).
+operations.generic_operation(DOMAIN_NAME, credential="admin",
+                             token_actions=frozenset(operations.RESOURCE_ACTIONS),
+                             summary="Role create/update, Custom Field/Property Setter "
+                                     "create/update — every action confirmed (admin credential)",
+                             refuse=(
+    (("Webhook", "update"), "this skill has no gated path for editing a webhook (it could "
+                            "repoint the destination) — give the user UI-level guidance."),
+    (("Workflow", "create"), "creating workflows is guidance only — give the user UI-level "
+                             "guidance."),
+))
 
 
 def mutate(tag: str, doctype: str, action: str, **kwargs) -> dict:
-    """This domain's write entry point — plain mutate_resource() gated by
-    ALLOWED_WRITE_DOCTYPES above (domain="system_admin"). Prefer the more
-    specific gated wrappers below (destructive_mutate/create_user/
-    gated_config_mutate) for anything they cover — this is the fallback
-    for plain create/update on an already-allowlisted doctype."""
-    return core_client.mutate_resource(tag, doctype, action, domain=DOMAIN_NAME, **kwargs)
+    """Compatibility shim: operation "system_admin.generic" — Role create/
+    update and Custom Field/Property Setter create/update only; every
+    gated write is refused there and named."""
+    return operations.call_generic(f"{DOMAIN_NAME}.generic", tag, doctype, action, **kwargs)
 
 
-# --------------------------------------------------------------------------
-# Token constructors — see module docstring's "SCOPE NOTE on confirm_token.py"
-# --------------------------------------------------------------------------
-
-def _compute_token(**fields) -> str:
-    canonical = json.dumps(fields, sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+def _admin_op(**kw) -> Operation:
+    kw.setdefault("domain", DOMAIN_NAME)
+    kw.setdefault("credential", "admin")
+    return operations.register_operation(Operation(**kw))
 
 
-def permission_change_token(action: str, doctype: str, role: str, permlevel: int,
-                             ptype: str = "", value=None, issued_at: int = None) -> str:
-    """action: 'add' | 'update' | 'remove' | 'reset'."""
-    if issued_at is None:
-        raise ValueError("issued_at is required — pass the render-time epoch seconds.")
-    return _compute_token(
-        kind="permission_change", action=action, doctype=doctype, role=role,
-        permlevel=int(permlevel), ptype=ptype, value=value, issued_at=int(issued_at),
-    )
+def _role_exists(ctx, role: str) -> bool:
+    """Role is System-Manager-readable only, so this checks with the admin
+    credential (a GET; 404 means absent)."""
+    import urllib.parse
+    cfg = core_client.get_env_config(ctx.tag, credential="admin")
+    try:
+        core_client._request(cfg, "GET", f"/api/resource/Role/{urllib.parse.quote(role)}")
+        return True
+    except core_client.ConnectorError as e:
+        if "(404)" in str(e):
+            return False
+        raise
 
 
-def destructive_action_token(action: str, target_doctype: str, target_name: str,
-                              reason: str, issued_at: int = None) -> str:
-    """action e.g. 'disable_user' | 'delete_user' | 'delete_custom_field' |
-    'delete_property_setter' | 'delete_webhook' | 'delete_workflow'."""
-    if issued_at is None:
-        raise ValueError("issued_at is required — pass the render-time epoch seconds.")
-    return _compute_token(
-        kind="destructive_action", action=action, target_doctype=target_doctype,
-        target_name=target_name, reason=reason, issued_at=int(issued_at),
-    )
+def _roles_exist(roles, ctx) -> None:
+    missing = [r for r in roles if not _role_exists(ctx, r)]
+    if missing:
+        raise core_client.PreconditionFailedError(
+            f"Role(s) {missing} do not exist on this instance — resolve exact role names "
+            f"(query Role) before rendering.")
 
 
-def elevated_user_token(email: str, roles: list, issued_at: int = None) -> str:
-    if issued_at is None:
-        raise ValueError("issued_at is required — pass the render-time epoch seconds.")
-    return _compute_token(kind="elevated_user", email=email, roles=sorted(roles), issued_at=int(issued_at))
+def _role_list(args) -> list:
+    roles = args.get("roles")
+    if not isinstance(roles, list) or not all(isinstance(r, str) and r for r in roles):
+        raise core_client.ConnectorError("roles must be a non-empty JSON list of role names.")
+    return sorted(set(roles))
 
 
-def config_change_token(kind: str, doctype: str, identifier: str, reason: str,
-                         issued_at: int = None) -> str:
-    if issued_at is None:
-        raise ValueError("issued_at is required — pass the render-time epoch seconds.")
-    return _compute_token(
-        kind="config_change", change_kind=kind, doctype=doctype, identifier=identifier,
-        reason=reason, issued_at=int(issued_at),
-    )
+# ---------------------------------------------------------------- users
+
+def _create_user_prepare(args, ctx):
+    require_args(args, ["email", "first_name", "roles"], ["last_name", "send_welcome_email"])
+    roles = _role_list(args)
+    body = {"email": args["email"], "first_name": args["first_name"],
+            "send_welcome_email": int(bool(args.get("send_welcome_email"))),
+            "roles": [{"role": r} for r in roles]}
+    if args.get("last_name"):
+        body["last_name"] = args["last_name"]
+    return PreparedRequest(transport="resource", doctype="User", action="create", body=body,
+                           bound={"elevated_roles": sorted(set(roles) & ELEVATED_ROLES)})
 
 
-# --------------------------------------------------------------------------
-# Genuine domain-specific business logic beyond the shared core connector
-# --------------------------------------------------------------------------
-
-def _record_attribution_comment(cfg: dict, doctype: str, name: str, action_label: str,
-                                 requested_by: str, reason: str = None) -> None:
-    """Standard audit-comment shape for this domain's gated write paths
-    (destructive_mutate/gated_config_mutate): always names the requester,
-    and appends the stated reason when one was given."""
-    content = f"[{SKILL_LABEL}/{DOMAIN_NAME}] {action_label} — requested by {requested_by}, applied via qkeee-erp bot."
-    if reason:
-        content += f" Reason: {reason}"
-    record_comment(cfg, doctype, name, content)
+_admin_op(key="system_admin.create_user",
+          summary="create a User with exact, existing roles (elevated roles flagged)",
+          prepare=_create_user_prepare, owns=frozenset({("User", "create")}),
+          preconditions=(lambda req, args, ctx: _roles_exist(_role_list(args), ctx),),
+          args_help={"email": "", "first_name": "", "last_name": "optional",
+                     "roles": "list of exact role names", "send_welcome_email": "bool"})
 
 
-def destructive_mutate(tag: str, doctype: str, action: str, name: str, reason: str,
-                        mode: str = "read-only", confirmation_token: str = None,
-                        issued_at: int = None, payload: dict = None,
-                        requested_by: str = None) -> dict:
-    """Gated wrapper around mutate_resource() for this domain's highest-
-    blast-radius single-record actions: disabling/deleting a User, or
-    deleting a Custom Field / Property Setter / Webhook / Workflow.
-    `action` is "update" (disable, User only) or "delete".
-
-    Requires `reason`, `requested_by`, and a `confirmation_token` +
-    `issued_at` matching what a render script computed from the same
-    (action, doctype, name, reason, issued_at) facts, within 15 minutes of
-    now — the call is refused without a fresh match, same double-confirm
-    code-level backstop as the fixed_assets domain's depreciation-run/
-    disposal gate.
-
-    Best-effort: on success, writes `reason` + `requested_by` onto the
-    affected record as a single ERPNext Comment via
-    _record_attribution_comment() (for delete, before the delete — a
-    deleted record can't be commented on afterward). Calls
-    mutate_resource() with skip_comment=True so this doesn't also post
-    mutate_resource's own plain comment on top, and with
-    domain="system_admin" so the doctype is still checked against
-    ALLOWED_WRITE_DOCTYPES like any other write.
-    """
-    if action == "update":
-        if doctype != "User":
-            raise ConnectorError(
-                "destructive_mutate 'update' is only defined for User (disable) — got "
-                f"doctype={doctype!r}. Every other supported doctype is delete-only here."
-            )
-        action_key = "disable_user"
-    elif action == "delete":
-        action_key = f"delete_{doctype.lower().replace(' ', '_')}"
-    else:
-        raise ConnectorError(f"destructive_mutate only supports 'update' (disable) or 'delete', got {action!r}.")
-
-    if mode != "read-write":
-        raise ReadOnlyModeError(
-            f"Refusing {action} on '{doctype}' '{name}': qkeee_erp.mode is '{mode}', not "
-            f"'read-write'. Switch modes explicitly if this write is intended."
-        )
-    if not reason:
-        raise ConnectorError("destructive_mutate requires a non-empty reason.")
-    if not requested_by:
-        raise MissingRequesterError(
-            "Refusing destructive_mutate: requested_by is missing. There is no config "
-            "default — resolve the requester's ERPNext user id/email from the live "
-            "inbound channel identity and pass it explicitly via requested_by= on this call."
-        )
-    if not confirmation_token or issued_at is None:
-        raise ConnectorError(
-            "destructive_mutate requires confirmation_token + issued_at — render the "
-            "double-confirm output first and pass its exact token and issued_at here."
-        )
-    if not is_fresh(int(issued_at)):
-        raise StaleConfirmationError(
-            "This confirmation has expired or its issued_at is implausible — re-render "
-            "the confirmation against current data and reconfirm before retrying."
-        )
-    expected = destructive_action_token(action_key, doctype, name, reason, int(issued_at))
-    if confirmation_token != expected:
-        raise ConnectorError(
-            "confirmation_token does not match the (action, doctype, name, reason, issued_at) "
-            "facts — re-render the confirmation against the current data and use that token."
-        )
-
-    cfg = get_env_config(tag)
-    if action == "delete":
-        _record_attribution_comment(cfg, doctype, name, "deleted", requested_by, reason)
-        return mutate_resource(tag, doctype, action, payload=payload, name=name, mode=mode,
-                                requested_by=requested_by, skip_comment=True, domain=DOMAIN_NAME,
-                                user_approved=True, approval_note=f"destructive_mutate: {reason}")
-
-    result = mutate_resource(tag, doctype, action, payload=payload, name=name, mode=mode,
-                              requested_by=requested_by, skip_comment=True, domain=DOMAIN_NAME,
-                              user_approved=True, approval_note=f"destructive_mutate: {reason}")
-    _record_attribution_comment(cfg, doctype, name, "disabled", requested_by, reason)
-    return result
+def _disable_user_prepare(args, ctx):
+    require_args(args, ["name", "reason"])
+    return PreparedRequest(transport="resource", doctype="User", action="update",
+                           name=args["name"], body={"enabled": 0}, bound={"reason": args["reason"]})
 
 
-PERMISSION_MANAGER_METHODS = {
-    "get_roles_and_doctypes": "/api/method/frappe.core.page.permission_manager.permission_manager.get_roles_and_doctypes",
-    "get_permissions": "/api/method/frappe.core.page.permission_manager.permission_manager.get_permissions",
-    "add": "/api/method/frappe.core.page.permission_manager.permission_manager.add",
-    "update": "/api/method/frappe.core.page.permission_manager.permission_manager.update",
-    "remove": "/api/method/frappe.core.page.permission_manager.permission_manager.remove",
-    "reset": "/api/method/frappe.core.page.permission_manager.permission_manager.reset",
+_admin_op(key="system_admin.disable_user",
+          summary="disable a User (enabled=0) — reversible; prefer over delete",
+          prepare=_disable_user_prepare, owns=frozenset({("User", "update")}),
+          args_help={"name": "User id", "reason": "stated reason"})
+
+
+def _current_roles(ctx, user) -> list:
+    data = core_client.get_resource(ctx.tag, "User", user, strip_noise=False,
+                                    requested_by=ctx.requested_by, **ctx.audit_kwargs()).get("data") or {}
+    return sorted({r.get("role") for r in data.get("roles") or [] if r.get("role")})
+
+
+def _set_roles_render(args, ctx):
+    args = dict(args)
+    if args.get("name") and "roles_before" not in args:
+        args["roles_before"] = _current_roles(ctx, args["name"])
+    return args
+
+
+def _set_roles_prepare(args, ctx):
+    require_args(args, ["name", "roles", "reason", "roles_before"])
+    roles = _role_list(args)
+    before = sorted(set(args["roles_before"]))
+    return PreparedRequest(
+        transport="resource", doctype="User", action="update", name=args["name"],
+        body={"roles": [{"role": r} for r in roles]},
+        bound={"reason": args["reason"], "roles_before": before,
+               "added": sorted(set(roles) - set(before)), "removed": sorted(set(before) - set(roles)),
+               "elevated_added": sorted((set(roles) - set(before)) & ELEVATED_ROLES)})
+
+
+def _roles_unchanged_since_render(req, args, ctx):
+    _roles_exist(_role_list(args), ctx)
+    if _current_roles(ctx, args["name"]) != req.bound["roles_before"]:
+        raise core_client.PreconditionFailedError(
+            f"Refusing set_user_roles: {args['name']!r}'s roles changed since render — re-render.")
+
+
+_admin_op(key="system_admin.set_user_roles",
+          summary="replace a User's role list (render shows exact before/after)",
+          prepare=_set_roles_prepare, render_defaults=_set_roles_render,
+          preconditions=(_roles_unchanged_since_render,),
+          args_help={"name": "User id", "roles": "complete new role list", "reason": "",
+                     "roles_before": "filled by render"})
+
+
+# ---------------------------------------------------------------- delete
+
+def _delete_prepare(args, ctx):
+    require_args(args, ["doctype", "name", "reason"])
+    if args["doctype"] not in DELETABLE_DOCTYPES:
+        raise core_client.DoctypeNotAllowedError(
+            f"system_admin.delete only deletes {DELETABLE_DOCTYPES}, not {args['doctype']!r}.")
+    return PreparedRequest(transport="resource", doctype=args["doctype"], action="delete",
+                           name=args["name"], bound={"reason": args["reason"]})
+
+
+# No "deleted" Comment: the record is gone afterwards, and a Comment posted
+# BEFORE a delete that then fails is a false record (W16). The audit row is
+# the record.
+_admin_op(key="system_admin.delete",
+          summary="delete a User/Role/Custom Field/Property Setter/Webhook/Workflow (prefer disable_user for users)",
+          prepare=_delete_prepare, skip_comment=True,
+          owns=frozenset((d, "delete") for d in DELETABLE_DOCTYPES),
+          args_help={"doctype": f"one of {DELETABLE_DOCTYPES}", "name": "", "reason": ""})
+
+
+# ---------------------------------------------------------------- config
+
+def _webhook_prepare(args, ctx):
+    require_args(args, ["payload", "reason"])
+    if not isinstance(args["payload"], dict):
+        raise core_client.ConnectorError("payload must be a JSON object.")
+    return PreparedRequest(transport="resource", doctype="Webhook", action="create",
+                           body=dict(args["payload"]), bound={"reason": args["reason"]})
+
+
+_admin_op(key="system_admin.create_webhook",
+          summary="create a Webhook (an outbound data destination)",
+          prepare=_webhook_prepare, owns=frozenset({("Webhook", "create")}),
+          preconditions=(lambda req, args, ctx: operations.check_public_https_url(
+              (req.body or {}).get("request_url")),),
+          args_help={"payload": "Webhook fields incl. request_url (https, public host)",
+                     "reason": ""})
+
+
+def _workflow_prepare(args, ctx):
+    require_args(args, ["name", "reason"], ["is_active"])
+    if args.get("is_active") not in (0, 1, True, False):
+        raise core_client.ConnectorError("is_active must be 0 or 1.")
+    return PreparedRequest(transport="resource", doctype="Workflow", action="update",
+                           name=args["name"], body={"is_active": int(args["is_active"])},
+                           bound={"reason": args["reason"]})
+
+
+_admin_op(key="system_admin.toggle_workflow",
+          summary="switch a Workflow on/off — can halt every in-flight approval on its doctype",
+          prepare=_workflow_prepare, owns=frozenset({("Workflow", "update")}),
+          args_help={"name": "Workflow name", "is_active": "0 or 1", "reason": ""})
+
+
+# ---------------------------------------------------------------- permissions
+
+_PM = "/api/method/frappe.core.page.permission_manager.permission_manager."
+_PERMISSION_ACTIONS = {
+    # action: (audit action, requester ptype on Custom DocPerm)
+    "add": ("Create", "create"),
+    "update": ("Update", "write"),
+    "remove": ("Delete", "delete"),
+    "reset": ("Delete", "delete"),
 }
 
-# add/update/remove/reset all change what a role can do — every one of
-# them carries this domain's double-confirm non-negotiable. get_* are
-# read-only lookups and are never token-gated.
-TOKEN_REQUIRED_PERMISSION_ACTIONS = {"add", "update", "remove", "reset"}
+
+def _permission_prepare(action):
+    def prepare(args, ctx):
+        if action == "reset":
+            require_args(args, ["doctype", "reason"])
+            body = {"doctype": args["doctype"]}
+        else:
+            required = ["doctype", "role", "reason"] + (["ptype"] if action == "update" else [])
+            optional = ["permlevel"] + (["value", "current_value"] if action == "update" else [])
+            require_args(args, required, optional)
+            permlevel = int(args.get("permlevel") or 0)
+            if action == "add":
+                body = {"parent": args["doctype"], "role": args["role"], "permlevel": permlevel}
+            elif action == "remove":
+                body = {"doctype": args["doctype"], "role": args["role"], "permlevel": permlevel}
+            else:
+                body = {"doctype": args["doctype"], "role": args["role"], "permlevel": permlevel,
+                        "ptype": args["ptype"], "value": int(bool(args.get("value"))), "if_owner": 0}
+        audit_action, ptype = _PERMISSION_ACTIONS[action]
+        bound = {"reason": args["reason"]}
+        if action == "update":
+            bound["current_value"] = args.get("current_value")
+        # Audit reference is the target DocType itself: a real record, so the
+        # Audit Log's Dynamic Link validates (a synthetic "role@permlevel"
+        # string would make the audit insert fail silently).
+        return PreparedRequest(
+            transport="rpc", doctype="Custom DocPerm", action=f"permission_{action}",
+            rpc_path=_PM + action, body=body, rbac_ptype=ptype, audit_action=audit_action,
+            audit_doctype="DocType", audit_reference=args["doctype"], bound=bound)
+    return prepare
 
 
-def get_roles_and_doctypes(tag: str) -> dict:
-    """Read-only: the full role list + doctype list the Role Permission
-    Manager page itself uses. Always allowed regardless of mode."""
-    cfg = get_env_config(tag)
-    result = _request(cfg, "GET", PERMISSION_MANAGER_METHODS["get_roles_and_doctypes"])
+def _permission_update_render(args, ctx):
+    args = dict(args)
+    if "current_value" not in args and args.get("doctype") and args.get("role") and args.get("ptype"):
+        level = int(args.get("permlevel") or 0)
+        rows = get_permissions(ctx.tag, args["doctype"], requested_by=ctx.requested_by,
+                               **ctx.audit_kwargs())
+        match = [r for r in rows if r.get("role") == args["role"] and int(r.get("permlevel") or 0) == level]
+        args["current_value"] = match[0].get(args["ptype"]) if match else None
+    return args
+
+
+for _action in _PERMISSION_ACTIONS:
+    _admin_op(key=f"system_admin.permission_{_action}",
+              summary={"add": "add a bare permission row (grants nothing by itself)",
+                       "update": "flip ONE right on a role's permission row",
+                       "remove": "remove a CUSTOM permission row (a standard row may still grant it)",
+                       "reset": "wipe ALL custom permission overrides on a doctype"}[_action],
+              prepare=_permission_prepare(_action), allowlist_domain=None, skip_comment=True,
+              render_defaults=_permission_update_render if _action == "update" else None,
+              args_help={"doctype": "target DocType", "role": "", "permlevel": "default 0",
+                         "ptype": "update only", "value": "update only, 0/1", "reason": "",
+                         "current_value": "update only, filled by render"})
+
+
+# ---------------------------------------------------------------- reads
+
+def get_roles_and_doctypes(tag: str, *, requested_by: str, **read_ctx) -> dict:
+    """Read: the role list + doctype list the Role Permission Manager uses."""
+    result = core_client.read_rpc(
+        tag, "GET", _PM + "get_roles_and_doctypes", gate_doctype="Custom DocPerm",
+        requested_by=requested_by, credential="admin",
+        **{k: v for k, v in read_ctx.items() if k in _READ_CTX})
     return result.get("message", {})
 
 
-def get_permissions(tag: str, doctype: str) -> list:
-    """Read-only: every permission row (standard DocPerm rows merged with
-    any Custom DocPerm override rows) for a DocType, exactly as the Role
-    Permission Manager page displays them. Querying DocPerm directly via
-    query_resource() fails with a PermissionError — this whitelisted
-    method is the only working read path for a DocType's permission
-    matrix."""
-    cfg = get_env_config(tag)
-    result = _request(cfg, "GET", PERMISSION_MANAGER_METHODS["get_permissions"], params={"doctype": doctype})
+def get_permissions(tag: str, doctype: str, *, requested_by: str, **read_ctx) -> list:
+    """Read: every permission row (standard + Custom DocPerm overrides) for
+    a DocType, as the Role Permission Manager shows them. Querying DocPerm
+    directly fails with a PermissionError — this is the working path."""
+    result = core_client.read_rpc(
+        tag, "GET", _PM + "get_permissions", params={"doctype": doctype},
+        gate_doctype="Custom DocPerm", requested_by=requested_by, credential="admin",
+        log_doctype="DocType", log_name=doctype,
+        **{k: v for k, v in read_ctx.items() if k in _READ_CTX})
     return result.get("message", [])
 
 
-def call_permission_manager(tag: str, action: str, doctype: str, role: str, permlevel: int,
-                             ptype: str = None, value=None, mode: str = "read-only",
-                             confirmation_token: str = None, issued_at: int = None,
-                             requested_by: str = None, *, session_id: str = None,
-                             domain_code: str = None) -> dict:
-    """Call the Role Permission Manager's add/update/remove/reset
-    whitelisted methods.
-
-    action: "add" (role, permlevel — creates a bare new perm row with no
-      rights set yet), "update" (doctype, role, permlevel, ptype, value —
-      flips one specific right, e.g. ptype="write", value=1), "remove"
-      (doctype, role, permlevel — deletes that row entirely), "reset"
-      (doctype — wipes ALL custom overrides for the doctype back to
-      shipped defaults; the single most blast-radius-heavy call in this
-      domain, always requires a token).
-
-    All four require mode == "read-write", `requested_by`, AND a
-    confirmation_token matching a render script's output for these exact
-    facts — no permission change reaches ERPNext without all three. No
-    audit Comment is posted here: a permission row (DocPerm/Custom
-    DocPerm) isn't a document instance with its own timeline, so there's
-    no natural record to attach one to.
-
-    KNOWN GAP (see references/domains/system-admin.md): `has_permission`'s
-    `user=` parameter honoring is unresolved — this carries into the
-    universal RBAC check too, and needs a live test before this is relied
-    on as a per-requester gate.
-
-    This RPC shape doesn't fit mutate_resource()'s create/update/submit/
-    cancel signature and so bypasses it (and its ALLOWED_WRITE_DOCTYPES
-    check) entirely — audited directly here (two-phase
-    Attempted -> Success/Failure), same as mutate_resource()'s own path.
-    """
-    if action not in PERMISSION_MANAGER_METHODS:
-        raise ConnectorError(f"Unknown permission_manager action '{action}'.")
-    if action != "reset" and not role:
-        raise ConnectorError(f"permission {action} requires a role.")
-    if mode != "read-write":
-        raise ReadOnlyModeError(
-            f"Refusing permission {action} on '{doctype}'/'{role}': qkeee_erp.mode is '{mode}', "
-            f"not 'read-write'. Switch modes explicitly if this write is intended."
-        )
-    if not requested_by:
-        raise MissingRequesterError(
-            f"Refusing permission {action} on '{doctype}'/'{role}': requested_by is missing. "
-            f"There is no config default — resolve the requester's ERPNext user id/email "
-            f"from the live inbound channel identity and pass it explicitly via requested_by= "
-            f"on this call."
-        )
-    if action in TOKEN_REQUIRED_PERMISSION_ACTIONS:
-        if not confirmation_token or issued_at is None:
-            raise ConnectorError(
-                f"permission {action} requires confirmation_token + issued_at — render the "
-                f"double-confirm output first and pass its exact token and issued_at here."
-            )
-        if not is_fresh(int(issued_at)):
-            raise StaleConfirmationError(
-                "This confirmation has expired or its issued_at is implausible — re-render "
-                "and reconfirm before retrying."
-            )
-        expected = permission_change_token(action, doctype, role, permlevel, ptype or "", value, int(issued_at))
-        if confirmation_token != expected:
-            raise ConnectorError(
-                "confirmation_token does not match these permission-change facts — re-render "
-                "the confirmation against the current data and use that token."
-            )
-
-    cfg = get_env_config(tag)
-    body = {"role": role, "permlevel": permlevel}
-    if action == "add":
-        body["parent"] = doctype
-    else:
-        body["doctype"] = doctype
-    if action == "update":
-        body["ptype"] = ptype
-        body["value"] = value
-        body["if_owner"] = 0
-    if action == "reset":
-        body = {"doctype": doctype}
-
-    reference_name = f"{role or ''}@permlevel{permlevel}"
-    audit_log_name = record_audit_log_start(
-        cfg, action=f"Permission {action.capitalize()}", doctype=doctype, name=reference_name,
-        requested_by=requested_by, session_id=session_id, domain_code=domain_code,
-        user_approved=True, approval_note="call_permission_manager: double-confirm token verified",
-    )
-    try:
-        result = _request(cfg, "POST", PERMISSION_MANAGER_METHODS[action], payload=body)
-    except ConnectorError as e:
-        record_audit_log_finish(cfg, audit_log_name, status="Failure", error_detail=str(e))
-        raise
-    record_audit_log_finish(cfg, audit_log_name, status="Success", reference_name=reference_name)
-    return result
-
-
-def create_user(tag: str, email: str, first_name: str, roles: list, mode: str = "read-only",
-                 send_welcome_email: bool = False, elevated_confirmation_token: str = None,
-                 issued_at: int = None, requested_by: str = None) -> dict:
-    """User creation & role assignment. If `roles` contains an elevated
-    role (System Manager / Administrator — the single highest-privilege
-    grant this domain can make), requires elevated_confirmation_token +
-    issued_at matching a render script's output, fresh within 15 minutes
-    — the same code-level backstop permission changes and destructive
-    actions get. Non-elevated role grants are unaffected — still a single
-    confirm, no token required.
-
-    Delegates to mutate_resource(domain="system_admin") for the actual
-    create, so it inherits both Qkeee Bot Audit Log logging and the
-    ALLOWED_WRITE_DOCTYPES check automatically.
-    """
-    elevated = sorted(set(roles) & ELEVATED_ROLES)
-    if elevated:
-        if not elevated_confirmation_token or issued_at is None:
-            raise ConnectorError(
-                f"Creating a user with elevated role(s) ({', '.join(elevated)}) requires "
-                f"elevated_confirmation_token + issued_at — render the draft with "
-                f"elevated_roles_acknowledged=true first and pass its exact token and "
-                f"issued_at here."
-            )
-        if not is_fresh(int(issued_at)):
-            raise StaleConfirmationError(
-                "This elevated-role confirmation has expired or its issued_at is implausible "
-                "— re-render and reconfirm before retrying."
-            )
-        expected = elevated_user_token(email, roles, int(issued_at))
-        if elevated_confirmation_token != expected:
-            raise ConnectorError(
-                "elevated_confirmation_token does not match the (email, roles) facts — "
-                "re-render the draft against the current request and use that exact token."
-            )
-
-    payload = {
-        "email": email,
-        "first_name": first_name,
-        "send_welcome_email": int(bool(send_welcome_email)),
-        "roles": [{"role": r} for r in roles],
-    }
-    return mutate_resource(tag, "User", "create", payload=payload, mode=mode, requested_by=requested_by,
-                            domain=DOMAIN_NAME, user_approved=True,
-                            approval_note="create_user" + (" (elevated role)" if elevated else ""))
-
-
-def gated_config_mutate(tag: str, kind: str, doctype: str, identifier: str, reason: str,
-                         action: str, name: str = None, payload: dict = None,
-                         mode: str = "read-only", confirmation_token: str = None,
-                         issued_at: int = None, requested_by: str = None) -> dict:
-    """Token-gated wrapper for the two moderate-but-real-risk config
-    writes: kind='create_webhook' (an outbound data destination — a real
-    SSRF/exfiltration surface) and kind='toggle_workflow' (can halt every
-    in-flight approval on that document type). `identifier` is the
-    webhook's request_url or the workflow's document_type — whatever was
-    shown in the render step.
-
-    Delegates to mutate_resource(domain="system_admin") for the actual
-    write, so it inherits both Qkeee Bot Audit Log logging and the
-    ALLOWED_WRITE_DOCTYPES check automatically.
-    """
-    if kind not in CONFIG_CHANGE_KINDS:
-        raise ConnectorError(f"Unknown config-change kind {kind!r}. Expected one of {CONFIG_CHANGE_KINDS}.")
-    if action not in ("create", "update"):
-        raise ConnectorError("gated_config_mutate only supports 'create' or 'update'.")
-    if mode != "read-write":
-        raise ReadOnlyModeError(
-            f"Refusing {kind} on '{doctype}': qkeee_erp.mode is '{mode}', not 'read-write'. "
-            f"Switch modes explicitly if this write is intended."
-        )
-    if not reason:
-        raise ConnectorError("gated_config_mutate requires a non-empty reason.")
-    if not requested_by:
-        raise MissingRequesterError(
-            "Refusing gated_config_mutate: requested_by is missing. There is no config "
-            "default — resolve the requester's ERPNext user id/email from the live "
-            "inbound channel identity and pass it explicitly via requested_by= on this call."
-        )
-    if not confirmation_token or issued_at is None:
-        raise ConnectorError(
-            "gated_config_mutate requires confirmation_token + issued_at — render the "
-            "config-change confirmation first and pass its exact token and issued_at here."
-        )
-    if not is_fresh(int(issued_at)):
-        raise StaleConfirmationError(
-            "This confirmation has expired or its issued_at is implausible — re-render "
-            "and reconfirm before retrying."
-        )
-    expected = config_change_token(kind, doctype, identifier, reason, int(issued_at))
-    if confirmation_token != expected:
-        raise ConnectorError(
-            "confirmation_token does not match these config-change facts — re-render the "
-            "confirmation against the current data and use that token."
-        )
-    cfg = get_env_config(tag)
-    result = mutate_resource(tag, doctype, action, payload=payload, name=name, mode=mode,
-                              requested_by=requested_by, skip_comment=True, domain=DOMAIN_NAME,
-                              user_approved=True, approval_note=f"gated_config_mutate ({kind}): {reason}")
-    comment_name = name or (result.get("data") or {}).get("name")
-    if comment_name:
-        _record_attribution_comment(cfg, doctype, comment_name, f"{kind} ({action})", requested_by, reason)
-    return result
-
-
-def get_scheduler_status(tag: str) -> dict:
-    """Read-only system health signal
-    (frappe.utils.scheduler.get_scheduler_status, returns
-    {"status": "active"} or "inactive"/"paused"). Combine with Scheduled
-    Job Type (query_resource, last_execution/stopped fields) and Error
-    Log (query_resource, most recent rows) for the full System health
-    check capability — the RQ Job doctype is not usable via this REST API
-    (returns a 500 TypeError, unrelated to auth/permissions), so live
-    background-job-queue depth cannot be read this way; report that gap
-    explicitly rather than silently omitting queue depth from a health
-    report."""
-    cfg = get_env_config(tag)
-    result = _request(cfg, "GET", "/api/method/frappe.utils.scheduler.get_scheduler_status")
+def get_scheduler_status(tag: str, *, requested_by: str, **read_ctx) -> dict:
+    """Read: frappe.utils.scheduler.get_scheduler_status. Combine with a
+    Scheduled Job Type query and recent Error Log rows for the full health
+    check. The RQ Job doctype is not usable via this REST API (500
+    TypeError) — report that gap rather than omitting queue depth."""
+    result = core_client.read_rpc(
+        tag, "GET", "/api/method/frappe.utils.scheduler.get_scheduler_status",
+        gate_doctype="Scheduled Job Type", requested_by=requested_by, credential="admin",
+        **{k: v for k, v in read_ctx.items() if k in _READ_CTX})
     return result.get("message", {})

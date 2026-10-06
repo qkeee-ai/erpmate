@@ -2,15 +2,32 @@
 """
 qkeee-erp-associate — procurement domain (Supplier, Address, Contact, PO, RFQ).
 
-ALLOWED_WRITE_DOCTYPES covers render_po_draft.py/render_supplier_draft.py's
-target doctypes plus Request for Quotation/Supplier Quotation. Cross-check
-against references/domains/procurement.md before expanding.
+Writes run as operation "procurement.generic" (core/operations.py):
+create/update land drafts; submit/cancel/delete are token-gated.
+Cross-check ALLOWED_WRITE_DOCTYPES against references/domains/
+procurement.md before expanding.
 
 `Address`/`Contact` are included because ERPNext's India-Compliance
 GSTIN field (and tax ID generally) lives on Address, linked to Supplier
 via the standard Frappe Dynamic Link `links` child table — never
-directly on Supplier itself. See mutate()'s KYC handling below and
-procurement.md's write order.
+directly on Supplier itself.
+
+## Supplier KYC (write-path hardening ticket 13, decision D2 = C + A)
+
+A Supplier `create` must carry `kyc={"address": {...}, "contact": {...}}`
+(contact optional) or `kyc_waiver_confirmed=True` (the user explicitly
+confirmed proceeding without KYC). With KYC:
+
+- The address must carry a tax ID — one of KYC_TAX_ID_FIELDS, or the
+  field named by QKEEE_ERP_<TAG>_KYC_TAX_ID_FIELD — non-empty.
+- Address/Contact are schema-mapped against THEIR live schema at prepare
+  time, and checked for missing mandatory fields BEFORE the Supplier is
+  created (pre-validation, "C").
+- The Supplier is created, then the linked Address (and Contact). If a
+  linked create still fails server-side, the just-created Supplier is
+  deleted again ("A", compensating delete — audited) and
+  KycLinkFailedError is raised. If that delete fails too,
+  KycPartialFailureError names the Supplier left behind.
 """
 
 import os
@@ -21,6 +38,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from core import client as core_client
+from core import operations
 
 DOMAIN_NAME = "procurement"
 
@@ -35,109 +53,152 @@ ALLOWED_WRITE_DOCTYPES = (
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 
-# Submit/cancel require a fresh confirmation_token from
-# core/confirm_token.py's advisory-token CLI, verified in mutate_resource()
-# — the code-level backstop.
-core_client.register_domain_token_gate(DOMAIN_NAME, {"submit", "cancel"})
+KYC_TAX_ID_FIELDS = ("gstin", "tax_id", "pan")
 
-# kwargs forwarded from a Supplier 'create' call into its linked Address/
-# Contact 'create' calls — write-context/audit fields only, never the
-# Supplier's own payload/name/confirmation_token (Address/Contact have
-# their own payload, and aren't domain-token-gated the way submit/cancel
-# are).
-_KYC_LINK_CONTEXT_KWARGS = (
-    "mode", "requested_by", "session_id", "domain_code", "channel",
-    "channel_metadata", "prompt_summary", "latest_prompt", "approval_note",
-    "user_approved",
+# Layout/table fields never carry a value a caller must supply.
+_NON_VALUE_FIELDTYPES = {"Section Break", "Column Break", "Tab Break", "HTML", "Table",
+                         "Table MultiSelect", "Button", "Heading", "Fold"}
+
+
+class IncompleteSupplierKYCError(core_client.PreconditionFailedError):
+    """A Supplier create with neither KYC (address + tax ID) nor an
+    explicit waiver — refused before any write. This domain's
+    non-negotiable: never create a live Supplier with incomplete KYC."""
+
+
+class KycLinkFailedError(core_client.ConnectorError):
+    """The linked Address/Contact create failed server-side; the Supplier
+    created a moment earlier was deleted again (compensating delete).
+    Nothing is left behind."""
+
+
+class KycPartialFailureError(core_client.PartialOutcomeError):
+    """The linked Address/Contact create failed AND the compensating
+    Supplier delete failed too — the message names the Supplier (and any
+    Address) left behind, for the user to fix or remove."""
+
+
+def _tax_id_fields(tag: str) -> tuple:
+    override = core_client._qkeee_env().get(core_client._tag_env_var(tag, "KYC_TAX_ID_FIELD"))
+    return (override,) if override else KYC_TAX_ID_FIELDS
+
+
+def _is_supplier_create(req) -> bool:
+    return req.doctype == "Supplier" and req.action == "create"
+
+
+def prepare(args: dict, ctx) -> "operations.PreparedRequest":
+    args = dict(args)
+    kyc = args.pop("kyc", None)
+    waiver = bool(args.pop("kyc_waiver_confirmed", False))
+    req = operations.prepare_generic(args, ctx)
+    if (kyc or waiver) and not _is_supplier_create(req):
+        raise core_client.ConnectorError(
+            "kyc/kyc_waiver_confirmed only apply to a Supplier create — they'd be silently "
+            "ignored otherwise.")
+    if _is_supplier_create(req):
+        req.bound["kyc"] = {k: dict(v) for k, v in (kyc or {}).items() if k in ("address", "contact") and v}
+        req.bound["kyc_waiver_confirmed"] = waiver
+    return req
+
+
+def enrich(req, args, ctx) -> None:
+    """Generic enrichment, plus the KYC Address/Contact mapped against
+    THEIR own live schema (identically at render and execute)."""
+    operations.enrich_generic(req, args, ctx)
+    if _is_supplier_create(req):
+        for key, sub_doctype in (("address", "Address"), ("contact", "Contact")):
+            if req.bound["kyc"].get(key):
+                req.bound["kyc"][key] = operations._schema_map(ctx, sub_doctype,
+                                                               req.bound["kyc"][key], req.notes)
+
+
+def check_kyc(req, args, ctx) -> None:
+    if not _is_supplier_create(req):
+        return
+    kyc = req.bound.get("kyc") or {}
+    waiver = req.bound.get("kyc_waiver_confirmed")
+    if not kyc.get("address"):
+        if waiver:
+            return
+        raise IncompleteSupplierKYCError(
+            "Refusing to create Supplier without KYC: pass kyc={'address': {...}} (fields per "
+            "discover.py meta \"Address\" for this instance, including the tax ID) or — only "
+            "when the user has explicitly confirmed proceeding without it — "
+            "kyc_waiver_confirmed=True. See references/domains/procurement.md.")
+    tax_fields = _tax_id_fields(ctx.tag)
+    if not any(kyc["address"].get(f) for f in tax_fields) and not waiver:
+        raise IncompleteSupplierKYCError(
+            f"Refusing to create Supplier: the KYC address carries no tax ID (none of "
+            f"{list(tax_fields)} is set). Capture it, or get the user's explicit waiver.")
+    import schema_mapping
+    for key, sub_doctype in (("address", "Address"), ("contact", "Contact")):
+        payload = kyc.get(key)
+        if not payload:
+            continue
+        fields, _err = schema_mapping.get_doctype_schema(ctx.tag, sub_doctype,
+                                                         requested_by=ctx.requested_by,
+                                                         **ctx.audit_kwargs())
+        if fields is None:
+            continue  # meta unavailable: the server-side check + rollback still apply
+        missing = [f["fieldname"] for f in fields
+                   if f.get("reqd") and f.get("fieldtype") not in _NON_VALUE_FIELDTYPES
+                   and f.get("default") in (None, "") and f.get("fieldname") != "links"
+                   and payload.get(f["fieldname"]) in (None, "")]
+        if missing:
+            raise IncompleteSupplierKYCError(
+                f"Refusing to create Supplier: the KYC {sub_doctype} is missing mandatory "
+                f"field(s) {missing} — nothing was created. Collect them first.")
+
+
+def create_linked_kyc(result, req, args, ctx, hooks):
+    if not _is_supplier_create(req) or not isinstance(result, dict):
+        return result
+    kyc = req.bound.get("kyc") or {}
+    supplier = ((result.get("data") or {}).get("name"))
+    kyc_result = {"waived": bool(req.bound.get("kyc_waiver_confirmed") and not kyc.get("address")),
+                  "address": None, "contact": None}
+    created = []
+    for key, sub_doctype in (("address", "Address"), ("contact", "Contact")):
+        payload = kyc.get(key)
+        if not payload or not supplier:
+            continue
+        linked = dict(payload)
+        linked["links"] = list(payload.get("links", [])) + [
+            {"link_doctype": "Supplier", "link_name": supplier}]
+        try:
+            kyc_result[key] = hooks.run(f"{DOMAIN_NAME}.generic",
+                                        {"doctype": sub_doctype, "action": "create", "payload": linked})
+            created.append(f"{sub_doctype} {(kyc_result[key].get('data') or {}).get('name')!r}")
+        except core_client.ConnectorError as e:
+            try:
+                hooks.compensate_create(f"KYC {sub_doctype} create failed: {e}")
+            except core_client.ConnectorError as rollback_err:
+                raise KycPartialFailureError(
+                    f"Supplier {supplier!r} was created, but its KYC {sub_doctype} failed ({e}) "
+                    f"and deleting the Supplier again also failed ({rollback_err}). Left behind: "
+                    f"Supplier {supplier!r}" + (f", {', '.join(created)}" if created else "")
+                    + ". Fix or remove it with the user before retrying.") from e
+            raise KycLinkFailedError(
+                f"KYC {sub_doctype} create failed ({e}); the Supplier {supplier!r} created a "
+                f"moment earlier was deleted again, so nothing is left behind. Fix the "
+                f"{sub_doctype} fields and retry the whole Supplier create.") from e
+    result["_kyc"] = kyc_result
+    return result
+
+
+operations.generic_operation(
+    DOMAIN_NAME, prepare=prepare, enrich=enrich, preconditions=(check_kyc,), post=create_linked_kyc,
+    extra_args_help={
+        "kyc": 'Supplier create: {"address": {...incl. tax ID}, "contact": {...}}',
+        "kyc_waiver_confirmed": "Supplier create: true only when the user explicitly waived KYC",
+    },
 )
-
-
-class IncompleteSupplierKYCError(core_client.ConnectorError):
-    """Raised by mutate() when a Supplier 'create' call carries neither
-    `kyc={'address': {...}}` nor `kyc_waiver_confirmed=True`.
-
-    This domain's non-negotiable rule (references/domains/
-    procurement.md): never create a live Supplier record with incomplete
-    mandatory KYC/bank fields — a tax ID must be captured, or explicitly
-    waived, before a Supplier record is created. This is the code-level
-    backstop for that rule, matching how every other domain
-    non-negotiable in 00-conventions.md is enforced."""
-
-
-def _create_linked_kyc_record(tag: str, doctype: str, payload: dict, supplier_name: str,
-                               **write_kwargs) -> dict:
-    """Address/Contact link back to a Supplier via Frappe's standard
-    Dynamic Link `links` child table, not a direct Link field on Supplier
-    — see this module's docstring. Injects that link automatically so a
-    caller's `kyc` payload only needs to carry the Address/Contact
-    doctype's own fields (address_line1, gstin/tax_id/whichever field
-    this instance actually uses for the tax ID, ...) — never a hardcoded
-    field name here (Non-negotiable 4, 00-conventions.md: field shape
-    comes from discover.py meta against the live instance, not assumed by
-    this connector)."""
-    linked_payload = dict(payload)
-    linked_payload["links"] = list(payload.get("links", [])) + [
-        {"link_doctype": "Supplier", "link_name": supplier_name}
-    ]
-    return core_client.mutate_resource(tag, doctype, "create", domain=DOMAIN_NAME,
-                                        payload=linked_payload, **write_kwargs)
 
 
 def mutate(tag: str, doctype: str, action: str, *, kyc: dict = None,
            kyc_waiver_confirmed: bool = False, **kwargs) -> dict:
-    """This domain's write entry point — plain mutate_resource() gated by
-    ALLOWED_WRITE_DOCTYPES above (domain="procurement"), with one
-    doctype-specific rule layered on top.
-
-    Supplier 'create' additionally requires either:
-      - `kyc={"address": {...fields per `discover.py meta "Address"` for
-        this instance, including whichever field actually carries the
-        tax ID here — gstin, tax_id, pan, ...}, "contact":
-        {...} (optional)}` — creates the Supplier, then its linked
-        Address (and Contact, if given) as one call, Dynamic Link wired
-        automatically; or
-      - `kyc_waiver_confirmed=True`, only when the user has explicitly
-        confirmed proceeding without KYC (they declined to provide it, a
-        jurisdiction with no applicable tax ID, etc.) — this is logged on
-        the result (`result["_kyc"]["waived"]`) so it's visible on
-        review, not silently indistinguishable from KYC actually having
-        been captured.
-
-    Neither given raises IncompleteSupplierKYCError before ANY write
-    fires — no Supplier record, incomplete or otherwise, is created.
-
-    Supplier 'update' is deliberately NOT gated this way: KYC
-    completeness is an onboarding-time bar (this domain's non-negotiable
-    talks about *creating* a live Supplier record), not a block on every
-    later patch to an already-onboarded supplier. Backfilling KYC onto an
-    existing Supplier is a plain `mutate(tag, "Address", "create", ...)`
-    call — Address is a regular allowlisted doctype in this domain, not
-    something only reachable through this Supplier-create path.
-    """
-    if doctype == "Supplier" and action == "create":
-        if not (kyc and kyc.get("address")) and not kyc_waiver_confirmed:
-            raise IncompleteSupplierKYCError(
-                "Refusing to create Supplier without KYC: pass kyc={'address': {...}} "
-                "(fields per discover.py meta \"Address\" for this instance "
-                "— this domain's own non-negotiable requires a tax ID, not just a registered "
-                "address) or, only when the user has explicitly confirmed proceeding without "
-                "it, kyc_waiver_confirmed=True. See references/domains/procurement.md."
-            )
-
-    result = core_client.mutate_resource(tag, doctype, action, domain=DOMAIN_NAME, **kwargs)
-
-    if doctype == "Supplier" and action == "create" and isinstance(result, dict):
-        data = result.get("data") if isinstance(result.get("data"), dict) else None
-        supplier_name = (data or {}).get("name")
-        kyc_result = {"waived": bool(kyc_waiver_confirmed and not kyc), "address": None, "contact": None}
-        if kyc and supplier_name:
-            link_kwargs = {k: v for k, v in kwargs.items() if k in _KYC_LINK_CONTEXT_KWARGS}
-            if kyc.get("address"):
-                kyc_result["address"] = _create_linked_kyc_record(
-                    tag, "Address", kyc["address"], supplier_name, **link_kwargs)
-            if kyc.get("contact"):
-                kyc_result["contact"] = _create_linked_kyc_record(
-                    tag, "Contact", kyc["contact"], supplier_name, **link_kwargs)
-        result["_kyc"] = kyc_result
-
-    return result
+    """Compatibility shim: operation "procurement.generic"."""
+    return operations.call_generic(
+        f"{DOMAIN_NAME}.generic", tag, doctype, action,
+        extra_args={"kyc": kyc, "kyc_waiver_confirmed": kyc_waiver_confirmed or None}, **kwargs)

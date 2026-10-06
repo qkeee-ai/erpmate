@@ -1,55 +1,39 @@
 #!/usr/bin/env python3
 """
-qkeee-erp-associate core — shared confirmation-token primitives, plus this
-skill's advisory-first write-gate token constructor.
+qkeee-erp-associate core — confirmation-token primitives, and the RENDER
+CLI that computes a token for any registered write operation.
 
-Several domains gate an irreversible or high-blast-radius write
-(depreciation runs, asset disposal, destructive sysadmin actions, bot-user
-provisioning) behind a DOUBLE confirm: the render/stage step computes a
-token from the exact facts just shown to the user, and the execute step
-recomputes the same token from the RPC call's own arguments, refusing to
-proceed unless they match. This closes the gap where nothing ties a
-render step to its execute step — without it, a caller could render a
-confirmation and immediately fire the write in the same turn without the
-user having actually seen the rendered facts.
+A gated write is two steps, never one turn:
 
-This module owns the two primitives every such token needs:
+1. **Render** — `confirm_token.py render --op <key> --args '<json>' ...`
+   prepares the EXACT request the operation will send (schema mapping,
+   defaults, live facts such as the record's `modified`) and prints it,
+   together with the full `args` to pass back, a `confirmation_token`, its
+   `issued_at`, and a 6-character `confirmation_code`. The agent shows the
+   prepared request and the code to the user.
+2. **Execute** — after the user's own reply containing the code,
+   `execute_write.py --op <key> --args '<printed args>'
+   --confirmation-token ... --issued-at ... --user-confirmation-text
+   '<their reply>'`. The pipeline re-prepares the request, recomputes the
+   token over it (core/operations.py operation_token()) and refuses on any
+   difference.
+
+This module owns the primitives:
   - compute_token(**fields)  — deterministic hash over arbitrary facts.
   - is_fresh(issued_at, ...) — reject stale (replayed) or implausibly-
     future tokens.
+  - confirmation_code(token) — the short code shown to the user.
 
-...plus this skill's OWN token constructor, `advisory_write_token()` (see
-below). Unlike a domain module's own capability-reviewed writes, this
-skill's `gated_mutate_resource()` (client.py) runs EVERY create/update/
-submit/cancel/delete that falls outside a named domain's allowlist
-through this one constructor, unconditionally — nothing outside a
-domain's own ALLOWED_WRITE_DOCTYPES has had that design-time capability
-review.
-
-Other capability-specific token constructors (e.g. depreciation_run_token(),
-permission_change_token(), destructive_action_token()) do NOT live here —
-each domain module that needs one carries its own copy (see
-domains/fixed_assets.py, domains/system_admin.py), built on top of the two
-shared primitives:
-
-    from confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECONDS
-
-    def my_action_token(asset: str, amount: float, issued_at: int = None) -> str:
-        return compute_token(
-            kind="my_action",
-            asset=asset,
-            amount=round(float(amount), 2),
-            issued_at=issued_at or int(time.time()),
-        )
-
-Every token constructor MUST include an `issued_at` timestamp field and
-the execute step MUST check it with is_fresh() before honoring the token
-— a token with no freshness check never expires, which defeats the
-anti-replay property this whole mechanism exists for.
+There is ONE token constructor for writes — core/operations.py
+operation_token() — built on compute_token(). (The former per-domain
+constructors and advisory_write_token() were folded into it — write-path
+hardening ticket 07.)
 """
 
 import hashlib
 import json
+import os
+import sys
 import time
 
 # 15 minutes: long enough to cover a realistic render-then-confirm human
@@ -82,111 +66,76 @@ def is_fresh(issued_at: int, max_age_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
     return -CLOCK_SKEW_TOLERANCE_SECONDS <= age <= max_age_seconds
 
 
-def advisory_write_token(action: str, doctype: str, name: str, payload: dict,
-                          requested_by: str, issued_at: int = None) -> str:
-    """Gates every create/update/submit/cancel/delete that falls outside a
-    named domain's allowlist — see module docstring for why this is
-    unconditional here, unlike a domain module's own narrower gating.
-
-    payload is folded into the token as-is (sorted-key JSON) so the token
-    is bound to the exact drafted field values, not just the doctype/
-    action/name shape — a caller can't render one payload and execute a
-    different one under the same token.
-    """
-    if issued_at is None:
-        raise ValueError("issued_at is required — pass the render-time epoch seconds.")
-    return compute_token(
-        kind="advisory_write",
-        action=action,
-        doctype=doctype,
-        name=name or "",
-        payload=payload or {},
-        requested_by=requested_by or "",
-        issued_at=int(issued_at),
-    )
-
-
 def confirmation_code(token: str) -> str:
-    """A short, human-typeable code derived from an advisory_write_token()
-    — 6 uppercase hex characters, e.g. "3F0A9C".
+    """A short, human-typeable code derived from a confirmation token —
+    6 uppercase hex characters, e.g. "3F0A9C".
 
-    What this closes, and what it deliberately doesn't:
-    advisory_write_token() alone is unsalted and computable by anyone,
-    including the same process that then verifies it — it proves a
-    payload matches what was rendered, never that a human actually
-    reviewed that render. This code is not cryptographically secret
+    What this closes, and what it deliberately doesn't: a token is
+    unsalted and computable by anyone, including the same process that
+    then verifies it — it proves a request matches what was rendered,
+    never that a human reviewed that render. This code is not secret
     either (deriving it from the token an agent already holds is
-    trivial) — it does not defend against an agent that deliberately
-    fabricates a user reply. What it does do:
-    it turns "pass the token back" (something an agent can do purely
-    from its own state, with no human involved at any point) into "get
-    this specific short code into an actual inbound message from the
-    user" — a concrete, checkable discipline point, the same kind of
-    convention this skill already leans on for `requested_by` (sourced
-    from the channel's own authenticated sender, never reconstructed
-    conversationally — 00-conventions.md's GRC baseline). Whatever
-    renders the draft for the user MUST display this code (not just the
-    raw token) and ask them to include it in their reply, e.g. "reply
-    'yes 3F0A9C' to confirm" — see `gated_mutate_resource()`'s
-    `user_confirmation_text` parameter.
-
-    Deliberately short and separate from the token itself (not just
-    `token[:6]` used ad hoc at each call site) so every caller derives it
-    the same way, and so a future change to the derivation only has one
-    place to change."""
+    trivial), so it does not defend against an agent that deliberately
+    fabricates a user reply. What it does do: turn "pass the token back"
+    (possible with no human involved) into "get this specific short code
+    into an actual inbound message from the user" — a concrete, checkable
+    discipline point, the same kind of convention this skill already
+    leans on for `requested_by`. Whatever renders the request for the
+    user MUST display this code and ask them to include it in their
+    reply, e.g. "reply 'yes 3F0A9C' to confirm"."""
     return token[:6].upper()
 
 
 def _cli():
-    """Manual/agent-facing CLI: compute an advisory_write_token() over the
-    exact facts just shown to and confirmed by the user, for domains that
-    have opted their submit/cancel/delete actions into the generic
-    confirmation-token gate (core/client.py's DOMAIN_TOKEN_GATED_ACTIONS —
-    see register_domain_token_gate()). Print, then pass both
-    confirmation_token and issued_at unchanged to the matching `mutate`
-    call — never hand-construct a token, always run it through here (or
-    advisory_write_token() directly) over the real payload/name/
-    requested_by, so the token is actually bound to what was confirmed.
-
-    A domain with its OWN bespoke token scheme (fixed_assets, system_admin)
-    has its own constructor for that (depreciation_run_token(),
-    destructive_action_token(), ...) — this generic CLI is for every other
-    domain's plain submit/cancel/delete instead."""
+    """`render`: prepare a registered operation's exact request and print
+    it with its confirmation token — see the module docstring."""
     import argparse
 
-    p = argparse.ArgumentParser(
-        description="Compute an advisory_write_token for the generic domain "
-                     "submit/cancel/delete confirmation gate."
-    )
-    p.add_argument("--action", required=True, choices=["create", "update", "submit", "cancel", "delete"])
-    p.add_argument("--doctype", required=True)
-    p.add_argument("--name", default="", help="record name (required for submit/cancel/delete)")
-    p.add_argument("--payload", default="{}", help="JSON object of the exact fields just shown to the user")
-    p.add_argument("--requested-by", required=True, help="ERPNext user id/email of the confirming requester")
-    p.add_argument("--issued-at", type=int, default=None,
-                    help="epoch seconds; defaults to now — record whatever this call prints, "
-                         "the execute step must receive the SAME issued_at back")
-    args = p.parse_args()
+    scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import execute_write  # noqa: F401 — imports every domain module (registers operations)
+    from core import operations
+    from core.client import ConnectorError, _parse_json_arg, resolve_requested_by
 
-    issued_at = args.issued_at if args.issued_at is not None else int(time.time())
+    p = argparse.ArgumentParser(description="Render a write operation for user confirmation.")
+    sub = p.add_subparsers(dest="command", required=True)
+    r = sub.add_parser("render", help="prepare the exact request and print token + code")
+    r.add_argument("--op", required=True, help="operation key, see `execute_write.py --list-ops`")
+    r.add_argument("--args", default="{}", help="JSON object of the operation's arguments")
+    r.add_argument("--tag", required=True)
+    r.add_argument("--requested-by", required=True,
+                   help="the requester the token is bound to — the same value the execute step uses")
+    r.add_argument("--session-id")
+    r.add_argument("--domain-code", default="qkeee-erp-associate")
+    r.add_argument("--channel")
+    r.add_argument("--channel-metadata")
+    r.add_argument("--prompt-summary")
+    r.add_argument("--latest-prompt")
+    a = p.parse_args()
+
     try:
-        payload = json.loads(args.payload) if args.payload else {}
-    except json.JSONDecodeError as e:
-        raise SystemExit(f"--payload must be valid JSON: {e}")
-    if not isinstance(payload, dict):
-        raise SystemExit("--payload must be a JSON object")
-
-    token = advisory_write_token(args.action, args.doctype, args.name, payload, args.requested_by, issued_at)
-    print(json.dumps({
-        "confirmation_token": token,
-        "issued_at": issued_at,
-        "confirmation_code": confirmation_code(token),
-        "_note": "For a gated_mutate_resource() (domain-less) write: show confirmation_code to "
-                 "the user in the rendered draft and ask them to include it in their reply — "
-                 "gated_mutate_resource() additionally requires that code to appear in "
-                 "user_confirmation_text. Not required for a domain's own "
-                 "submit/cancel/delete token gate.",
-    }, indent=2))
+        op_args = _parse_json_arg("--args", a.args, dict) or {}
+        ctx = operations.WriteContext(
+            tag=a.tag, requested_by=resolve_requested_by(a.requested_by),
+            session_id=a.session_id, domain_code=a.domain_code, channel=a.channel,
+            channel_metadata=_parse_json_arg("--channel-metadata", a.channel_metadata, dict),
+            prompt_summary=a.prompt_summary, latest_prompt=a.latest_prompt,
+        )
+        out = operations.prepare_only(a.op, op_args, ctx)
+    except ConnectorError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(3)
+    for note in out.get("notes", []):
+        print(f"WARN: {note}", file=sys.stderr)
+    if out["policy"] == operations.POLICY_NONE:
+        out["_note"] = "This operation needs no confirmation token for these args."
+    else:
+        out["_note"] = ("Show `request` and `confirmation_code` to the user. Execute with "
+                        "execute_write.py --op <op> --args '<args above, unchanged>' "
+                        "--confirmation-token/--issued-at as printed and "
+                        "--user-confirmation-text '<the user's own reply>'.")
+    print(json.dumps(out, indent=2, default=str))
 
 
 if __name__ == "__main__":

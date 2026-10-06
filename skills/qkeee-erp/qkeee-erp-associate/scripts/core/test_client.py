@@ -15,7 +15,43 @@ from unittest.mock import patch
 
 import client as erp_client
 import client as ec
-from confirm_token import advisory_write_token, confirmation_code
+from confirm_token import confirmation_code
+import operations
+import schema_mapping
+
+
+def advisory_write_token(action, doctype, name, payload, requested_by, issued_at,
+                         op="unscoped.generic", expected_modified=None):
+    """Test helper keeping the old call shape: the operation token the
+    pipeline expects for a generic resource write (create/update bind the
+    payload; submit/cancel/delete bind expected_modified instead)."""
+    if action in ("create", "update"):
+        req = operations.PreparedRequest(transport="resource", doctype=doctype, action=action,
+                                         name=name, body=payload or {})
+    else:
+        req = operations.PreparedRequest(transport="resource", doctype=doctype, action=action,
+                                         name=name, body=None,
+                                         bound={"expected_modified": expected_modified})
+    return operations.operation_token(op, req, requested_by, issued_at)
+
+
+def _passthrough_map(tag, doctype, payload, **kwargs):
+    return {"payload": dict(payload or {}), "status": "ok", "detail": None,
+            "suggested_mappings": [], "unmatched": [], "high_risk": []}
+
+
+_MAPPING_PATCH = unittest.mock.patch.object(schema_mapping, "map_payload_for_write",
+                                            new=_passthrough_map)
+
+
+def setUpModule():
+    # No live schema in unit tests: schema-first mapping passes payloads
+    # through unchanged (schema_mapping has its own tests).
+    _MAPPING_PATCH.start()
+
+
+def tearDownModule():
+    _MAPPING_PATCH.stop()
 
 
 class GetEnvConfigNoRequesterDefaultTests(unittest.TestCase):
@@ -247,6 +283,7 @@ class UpdatePreImageAttributionTests(unittest.TestCase):
         mocked_get_resource.return_value = {"data": {"name": "SO-0001", "status": "Draft"}}
         ec.mutate_resource("prod", "Sales Order", "update", payload={"status": "Closed"},
                             name="SO-0001", mode="read-write", requested_by="priya@org.com",
+                            domain="sales",
                             session_id="sess-1", domain_code="sales", channel="Slack",
                             channel_metadata={"x": 1}, prompt_summary="close it",
                             latest_prompt="please close SO-0001")
@@ -302,7 +339,7 @@ class UpdateAuditRowVolumeTests(unittest.TestCase):
         with patch.dict("os.environ", self.ENV, clear=True):
             ec.mutate_resource(
                 "rowvol", "Sales Order", "update", payload={"status": "Closed"},
-                name="SO-0001", mode="read-write", requested_by="priya@org.com",
+                name="SO-0001", mode="read-write", requested_by="priya@org.com", domain="sales",
                 session_id="sess-1", domain_code="sales", channel="Slack",
                 channel_metadata={"x": 1}, prompt_summary="close it",
                 latest_prompt="please close SO-0001",
@@ -998,7 +1035,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
         }, clear=True):
             with self.assertRaises(ec.UnvalidatedProdRequesterError):
                 ec.mutate_resource("tagk", "Sales Order", "create", payload={"x": 1},
-                                    mode="read-write", requested_by="priya@org.com")
+                                    mode="read-write", requested_by="priya@org.com", domain="sales")
 
     @patch.object(ec, "verify_rbac_precheck_reliable",
                    return_value={"reliable": False, "bot_user": "Administrator",
@@ -1018,7 +1055,9 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
         # role/DocPerm check itself can't reach a verdict either.
         fake_domain = "test_fake_domain_kk"
         ec.register_domain_allowlist(fake_domain, ("Sales Order",))
+        operations.generic_operation(fake_domain)
         self.addCleanup(ec.DOMAIN_WRITE_ALLOWLISTS.pop, fake_domain, None)
+        self.addCleanup(operations.REGISTRY.pop, f"{fake_domain}.generic", None)
         with patch.dict("os.environ", {
             "QKEEE_ERP_TAGKK_BASE_URL": "https://example.com",
             "QKEEE_ERP_TAGKK_API_KEY": "key",
@@ -1046,7 +1085,9 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
         # verdict this time — that's real evidence, so it proceeds.
         fake_domain = "test_fake_domain_kk2"
         ec.register_domain_allowlist(fake_domain, ("Sales Order",))
+        operations.generic_operation(fake_domain)
         self.addCleanup(ec.DOMAIN_WRITE_ALLOWLISTS.pop, fake_domain, None)
+        self.addCleanup(operations.REGISTRY.pop, f"{fake_domain}.generic", None)
         with patch.dict("os.environ", {
             "QKEEE_ERP_TAGKK2_BASE_URL": "https://example.com",
             "QKEEE_ERP_TAGKK2_API_KEY": "key",
@@ -1325,10 +1366,17 @@ class ProdGateWiringTests(unittest.TestCase):
     @patch.object(ec, "get_env_config", return_value={"tag": "prod"})
     def test_mutate_resource_gates_with_action_specific_ptype(self, mocked_cfg, mocked_gate,
                                                                 mocked_do_mutate, mocked_start, mocked_finish):
-        ec.mutate_resource("prod", "Sales Order", "submit", name="SO-0001", mode="read-write",
-                            requested_by="priya@org.com")
+        issued_at = int(time.time())
+        token = advisory_write_token("submit", "Sales Order", "SO-0001", None, "priya@org.com",
+                                     issued_at, op="sales.generic", expected_modified="M1")
+        with patch.object(operations, "_live_modified", return_value="M1"):
+            ec.mutate_resource("prod", "Sales Order", "submit", name="SO-0001", mode="read-write",
+                                requested_by="priya@org.com", domain="sales",
+                                expected_modified="M1", confirmation_token=token,
+                                issued_at=issued_at,
+                                user_confirmation_text=f"yes {confirmation_code(token)}")
         mocked_gate.assert_called_once_with("prod", "priya@org.com", "Sales Order", "submit",
-                                             docname="SO-0001", domain=None, advisory_token_verified=False,
+                                             docname="SO-0001", for_write=True, domain="sales",
                                              session_id=None, domain_code=None,
                                              channel=None, channel_metadata=None,
                                              prompt_summary=None, latest_prompt=None)
@@ -1340,20 +1388,22 @@ class ProdGateWiringTests(unittest.TestCase):
                 patch.object(ec, "record_audit_log_start") as mocked_start:
             with self.assertRaises(ec.UnvalidatedProdRequesterError):
                 ec.mutate_resource("prod", "Sales Order", "create", payload={"customer": "X"},
-                                    mode="read-write", requested_by="priya@org.com")
+                                    mode="read-write", requested_by="priya@org.com", domain="sales")
             mocked_do_mutate.assert_not_called()
             mocked_start.assert_not_called()
 
 
 class DomainTokenGateTests(unittest.TestCase):
-    """mutate_resource()'s generic advisory-token gate for a domain that
-    has opted submit/cancel (or delete) into it via
-    register_domain_token_gate() — accounts/hr-payroll/sales/procurement/
-    inventory's actual registrations, exercised here through a throwaway
-    fake domain so this test doesn't depend on any real domain module's
-    doctype list."""
+    """A generic domain operation's token policy (core/operations.py):
+    create/update are ungated drafts; the configured finalizing actions
+    need a rendered token + the user's confirmation code, and every
+    finalizing action is refused if the record changed since render.
+    Exercised through a throwaway fake domain registered with only
+    submit/cancel gated, so the "ungated action" case stays testable
+    (real domains gate delete too — decision D5)."""
 
     FAKE_DOMAIN = "test_fake_domain"
+    OP = "test_fake_domain.generic"
 
     QA_ENV = {
         "QKEEE_ERP_QA_BASE_URL": "https://example.com",
@@ -1363,11 +1413,18 @@ class DomainTokenGateTests(unittest.TestCase):
 
     def setUp(self):
         ec.register_domain_allowlist(self.FAKE_DOMAIN, ("Fake Doctype",))
-        ec.register_domain_token_gate(self.FAKE_DOMAIN, {"submit", "cancel"})
+        operations.generic_operation(self.FAKE_DOMAIN, token_actions=frozenset({"submit", "cancel"}))
         self.addCleanup(ec.DOMAIN_WRITE_ALLOWLISTS.pop, self.FAKE_DOMAIN, None)
-        self.addCleanup(ec.DOMAIN_TOKEN_GATED_ACTIONS.pop, self.FAKE_DOMAIN, None)
+        self.addCleanup(operations.REGISTRY.pop, self.OP, None)
         ec._QKEEE_ENV_FILE_CACHE = None
         self.addCleanup(setattr, ec, "_QKEEE_ENV_FILE_CACHE", None)
+        live = patch.object(operations, "_live_modified", return_value="M1")
+        self.mocked_live = live.start()
+        self.addCleanup(live.stop)
+
+    def _token(self, action, issued_at, expected_modified="M1"):
+        return advisory_write_token(action, "Fake Doctype", "FD-0001", None, "priya@org.com",
+                                    issued_at, op=self.OP, expected_modified=expected_modified)
 
     def _mocks(self):
         return (
@@ -1380,19 +1437,37 @@ class DomainTokenGateTests(unittest.TestCase):
             patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True}),
         )
 
+    def _submit(self, **kw):
+        return ec.mutate_resource("qa", "Fake Doctype", kw.pop("action", "submit"), name="FD-0001",
+                                  mode="read-write", requested_by="priya@org.com",
+                                  domain=self.FAKE_DOMAIN, **kw)
+
     def test_submit_refused_without_token(self):
-        with self.assertRaises(ec.ConnectorError) as ctx:
-            ec.mutate_resource("qa", "Fake Doctype", "submit", name="FD-0001", mode="read-write",
-                                requested_by="priya@org.com", domain=self.FAKE_DOMAIN)
+        with self.assertRaises(ec.ConfirmationRequiredError) as ctx:
+            self._submit(expected_modified="M1")
         self.assertIn("confirmation_token", str(ctx.exception))
 
+    def test_submit_refused_without_expected_modified(self):
+        with self.assertRaises(ec.PreconditionFailedError) as ctx:
+            self._submit()
+        self.assertIn("expected_modified", str(ctx.exception))
+
+    def test_submit_refused_when_record_changed_since_render(self):
+        issued_at = int(time.time())
+        token = self._token("submit", issued_at, expected_modified="M0")
+        with patch.object(ec, "_request") as mocked_request:
+            with self.assertRaises(ec.PreconditionFailedError) as ctx:
+                self._submit(expected_modified="M0", confirmation_token=token, issued_at=issued_at,
+                             user_confirmation_text=f"yes {confirmation_code(token)}")
+            mocked_request.assert_not_called()
+        self.assertIn("changed since", str(ctx.exception))
+
     def test_cancel_refused_without_token(self):
-        with self.assertRaises(ec.ConnectorError):
-            ec.mutate_resource("qa", "Fake Doctype", "cancel", name="FD-0001", mode="read-write",
-                                requested_by="priya@org.com", domain=self.FAKE_DOMAIN)
+        with self.assertRaises(ec.ConfirmationRequiredError):
+            self._submit(action="cancel", expected_modified="M1")
 
     def test_create_is_never_token_gated(self):
-        """create/update aren't in the registered action set — they're the
+        """create/update aren't in the gated action set — they're the
         draft steps meant to be reviewed BEFORE this gate ever applies."""
         with patch.dict("os.environ", self.QA_ENV, clear=True), \
                 patch.object(ec, "_request", return_value={"data": {"name": "FD-0001"}}), \
@@ -1407,45 +1482,57 @@ class DomainTokenGateTests(unittest.TestCase):
 
     def test_submit_refused_with_stale_token(self):
         old_issued_at = int(time.time()) - 10_000
-        token = advisory_write_token("submit", "Fake Doctype", "FD-0001", {}, "priya@org.com", old_issued_at)
+        token = self._token("submit", old_issued_at)
         with self.assertRaises(ec.StaleConfirmationError):
-            ec.mutate_resource("qa", "Fake Doctype", "submit", name="FD-0001", mode="read-write",
-                                requested_by="priya@org.com", domain=self.FAKE_DOMAIN,
-                                confirmation_token=token, issued_at=old_issued_at)
+            self._submit(expected_modified="M1", confirmation_token=token, issued_at=old_issued_at,
+                         user_confirmation_text=f"yes {confirmation_code(token)}")
 
-    def test_submit_refused_with_mismatched_token(self):
+    def test_submit_refused_with_token_for_another_record(self):
         issued_at = int(time.time())
-        token = advisory_write_token("submit", "Fake Doctype", "FD-0001", {"amount": 1}, "priya@org.com", issued_at)
-        with self.assertRaises(ec.ConnectorError):
-            ec.mutate_resource("qa", "Fake Doctype", "submit", name="FD-0001", mode="read-write",
-                                requested_by="priya@org.com", domain=self.FAKE_DOMAIN,
-                                confirmation_token=token, issued_at=issued_at,
-                                payload={"amount": 2})
+        token = advisory_write_token("submit", "Fake Doctype", "FD-0002", None, "priya@org.com",
+                                     issued_at, op=self.OP, expected_modified="M1")
+        with self.assertRaises(ec.TokenMismatchError):
+            self._submit(expected_modified="M1", confirmation_token=token, issued_at=issued_at,
+                         user_confirmation_text=f"yes {confirmation_code(token)}")
+
+    def test_submit_refused_without_user_confirmation_code(self):
+        issued_at = int(time.time())
+        token = self._token("submit", issued_at)
+        with self.assertRaises(ec.UnconfirmedByUserError):
+            self._submit(expected_modified="M1", confirmation_token=token, issued_at=issued_at,
+                         user_confirmation_text="yes go ahead")
 
     def test_submit_succeeds_with_matching_fresh_token(self):
         issued_at = int(time.time())
-        token = advisory_write_token("submit", "Fake Doctype", "FD-0001", {}, "priya@org.com", issued_at)
+        token = self._token("submit", issued_at)
         mocks = self._mocks()
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6], \
                 patch.dict("os.environ", self.QA_ENV, clear=True), \
                 patch.object(ec, "_request", return_value={"data": {"name": "FD-0001"}}):
-            result = ec.mutate_resource("qa", "Fake Doctype", "submit", name="FD-0001", mode="read-write",
-                                         requested_by="priya@org.com", domain=self.FAKE_DOMAIN,
-                                         confirmation_token=token, issued_at=issued_at)
+            result = self._submit(expected_modified="M1", confirmation_token=token,
+                                  issued_at=issued_at,
+                                  user_confirmation_text=f"ok {confirmation_code(token)}")
         self.assertEqual(result["data"]["name"], "FD-0001")
 
     def test_ungated_domain_action_combination_is_unaffected(self):
-        """A domain/action combination that was never registered (e.g. this
-        fake domain's "delete", only submit/cancel were registered) gets no
-        token check at all — same as before this gate existed."""
+        """An action outside this fake domain's gated set (delete) needs no
+        token — but, as a finalizing action, still the unchanged-since-
+        render check."""
         with patch.dict("os.environ", self.QA_ENV, clear=True), \
                 patch.object(ec, "_request", return_value={}), \
                 patch.object(ec, "record_comment"), \
                 patch.object(ec, "resource_exists", return_value=True), \
                 patch.object(ec, "check_user_permission", return_value=True), \
                 patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True}):
-            ec.mutate_resource("qa", "Fake Doctype", "delete", name="FD-0001", mode="read-write",
-                                requested_by="priya@org.com", domain=self.FAKE_DOMAIN)
+            self._submit(action="delete", expected_modified="M1")
+
+    def test_real_domains_gate_delete_too(self):
+        for domain in ("accounts", "sales", "hr_payroll", "inventory", "procurement", "fixed_assets"):
+            with self.subTest(domain=domain):
+                self.assertTrue(operations.requires_confirmation(
+                    f"{domain}.generic", {"action": "delete"}))
+                self.assertFalse(operations.requires_confirmation(
+                    f"{domain}.generic", {"action": "create"}))
 
 
 class AuditFailureStreakTests(unittest.TestCase):
@@ -1502,7 +1589,7 @@ class GateDecisionLoggingTests(unittest.TestCase):
         self.assertTrue(payload["gate_check"])
         self.assertFalse(payload["allowed"])
         mocked_submit.assert_called_once_with({"tag": "gatelog", "base_url": "https://example.com",
-                                                 "api_key": "key", "api_secret": "secret"},
+                                                 "api_key": "key", "api_secret": "secret", "credential": "bot"},
                                                 "AUDITLOG-GATE-1")
 
     @patch.object(ec, "_audit_submit", return_value=True)

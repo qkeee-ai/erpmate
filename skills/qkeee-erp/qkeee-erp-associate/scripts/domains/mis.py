@@ -2,18 +2,14 @@
 """
 qkeee-erp-associate — mis domain (GL / MIS reporting, read-only).
 
-core.client.mutate_resource() is one shared function used by every domain,
-so MIS's read-only posture is enforced here, at the domain layer, rather
-than by the connector lacking a mutate path:
+MIS's read-only posture is enforced by an EMPTY allowlist:
 
-    ALLOWED_WRITE_DOCTYPES = ()   # deliberately empty — see mutate() below
+    ALLOWED_WRITE_DOCTYPES = ()
 
-An EMPTY allowlist means core.client.mutate_resource(..., domain="mis")
-raises DoctypeNotAllowedError for every doctype, unconditionally — there
-is no doctype this domain may write. mutate() below is provided only for
-interface symmetry with the other domain modules; calling it always fails
-closed. This is a runtime guarantee — keep it covered by
-scripts/domains/test_allowlist_gates.py's allowlist-gate tests.
+so operation "mis.generic" refuses every doctype at the allowlist step,
+unconditionally. mutate() exists only for interface symmetry with the
+other domain modules; calling it always fails closed. Keep this covered
+by scripts/domains/test_allowlist_gates.py.
 """
 
 import os
@@ -24,6 +20,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from core import client as core_client
+from core import operations
 
 DOMAIN_NAME = "mis"
 
@@ -34,10 +31,10 @@ DOMAIN_NAME = "mis"
 ALLOWED_WRITE_DOCTYPES = ()
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
+operations.generic_operation(DOMAIN_NAME, summary="mis is read-only — every write is refused")
 
 
 def mutate(tag: str, doctype: str, action: str, **kwargs) -> dict:
     """Always raises core.client.DoctypeNotAllowedError — ALLOWED_WRITE_DOCTYPES
-    is empty by design. Provided only so this module has the same shape as
-    every other domain module; MIS has no legitimate write path."""
-    return core_client.mutate_resource(tag, doctype, action, domain=DOMAIN_NAME, **kwargs)
+    is empty by design."""
+    return operations.call_generic(f"{DOMAIN_NAME}.generic", tag, doctype, action, **kwargs)

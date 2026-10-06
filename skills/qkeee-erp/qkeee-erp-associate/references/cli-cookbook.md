@@ -12,9 +12,9 @@ prose it won't use — nothing here changed meaning, only location.
 `core/client.py` and each `domains/<slug>.py` module are runnable
 directly for manual/ad hoc use. See `core/client.py`'s own `_cli()` for
 the full subcommand list (`health`, `list-envs`, `query`, `get`, `report`,
-`roles`, `mutate`, `gated-mutate`).
+`roles`). All of them are read-only.
 
-**`core/client.py`'s own `mutate`/`gated-mutate` subcommands are read-only-safe to explore but not the write entry point — use `execute_write.py` for every actual write.** `mutate --domain <slug>` looks like the domain-scoped write path, but `core/client.py` never imports any `domains/*.py` module itself — run standalone in a fresh process, `--domain procurement` 404s with "domain has no registered ALLOWED_WRITE_DOCTYPES" even though `domains/procurement.py` genuinely declares one (`register_domain_allowlist()` only runs at that module's *own* import time). `scripts/execute_write.py` imports every `domains/*.py` module up front specifically so this isn't a trap, and it's the one write entry point regardless of whether the target doctype belongs to a named domain (`--domain <slug>` → `mutate_resource()`) or not (omit `--domain`, pass `--confirmation-token`/`--issued-at` → `gated_mutate_resource()`). See its own module docstring — this is also where a real bug got fixed: hand-writing a fresh one-off Python script per write is exactly how `session_id`/`channel_metadata`/`latest_prompt` kept getting left blank, and `execute_write.py` WARNs loudly on stderr, before the write fires, if any of those three are missing — don't route around that warning by constructing the underlying `mutate_resource()`/`gated_mutate_resource()` call directly in a hand-written script instead.
+**`core/client.py` has no write subcommand. Use `execute_write.py` for every write.** The former `mutate` and `gated-mutate` subcommands were removed. `mutate` without `--domain` wrote to any doctype with no allowlist and no token, and `gated-mutate` skipped `execute_write.py`'s schema mapping and context warnings. `scripts/execute_write.py` imports every `domains/*.py` module up front, so each domain's allowlist and token gate is registered before the write fires. It handles both write shapes: with `--domain <slug>` it calls that domain module's own `mutate()`, and without `--domain` it calls `gated_mutate_resource()`, which needs `--confirmation-token`, `--issued-at` and `--user-confirmation-text`. It WARNs on stderr, before the write fires, if `--session-id`, `--channel-metadata` or `--latest-prompt` is missing. Never route around that by calling `mutate_resource()` or `gated_mutate_resource()` from a hand-written script.
 
 **Exact path — don't guess it.** The script lives at
 `<profile>/skills/qkeee-erp/qkeee-erp-associate/scripts/core/client.py`
@@ -61,49 +61,120 @@ request rather than a status-name guess.
 
 ## Write calls
 
-For a write, see the matching `domains/<slug>.md` file for the exact
-payload shape and required fields — don't freehand a payload from this
-cookbook alone. Fire the write itself through `execute_write.py` (see
-above), never a hand-written script that reconstructs
-`mutate_resource()`/`gated_mutate_resource()` inline:
+Every write is a named **operation**, run through one pipeline:
+
+1. mode
+2. requester
+3. allowlist
+4. ownership
+5. preconditions
+6. confirmation token
+7. RBAC
+8. audit
+9. send
+
+`execute_write.py` is the only write CLI. Never hand-write a script that
+calls the pipeline, `mutate_resource()` or a domain function directly. For
+the exact payload shape and required fields, see the matching
+`domains/<slug>.md`; don't freehand a payload from this cookbook alone.
 
 ```
-# Domain-scoped write — Supplier belongs to procurement's
-# ALLOWED_WRITE_DOCTYPES. Supplier 'create' additionally requires --kyc
-# (creates the linked Address/Contact in the same call — see
-# domains/procurement.md's "Supplier KYC write order") or, only when the
-# user explicitly confirmed proceeding without it, --kyc-waiver-confirmed.
-python execute_write.py --tag <tag> --mode read-write \
-  --requested-by <requester-email> --doctype Supplier --action create \
-  --domain procurement \
-  --payload '{"supplier_name": "<value>", "supplier_type": "Company", ...}' \
-  --kyc '{"address": {"address_line1": "<value>", "<tax-id field confirmed via discover.py meta \"Address\">": "<value>", ...}}' \
-  --session-id <this-logical-session-id> \
-  --channel-metadata '{"space": "<platform-space-id>", "thread": "<platform-thread-id>"}' \
-  --prompt-summary "<one-line paraphrase>" \
-  --latest-prompt "<the user's literal most-recent message>"
+# Every operation, its arguments, and whether it needs a confirmation
+python execute_write.py --list-ops
+```
 
-# Domain-less write — Item belongs to no domain's allowlist yet. For an
-# item sourced from a purchase document (PO, purchase invoice, GRN), add
-# --purchase-sourced-item: defaults is_purchase_item=1/is_sales_item=0
-# (nothing in a purchase document supports "the org resells this") and
-# refuses a bare standard_rate key (that auto-creates a Standard SELLING
-# Item Price from what was actually a purchase cost; see
-# item_write_helpers.py for the buying-side alternative). Omit --domain,
-# supply the advisory-draft token, AND the user's own literal reply
-# containing confirm_token.py's printed
-# confirmation_code (show them the code in the rendered draft first —
-# never construct this string yourself, see confirmation_code()'s
-# docstring for why that defeats the point).
-python execute_write.py --tag <tag> --mode read-write \
-  --requested-by <requester-email> --doctype Item --action create \
-  --payload '{"item_code": "<value>", ...}' \
-  --confirmation-token <from confirm_token.py> --issued-at <same> \
-  --user-confirmation-text "<the user's actual reply, e.g. 'yes 284D51'>" \
-  --session-id <this-logical-session-id> \
-  --channel-metadata '{"space": "<platform-space-id>", "thread": "<platform-thread-id>"}' \
-  --prompt-summary "<one-line paraphrase>" \
-  --latest-prompt "<the user's literal most-recent message>"
+**Which writes need a confirmation:**
+
+- Every bespoke operation, such as `system_admin.disable_user` or
+  `fixed_assets.scrap`.
+- `submit`/`cancel`/`delete` on a domain's `<domain>.generic` operation.
+- Every action on `unscoped.generic` and on `system_admin.generic`
+  (it sends with the admin key).
+
+`create`/`update` on any other `<domain>.generic` operation are drafts and
+need no token. `--list-ops` shows each operation's rule.
+
+### The confirmed write: render, show, execute
+
+1. **Render.** This prints `request` (exactly what will be sent),
+   `args` (pass back UNCHANGED), `confirmation_token`, `issued_at` and
+   `confirmation_code`:
+
+   ```
+   python core/confirm_token.py render --op <op> --args '<json>' \
+     --tag <tag> --requested-by <requester-email>
+   ```
+
+2. **Show.** Show the user `request` and the code, for example "reply
+   `yes 3F0A9C` to confirm". Wait for their reply in a later turn.
+3. **Execute.** Pass the printed values and the user's own reply:
+
+   ```
+   python execute_write.py --tag <tag> --mode read-write \
+     --requested-by <requester-email> --op <op> --args '<printed args>' \
+     --confirmation-token <printed> --issued-at <printed> \
+     --user-confirmation-text "<the user's actual reply>" \
+     --session-id <session> --channel-metadata '<json>' \
+     --prompt-summary "<one line>" --latest-prompt "<the user's literal message>"
+   ```
+
+**Refusals on execute:**
+
+- Any change between render and execute is refused: args, record,
+  requester, or 15 minutes elapsed. The record counts as changed when its
+  `modified` timestamp moves after a submit/cancel/delete render.
+  Re-render and re-confirm.
+- Never construct the reply text yourself.
+- For a confirmed write, `--session-id`, `--channel-metadata` and
+  `--latest-prompt` are mandatory. The CLI refuses without them.
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | ERPNext rejected it |
+| 2 | usage error |
+| 3 | refused by a gate, nothing was sent |
+| 4 | outcome unknown or partial — re-read the record before any retry |
+
+### Worked examples
+
+```
+# Draft create on a domain doctype — shorthand for --op sales.generic
+python execute_write.py --tag <tag> --mode read-write --requested-by <email> \
+  --domain sales --doctype "Sales Order" --action create \
+  --payload '{"customer": "<value>", "items": [...]}' \
+  --session-id <s> --channel-metadata '<json>' --latest-prompt "<msg>"
+
+# Submit it later: render binds the record's current `modified`
+python core/confirm_token.py render --op sales.generic \
+  --args '{"doctype": "Sales Order", "action": "submit", "name": "SAL-ORD-0001"}' \
+  --tag <tag> --requested-by <email>
+# ...show, get the reply, then execute with the printed args/token/issued_at
+
+# Supplier create — KYC is mandatory: an address WITH a tax ID (gstin/
+# tax_id/pan), or kyc_waiver_confirmed only when the user explicitly
+# waived it. Linked Address/Contact are created in the same operation and
+# the Supplier is rolled back if they fail. See domains/procurement.md.
+python execute_write.py --tag <tag> --mode read-write --requested-by <email> \
+  --domain procurement --doctype Supplier --action create \
+  --payload '{"supplier_name": "<value>", "supplier_type": "Company"}' \
+  --kyc '{"address": {"address_line1": "<v>", "city": "<v>", "country": "<v>", "gstin": "<v>"}}' \
+  --session-id <s> --channel-metadata '<json>' --latest-prompt "<msg>"
+
+# Doctype no domain owns (e.g. Item) — unscoped.generic: every action is
+# confirmed. For an item sourced from a purchase document add
+# "purchase_sourced_item": true (is_purchase_item=1/is_sales_item=0; a
+# bare standard_rate is refused — see item_write_helpers.py).
+python core/confirm_token.py render --op unscoped.generic \
+  --args '{"doctype": "Item", "action": "create", "purchase_sourced_item": true, "payload": {"item_code": "<v>", ...}}' \
+  --tag <tag> --requested-by <email>
+
+# A bespoke gated operation
+python core/confirm_token.py render --op system_admin.disable_user \
+  --args '{"name": "<user email>", "reason": "<stated reason>"}' \
+  --tag <tag> --requested-by <email>
 ```
 
 Resolve `--session-id`/`--channel-metadata`/`--latest-prompt` **once**, at

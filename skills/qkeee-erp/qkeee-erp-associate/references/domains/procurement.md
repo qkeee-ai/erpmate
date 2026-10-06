@@ -4,9 +4,11 @@ Code: `scripts/domains/procurement.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Supplier", "Address", "Contact", "Purchase
 Order", "Request for Quotation", "Supplier Quotation")`).
 
-This domain has no unique connector logic of its own — the domain logic
-below belongs in `render_supplier_draft.py`/`render_po_draft.py`/
-`render_report.py`, which don't exist in this skill's scripts/ yet.
+Writes are operation `procurement.generic` through `execute_write.py`
+(`--domain procurement`); submit/cancel/delete need a rendered
+confirmation (`cli-cookbook.md`). Its one domain rule in code is the
+Supplier KYC gate below. Composing drafts and reports is prompt
+discipline.
 
 ## When this domain applies
 
@@ -23,10 +25,13 @@ checking a supplier's performance.
   `supplier_type`) — the fuller bar (identity/classification, tax ID,
   bank/payable details) must be enforced before a draft is marked
   "ready." Incomplete extractions must be flagged, never silently filled
-  with a placeholder. `procurement.mutate(..., "Supplier", "create")`
-  refuses outright (`IncompleteSupplierKYCError`) unless the call carries
-  either `kyc={"address": {...}}` (see "Supplier KYC write order" below)
-  or an explicit `kyc_waiver_confirmed=True` — a live session let this
+  with a placeholder. A Supplier `create` is refused outright
+  (`IncompleteSupplierKYCError`, before anything is written) unless it
+  carries either `kyc={"address": {...}}` WITH a tax ID — one of
+  `gstin`/`tax_id`/`pan`, or the field named by
+  `QKEEE_ERP_<TAG>_KYC_TAX_ID_FIELD` — and every mandatory Address/Contact
+  field per live meta (see "Supplier KYC write order" below), or an
+  explicit `kyc_waiver_confirmed=True` — a live session let this
   slip once already by treating it as optional scope; this is the
   backstop for that, matching how the other non-negotiables in
   `00-conventions.md` are
@@ -58,28 +63,33 @@ checking a supplier's performance.
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
    **Done when:** the target doctype is confirmed inside the tuple above
    before any write is proposed.
-2. **Supplier onboarding — Supplier → Address → Contact, one `mutate()`
-   call.** Present the drafted, KYC-complete record (Supplier fields plus
+2. **Supplier onboarding — Supplier → Address → Contact, one
+   operation.** Present the drafted, KYC-complete record (Supplier fields plus
    the Address the tax ID/registered address will carry, and Contact if
    captured) and get explicit confirmation. Then a single
-   `domains.procurement.mutate(tag, "Supplier", "create", payload={...
+   `execute_write.py --domain procurement --doctype Supplier --action
+   create --payload '{...
    supplier_name, supplier_type, supplier_group, country,
    default_currency, ...}, kyc={"address": {... address_line1, city,
    state, country, pincode, and whichever field this instance's live
    `discover.py meta "Address"` confirmed carries the tax ID — gstin,
    tax_id, pan, ... }, "contact": {... first_name, email_id, phone
-   ...} (optional)}, ...)` call creates the Supplier, then the linked
+   ...} (optional)}'` call creates the Supplier, then the linked
    Address (and Contact, if given) — the Dynamic Link back to the new
-   Supplier name is wired automatically, don't build it by hand. Only
+   Supplier name is wired automatically, don't build it by hand. If the
+   Address or Contact create fails server-side, the Supplier is deleted
+   again and `KycLinkFailedError` says nothing is left behind; if even
+   that delete fails, `KycPartialFailureError` names the Supplier left
+   behind — tell the user, never retry blindly (exit code 4). Only
    when the user has explicitly confirmed proceeding without KYC (they
    declined to provide it, a jurisdiction with no applicable tax ID),
    pass `kyc_waiver_confirmed=True` instead — say so plainly in the
    report-back, don't let a waived KYC read the same as a captured one.
    Neither given raises `IncompleteSupplierKYCError` before anything is
    written (see the non-negotiable above). Backfilling KYC onto an
-   already-onboarded Supplier later is a plain `mutate(tag, "Address",
-   "create", payload={..., "links": [{"link_doctype": "Supplier",
-   "link_name": "<existing supplier name>"}]})` call — Address is a
+   already-onboarded Supplier later is a plain `procurement.generic`
+   Address `create` with `"links": [{"link_doctype": "Supplier",
+   "link_name": "<existing supplier name>"}]` in its payload — Address is a
    regular allowlisted doctype in this domain, not reachable only through
    the Supplier-create convenience path above.
 

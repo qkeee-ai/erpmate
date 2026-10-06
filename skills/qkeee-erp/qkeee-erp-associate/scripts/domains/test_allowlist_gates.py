@@ -32,6 +32,19 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 from core import client as core_client  # noqa: E402
+import testsupport  # noqa: E402
+
+_OFFLINE = testsupport.offline_schema()
+
+
+def setUpModule():
+    for p in _OFFLINE:
+        p.start()
+
+
+def tearDownModule():
+    for p in _OFFLINE:
+        p.stop()
 
 import accounts  # noqa: E402
 import fixed_assets  # noqa: E402
@@ -63,7 +76,10 @@ _WRITER_DOMAINS = [
     (inventory, inventory.ALLOWED_WRITE_DOCTYPES[0]),
     (procurement, "Purchase Order"),
     (sales, sales.ALLOWED_WRITE_DOCTYPES[0]),
-    (system_admin, system_admin.ALLOWED_WRITE_DOCTYPES[0]),
+    # Not ALLOWED_WRITE_DOCTYPES[0] ("User"): User create is owned by the
+    # gated operation system_admin.create_user and refused by
+    # system_admin.generic — see test_operations.py's ownership tests.
+    (system_admin, "Role"),
 ]
 
 
@@ -100,6 +116,16 @@ class AllowedDoctypeClearsTheGateTests(unittest.TestCase):
                      patch.object(core_client, "record_audit_log_finish"), \
                      patch.object(core_client, "_do_mutate",
                                    return_value={"data": {"name": "TEST-0001"}}) as mocked_do_mutate:
+                    if module is system_admin:
+                        # Every system_admin.generic action is confirmed (it
+                        # sends with the admin key). The allowlist runs before
+                        # the token step, so reaching ConfirmationRequiredError
+                        # means the allowlist was cleared.
+                        with self.assertRaises(core_client.ConfirmationRequiredError):
+                            module.mutate("test", allowed_doctype, "create", payload={"x": "y"},
+                                          mode="read-write", requested_by="tester@example.com")
+                        mocked_do_mutate.assert_not_called()
+                        continue
                     module.mutate(
                         "test", allowed_doctype, "create",
                         payload={"x": "y"}, mode="read-write",

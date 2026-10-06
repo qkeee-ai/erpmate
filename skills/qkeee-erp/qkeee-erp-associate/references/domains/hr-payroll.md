@@ -6,10 +6,12 @@ Separation", "Job Offer", "Leave Application")` — see that module's
 docstring). Applies `00-conventions.md` and `01-connectivity.md` in full;
 this file adds what's specific to HR/talent-acquisition work.
 
-This domain has no unique connector logic of its own — the PII-flagging
-and advisory-only enforcement described below belongs in
-`render_employee_draft.py`/`render_advisory_draft.py`, which don't exist
-in this skill's scripts/ yet. This reference states the target procedure.
+This domain has no unique connector logic of its own. Writes are
+operation `hr_payroll.generic` through `execute_write.py` (`--domain
+hr_payroll`); submit/cancel/delete need a rendered confirmation
+(`cli-cookbook.md`). The PII-flagging and advisory-only rules below are
+prompt discipline; no script composes these drafts. Audit payloads mask
+bank/identity fields (`core.client.AUDIT_MASK_FIELDS`).
 
 ## When this domain applies
 
@@ -46,8 +48,7 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
 2. **New employee onboarding and Employee updates** stage a draft that
    enforces ERPNext's mandatory fields and the live-discovered
    `status: "Left"` → `relieving_date` requirement, and flags PII fields.
-   Present, confirm, then `domains.hr_payroll.mutate(..., "create"/
-   "update")`. Re-fetch the Employee by `name` afterward
+   Present, confirm, then `hr_payroll.generic` `create`/`update`. Re-fetch the Employee by `name` afterward
    (`query_resource` with explicit `fields` is sufficient — none of the
    reviewed fields live in a child table) and check every persisted
    field, especially that Link fields (`department`, `designation`,

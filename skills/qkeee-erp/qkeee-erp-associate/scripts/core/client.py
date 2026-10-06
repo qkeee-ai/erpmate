@@ -89,31 +89,21 @@ docstring for the full decision tree.
 
 Write-allowlist gate: domain modules under `scripts/domains/*.py` each
 declare an ALLOWED_WRITE_DOCTYPES tuple and register it via
-register_domain_allowlist() at import time. mutate_resource(...,
-domain="<name>") then refuses any create/update/submit/cancel/delete whose
-doctype isn't in that domain's allowlist, raising DoctypeNotAllowedError.
-`mis.py` registers an EMPTY allowlist, so every doctype is refused there.
-`domain=None` (the default) applies no allowlist restriction at all — used
-by gated_mutate_resource() below (an advisory-first write path for
-doctypes that aren't known in advance, so no capability review /
-allowlist can be drawn up ahead of time) and by any core-level/admin
-script (e.g. init_bot.py) that intentionally operates outside domain
-scope.
+register_domain_allowlist() at import time. The operation pipeline
+(core/operations.py) refuses any write whose doctype isn't in its
+operation's domain allowlist, raising DoctypeNotAllowedError. `mis.py`
+registers an EMPTY allowlist, so every doctype is refused there.
 
-Advisory-first write gate: this file also ships
-`gated_mutate_resource()`, the associate's OWN write entry point for
-whatever doesn't fit a named domain — it requires a confirmation_token +
-issued_at from a render_*.py draft script, enforcing "never write without
-an advisory-first draft" in code, not just prompt discipline. Domain
-modules' own `mutate()` wrappers call plain `mutate_resource(...,
-domain=<name>)` directly (their capability tables are reviewed at design
-time via ALLOWED_WRITE_DOCTYPES); nothing in gated_mutate_resource()'s
-remit has had that review, so it stays allowlist-free and
-confirmation-token-gated instead. See confirm_token.py's
-`advisory_write_token()`.
+Every write goes through core/operations.py's run_operation() — one
+registry of named operations, one pipeline, one token constructor
+(write-path hardening, agents/.scratch/qkeee-erp-write-path-hardening).
+mutate_resource()/gated_mutate_resource() below are thin compatibility
+shims onto that pipeline; this module keeps the pieces the pipeline is
+built from (requester gate, audit logging, transport, _do_mutate).
 """
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -130,9 +120,9 @@ from datetime import datetime, timezone
 # core's PARENT — on sys.path first; see domains/*.py's own import
 # preamble). Avoids hardcoding either sys.path shape.
 try:
-    from confirm_token import advisory_write_token, confirmation_code, is_fresh
+    from confirm_token import compute_token, confirmation_code, is_fresh
 except ImportError:
-    from core.confirm_token import advisory_write_token, confirmation_code, is_fresh
+    from core.confirm_token import compute_token, confirmation_code, is_fresh
 
 # Default attribution label for audit Comments when no domain-specific
 # label is supplied — see mutate_resource()'s `domain`/`skill_label` params.
@@ -144,39 +134,27 @@ SKILL_LABEL = "qkeee-erp-associate"
 # read/write.
 AUDIT_LOG_DOCTYPE = "Qkeee Bot Audit Log"
 
-# Doctypes exempt from audit-wrapping on the WRITE path
-# (record_audit_log_start()/record_audit_log_finish(), consulted by
-# mutate_resource()). Mandatory, not optional: without this, logging a
-# write to Qkeee Bot Audit Log would itself be logged, recursing forever.
-# "Comment" is exempt for a related reason — the best-effort audit-comment
-# post (record_comment(), below) is itself a write; without this
-# exemption every audited write would double-log itself (once for the
-# record, once for the Comment documenting it). "User"/"DocType"/"Role"
-# are exempt for the same reason they're in PROD_GATE_EXEMPT_DOCTYPES
-# below (core-infra doctypes managed by qkeee-erp-bot-init / system-admin,
-# not written by a business requester) — kept in sync with that set
-# deliberately: init_bot.py's Role/DocType bootstrap writes rely on this
-# exemption to stay silent so its own log_role_provisioning() can be the
-# ONE place that logs them (manually, bypassing this exemption on purpose
-# — see that function's docstring). Removing "User"/"DocType"/"Role" here
-# would double-log that bootstrap sequence for no benefit — this set is
-# scoped to the write path only.
+# Doctypes whose WRITES are never audited: only this connector's own
+# bookkeeping. The audit log itself, and Comment, because the attribution
+# Comment every write may post (record_comment(), below) is itself a write;
+# without this exemption every audited write would double-log itself.
+#
+# "User"/"Role"/"DocType" used to be listed here too (to keep init_bot.py's
+# bootstrap from double-logging). That silently removed every system-admin
+# write — user creation, role changes, disable/delete, permission changes
+# — from the audit trail (write-path hardening W29). init_bot's two
+# provisioning operations now opt out of pipeline auditing explicitly
+# (Operation(audit=False), core/operations.py) and keep logging themselves
+# via log_role_provisioning(); everything else is audited.
 #
 # The READ path (_log_read(), consulted by query_resource()/get_resource()/
 # run_query_report()/get_user_roles()) does NOT use this set — see
-# _LOG_READ_RECURSION_EXEMPT_DOCTYPES below: a doctype-keyed exemption is
-# the wrong axis there, since it would also silently swallow a genuine
-# business-intent read of User/Role (e.g. `query User`, `roles <user>`),
-# not just the internal plumbing call it exists to stop from recursing.
-# That plumbing call (resource_exists(), and
-# _fetch_doctype_role_permissions()'s own get_resource(tag, "DocType", ...))
-# is exempted directly via an `internal=True` kwarg instead.
+# _LOG_READ_RECURSION_EXEMPT_DOCTYPES below. Its plumbing calls
+# (resource_exists(), _fetch_doctype_role_permissions()) are exempted via
+# an `internal=True` kwarg instead.
 AUDIT_EXEMPT_DOCTYPES = {
     AUDIT_LOG_DOCTYPE,
     "Comment",
-    "User",
-    "DocType",
-    "Role",
 }
 
 # Read-path recursion exemption — deliberately NARROWER than
@@ -209,6 +187,18 @@ PROD_GATE_EXEMPT_DOCTYPES = {
     "User", "DocType", "Role",
     AUDIT_LOG_DOCTYPE, "Comment",
 }
+
+# WRITES get a much narrower exemption (write-path hardening, W02).
+# PROD_GATE_EXEMPT_DOCTYPES above exists for READ recursion (validating a
+# requester reads User) - that reason never applies to a write. Before
+# this split, a write to User/Role/DocType skipped both the permission
+# check AND the "requested_by is a real ERPNext User" check, so any
+# non-empty string could e.g. create a System Manager user. Now only the
+# connector's own bookkeeping doctypes are exempt for writes; a User/Role/
+# DocType write needs a real requester holding that permission (in
+# practice System Manager - that includes init_bot.py's provisioning
+# requester).
+WRITE_GATE_EXEMPT_DOCTYPES = {AUDIT_LOG_DOCTYPE, "Comment"}
 
 # Shared closing line for every requester-permission-denial message
 # below. A user-supplied "run this as someone else instead" is not the
@@ -264,84 +254,34 @@ def register_domain_allowlist(domain: str, allowed_doctypes) -> None:
     DOMAIN_WRITE_ALLOWLISTS[domain] = tuple(allowed_doctypes)
 
 
-# --------------------------------------------------------------------------
-# Generic advisory-first confirmation-token gate for a domain's plain
-# mutate() wrapper.
-#
-# fixed_assets.py / system_admin.py already carry their OWN bespoke
-# double-confirm token schemes (depreciation_run_token(), disposal_token(),
-# destructive_action_token(), permission_change_token(), ...) for their
-# highest-blast-radius single actions — those stay exactly as they are and
-# do NOT register here; this registry exists for domains that have no such
-# bespoke scheme (accounts, hr_payroll, sales, procurement, inventory) so
-# their plain create->update->submit/cancel/delete path — described in
-# 00-conventions.md's Non-negotiable 5 as "three distinct steps, never
-# chained" — gets a real code-level backstop for the submit/cancel/delete
-# step, instead of relying on prompt discipline alone to keep create/update
-# and submit separate turns. A domain registers the specific actions it
-# wants gated this way; omitting a domain here (or omitting an action)
-# means mutate_resource() applies no token check for it — either because
-# that domain gates it its own way (fixed_assets, system_admin) or because
-# nothing in it warrants one (mis's empty write allowlist, doc-extraction's
-# lack of a connector).
-DOMAIN_TOKEN_GATED_ACTIONS: dict = {}
-
-
-def register_domain_token_gate(domain: str, actions) -> None:
-    """Opt a domain's plain mutate_resource(domain=...) calls into the
-    shared advisory_write_token gate for the given actions (normally
-    {"submit", "cancel", "delete"} — create/update are the draft steps and
-    stay ungated here, they're what gets reviewed before this gate ever
-    triggers). Called once, at import time, alongside
-    register_domain_allowlist()."""
-    DOMAIN_TOKEN_GATED_ACTIONS[domain] = set(actions)
-
-
-def _require_advisory_token(action: str, doctype: str, name: str, payload: dict,
-                             requested_by: str, confirmation_token: str, issued_at) -> None:
-    """Shared verification logic behind the generic domain token gate above
-    — same freshness + exact-match-over-the-real-facts mechanics as
-    gated_mutate_resource() and each domain's own bespoke token check, just
-    factored out so mutate_resource() can apply it without duplicating the
-    three checks inline."""
-    if not confirmation_token or issued_at is None:
-        raise ConnectorError(
-            f"Refusing {action} on '{doctype}': this step requires a fresh "
-            f"confirmation_token + issued_at. Show the reviewed draft/impact to the user, "
-            f"get an explicit confirmation, compute the token via "
-            f"confirm_token.py's advisory-token CLI (or advisory_write_token()) over these "
-            f"exact (action, doctype, name, payload, requested_by, issued_at) facts, and "
-            f"pass it here — never hand-construct one."
-        )
-    if not is_fresh(int(issued_at)):
-        raise StaleConfirmationError(
-            f"This confirmation for {action} on '{doctype}' has expired or its issued_at is "
-            f"implausible — re-show the current draft/impact to the user, reconfirm, and get "
-            f"a fresh token before retrying."
-        )
-    expected = advisory_write_token(action, doctype, name, payload or {}, requested_by, int(issued_at))
-    if confirmation_token != expected:
-        raise ConnectorError(
-            f"confirmation_token does not match the (action, doctype, name, payload, "
-            f"requested_by, issued_at) facts actually being submitted for {action} on "
-            f"'{doctype}' — recompute it over exactly what was shown to and confirmed by the "
-            f"user, don't hand-construct one."
-        )
+# Confirmation-token policy lives on each operation in core/operations.py
+# (the former DOMAIN_TOKEN_GATED_ACTIONS / register_domain_token_gate() /
+# _require_advisory_token() registry was folded into it — write-path
+# hardening ticket 10).
 
 
 class ConnectorError(Exception):
     """Raised for missing config / auth / HTTP failures with a specific, actionable message."""
 
 
-class ReadOnlyModeError(ConnectorError):
+class GateRefusal(ConnectorError):
+    """Base for every refusal by a write/read GATE (mode, requester,
+    allowlist, ownership, precondition, confirmation token) — as opposed to
+    a transport failure or an error ERPNext itself returned. A refusal
+    always happens before the write is sent. execute_write.py maps this to
+    its own exit code so an agent can tell "refused, nothing happened"
+    apart from "ERPNext rejected it" or "outcome unknown"."""
+
+
+class ReadOnlyModeError(GateRefusal):
     """Raised when a write call is attempted while qkeee_erp.mode == read-only."""
 
 
-class MissingRequesterError(ConnectorError):
+class MissingRequesterError(GateRefusal):
     """Raised when a write call is attempted without a requested_by identity."""
 
 
-class UnvalidatedProdRequesterError(ConnectorError):
+class UnvalidatedProdRequesterError(GateRefusal):
     """Raised, on every tag (name reflects a narrower PROD-only origin —
     the gate is universal, see _validate_prod_requester()), when
     requested_by is missing, isn't a real ERPNext User, or lacks the
@@ -349,12 +289,62 @@ class UnvalidatedProdRequesterError(ConnectorError):
     frappe.client.has_permission check."""
 
 
-class StaleConfirmationError(ConnectorError):
+class TransportTimeoutError(ConnectorError):
+    """Raised when ERPNext did not answer in time (connect or read
+    timeout). For a write the outcome is UNKNOWN: the request may have
+    landed. Re-read the target record before any retry - never blindly
+    resend a create."""
+
+
+class MalformedResponseError(ConnectorError):
+    """Raised when ERPNext (or something in front of it, e.g. a WAF
+    challenge page) answered with a body that is not valid JSON."""
+
+
+class InvalidIssuedAtError(GateRefusal):
+    """Raised when a confirmation token's issued_at is not an integer
+    epoch-seconds value."""
+
+
+def coerce_issued_at(issued_at) -> int:
+    """The one place a confirmation token's `issued_at` is turned into an
+    int. A bad value raises InvalidIssuedAtError (a ConnectorError, so
+    every caller's existing handler catches it) instead of a bare
+    ValueError/TypeError traceback. Callers check for None themselves
+    first, since "missing" gets its own clearer message."""
+    if isinstance(issued_at, bool):
+        raise InvalidIssuedAtError(f"issued_at must be integer epoch seconds, got {issued_at!r}.")
+    try:
+        return int(issued_at)
+    except (TypeError, ValueError):
+        raise InvalidIssuedAtError(
+            f"issued_at must be integer epoch seconds (as printed by the render/token "
+            f"step), got {issued_at!r}."
+        ) from None
+
+
+def finish_audit_failure_and_reraise(cfg: dict, audit_log_name, exc: BaseException):
+    """Shared failure path for every audited write: close the audit row as
+    Failure for ANY exception (not just ConnectorError - an uncaught
+    exception would otherwise leave the row stuck at 'Attempted'), then
+    re-raise as a ConnectorError so callers' handlers and the CLI's
+    `ERROR:` path still apply. A TransportTimeoutError is flagged
+    outcome_unknown in the audit row."""
+    detail = str(exc) or type(exc).__name__
+    if isinstance(exc, TransportTimeoutError):
+        detail = f"outcome_unknown=True; {detail}"
+    record_audit_log_finish(cfg, audit_log_name, status="Failure", error_detail=detail)
+    if isinstance(exc, ConnectorError):
+        raise exc
+    raise ConnectorError(f"Unexpected {type(exc).__name__} during write: {exc}") from exc
+
+
+class StaleConfirmationError(GateRefusal):
     """Raised when a confirmation_token's issued_at is too old (or implausibly
     future) — re-render the draft against current data and reconfirm."""
 
 
-class UnconfirmedByUserError(ConnectorError):
+class UnconfirmedByUserError(GateRefusal):
     """Raised by gated_mutate_resource() when user_confirmation_text is
     missing, or doesn't contain the confirmation_token's derived
     confirmation_code — see confirm_token.confirmation_code()'s own
@@ -368,7 +358,28 @@ class UnconfirmedByUserError(ConnectorError):
     onto, unlike e.g. procurement's Supplier-KYC gate)."""
 
 
-class DoctypeNotAllowedError(ConnectorError):
+class ConfirmationRequiredError(GateRefusal):
+    """Raised when an operation needs a confirmation_token + issued_at and
+    none was given — render it first (confirm_token.py render)."""
+
+
+class TokenMismatchError(GateRefusal):
+    """Raised when confirmation_token doesn't match the operation token
+    recomputed over the exact request about to be sent."""
+
+
+class PreconditionFailedError(GateRefusal):
+    """Raised by an operation precondition (concurrency check, KYC
+    completeness, kind/doctype binding, ...) before anything is sent."""
+
+
+class PartialOutcomeError(ConnectorError):
+    """Raised when a write failed part-way and some of its effects DID
+    land (e.g. a depreciation run that posted some Journal Entries before
+    failing). The message says what is known to have happened."""
+
+
+class DoctypeNotAllowedError(GateRefusal):
     """Raised when mutate_resource(domain=...) targets a doctype outside
     that domain's registered ALLOWED_WRITE_DOCTYPES (or the domain itself
     is unknown/unregistered) — see the write-allowlist gate section above."""
@@ -700,7 +711,7 @@ def _requester_has_role_permission(tag: str, doctype: str, perm_type: str, reque
 
 
 def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_type: str,
-                              docname: str = None, *, domain: str = None,
+                              docname: str = None, *, for_write: bool = False, domain: str = None,
                               advisory_token_verified: bool = False,
                               session_id: str = None, domain_code: str = None,
                               channel: str = None, channel_metadata: dict = None,
@@ -729,7 +740,10 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     context every other audit row gets — no effect on the actual
     decision.
 
-    No-op for any doctype in PROD_GATE_EXEMPT_DOCTYPES, on every tag.
+    No-op for any doctype in PROD_GATE_EXEMPT_DOCTYPES on a read, or in the
+    much narrower WRITE_GATE_EXEMPT_DOCTYPES when `for_write=True` (always
+    passed by mutate_resource()) - see that set's comment for why User/
+    Role/DocType writes are gated even though their reads are not.
     Otherwise:
 
     - Presence of `requested_by` is mandatory on EVERY tag, no exceptions.
@@ -752,7 +766,8 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     run_query_report()/mutate_resource() — every read and write. Every
     raise, and the final allow, is also logged to Qkeee Bot Audit Log as
     one gate-decision row — a denial otherwise leaves zero trace."""
-    if doctype in PROD_GATE_EXEMPT_DOCTYPES:
+    exempt = WRITE_GATE_EXEMPT_DOCTYPES if for_write else PROD_GATE_EXEMPT_DOCTYPES
+    if doctype in exempt:
         return
 
     def _log(allowed: bool, detail: dict) -> None:
@@ -935,8 +950,17 @@ def _qkeee_env() -> dict:
     return merged
 
 
-def get_env_config(tag: str = "default") -> dict:
+CREDENTIALS = ("bot", "admin")
+
+
+def get_env_config(tag: str = "default", credential: str = "bot") -> dict:
     """Resolve base_url/api_key/api_secret for a given environment tag.
+
+    `credential="admin"` (decision D1, write-path hardening) selects the
+    separate elevated key pair QKEEE_ERP_<TAG>_ADMIN_API_KEY/_SECRET —
+    held by a System Manager account, used ONLY by operations declared
+    with credential="admin" (system_admin writes, provisioning). The base
+    URL is shared with the tag. The everyday bot credential stays narrow.
 
     Fails with a specific "missing QKEEE_ERP_<TAG>_API_KEY" style error,
     never a generic auth failure.
@@ -952,17 +976,20 @@ def get_env_config(tag: str = "default") -> dict:
     supplied by the caller, resolved fresh from the inbound channel
     identity; see resolve_requested_by() / the module docstring.
     """
+    if credential not in CREDENTIALS:
+        raise ConnectorError(f"Unknown credential {credential!r}; expected one of {CREDENTIALS}.")
+    prefix = "ADMIN_" if credential == "admin" else ""
     env = _qkeee_env()
     base_url = env.get(_tag_env_var(tag, "BASE_URL"))
-    api_key = env.get(_tag_env_var(tag, "API_KEY"))
-    api_secret = env.get(_tag_env_var(tag, "API_SECRET"))
+    api_key = env.get(_tag_env_var(tag, f"{prefix}API_KEY"))
+    api_secret = env.get(_tag_env_var(tag, f"{prefix}API_SECRET"))
 
     missing = [
         name
         for name, val in (
             (_tag_env_var(tag, "BASE_URL"), base_url),
-            (_tag_env_var(tag, "API_KEY"), api_key),
-            (_tag_env_var(tag, "API_SECRET"), api_secret),
+            (_tag_env_var(tag, f"{prefix}API_KEY"), api_key),
+            (_tag_env_var(tag, f"{prefix}API_SECRET"), api_secret),
         )
         if not val
     ]
@@ -987,6 +1014,7 @@ def get_env_config(tag: str = "default") -> dict:
         "base_url": base_url,
         "api_key": api_key,
         "api_secret": api_secret,
+        "credential": credential,
     }
 
 
@@ -1005,10 +1033,14 @@ def _request(cfg: dict, method: str, path: str, params: dict = None, payload: di
     # Always send an explicit UA.
     req.add_header("User-Agent", "qkeee-erp-associate/1.0")
 
+    is_write = method.upper() != "GET"
+    unknown_outcome = (" The write's outcome is UNKNOWN - it may have landed. Re-read the "
+                       "target record before any retry; never blindly resend." if is_write else "")
+    timeout_msg = (f"Timed out waiting for '{cfg['tag']}' ({cfg['base_url']}) on "
+                   f"{method} {path}.{unknown_outcome}")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body) if body else {}
+            raw = resp.read()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         raise ConnectorError(
@@ -1016,9 +1048,27 @@ def _request(cfg: dict, method: str, path: str, params: dict = None, payload: di
             f"({cfg['base_url']}): {body[:500]}"
         ) from e
     except urllib.error.URLError as e:
+        if isinstance(e.reason, TimeoutError):
+            raise TransportTimeoutError(timeout_msg) from e
         raise ConnectorError(
             f"Could not reach '{cfg['tag']}' ({cfg['base_url']}): {e.reason}. "
             f"Check the base URL and network connectivity."
+        ) from e
+    except TimeoutError as e:  # socket.timeout is an alias of TimeoutError since 3.10
+        raise TransportTimeoutError(timeout_msg) from e
+    except (ConnectionError, http.client.HTTPException) as e:
+        raise ConnectorError(
+            f"Connection to '{cfg['tag']}' ({cfg['base_url']}) failed during {method} {path}: "
+            f"{type(e).__name__}: {e}.{unknown_outcome}"
+        ) from e
+    try:
+        body = raw.decode("utf-8")
+        return json.loads(body) if body else {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        snippet = raw[:200].decode("utf-8", errors="replace")
+        raise MalformedResponseError(
+            f"'{cfg['tag']}' ({cfg['base_url']}) returned a non-JSON body on {method} {path} "
+            f"(often a WAF/proxy page, not ERPNext itself): {snippet!r}"
         ) from e
 
 
@@ -1162,6 +1212,33 @@ def get_resource(tag: str, doctype: str, name: str, strip_noise: bool = True,
               internal=internal)
 
     return {"data": data}
+
+
+def read_rpc(tag: str, method: str, path: str, *, gate_doctype: str, requested_by: str,
+             params: dict = None, payload: dict = None, gate_ptype: str = "read",
+             log_doctype: str = None, log_name: str = None,
+             session_id: str = None, domain_code: str = None, channel: str = None,
+             channel_metadata: dict = None, prompt_summary: str = None,
+             latest_prompt: str = None, credential: str = "bot") -> dict:
+    """A READ made through a whitelisted RPC method (GET, or POST for an
+    RPC that only computes and persists nothing) — gated and logged
+    exactly like query_resource()/get_resource() (write-path hardening
+    W13). `gate_doctype`/`gate_ptype` name the permission the requester
+    must hold for this read; `log_doctype`/`log_name` name what the audit
+    Read row points at (defaults: gate_doctype, no name). `credential`
+    selects the key pair that SENDS the read ("admin" for System-Manager-
+    only methods); the gate and the audit row always use the bot's."""
+    _validate_prod_requester(tag, requested_by, gate_doctype, gate_ptype, docname=log_name,
+                              session_id=session_id, domain_code=domain_code,
+                              channel=channel, channel_metadata=channel_metadata,
+                              prompt_summary=prompt_summary, latest_prompt=latest_prompt)
+    cfg = get_env_config(tag)
+    send_cfg = cfg if credential == "bot" else get_env_config(tag, credential=credential)
+    result = _request(send_cfg, method, path, params=params, payload=payload)
+    _log_read(cfg, log_doctype or gate_doctype, log_name, requested_by, session_id, domain_code,
+              channel, channel_metadata, response_payload=result,
+              prompt_summary=prompt_summary, latest_prompt=latest_prompt)
+    return result
 
 
 def resource_exists(tag: str, doctype: str, name: str) -> bool:
@@ -1607,6 +1684,46 @@ def _log_gate_decision(tag: str, *, perm_type: str, doctype: str, docname: str, 
 
 
 # qkeee-erp:write-path
+# Field names whose VALUES are masked in audit payload_before/payload_after/
+# field_diff regardless of their shape (write-path hardening W19) — on top
+# of the pattern-based redact_pii() pass. Extend per environment with
+# QKEEE_ERP_AUDIT_MASK_FIELDS (comma-separated).
+AUDIT_MASK_FIELDS = {
+    "bank_ac_no", "iban", "pan", "aadhaar", "aadhaar_number", "passport_number",
+    "api_key", "api_secret", "new_password", "password",
+}
+_MASKED = "***masked***"
+
+
+def _audit_mask_fields() -> set:
+    extra = _qkeee_env().get("QKEEE_ERP_AUDIT_MASK_FIELDS") or ""
+    return AUDIT_MASK_FIELDS | {x.strip() for x in extra.split(",") if x.strip()}
+
+
+def _redact_audit_payload(obj, mask=None):
+    """Mask denylisted field values (any depth), then pattern-redact."""
+    mask = _audit_mask_fields() if mask is None else mask
+    if isinstance(obj, dict):
+        return {k: (_MASKED if k in mask and v not in (None, "") else _redact_audit_payload(v, mask))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_audit_payload(x, mask) for x in obj]
+    return _redact_pii_deep(obj)
+
+
+def _redact_field_diff(diff: list) -> list:
+    """field_diff is computed on the RAW payloads (so a masked field still
+    shows up as changed), then each entry is redacted."""
+    mask = _audit_mask_fields()
+    out = []
+    for entry in diff:
+        if entry.get("fieldname") in mask:
+            out.append({"fieldname": entry["fieldname"], "old": "***changed***", "new": "***changed***"})
+        else:
+            out.append(_redact_audit_payload(entry, mask))
+    return out
+
+
 def record_audit_log_start(cfg: dict, *, action: str, doctype: str, name: str, requested_by: str,
                             session_id: str = None, domain_code: str = None,
                             channel: str = None, channel_metadata: dict = None,
@@ -1635,7 +1752,7 @@ def record_audit_log_start(cfg: dict, *, action: str, doctype: str, name: str, r
         "requested_by": requested_by or "",
         "timestamp": _now_iso(),
         "status": "Attempted",
-        "payload_before": json.dumps(payload_before) if payload_before else None,
+        "payload_before": json.dumps(_redact_audit_payload(payload_before)) if payload_before else None,
         "user_approved": "Approved" if user_approved else "Not Confirmed",
         "approval_note": redact_pii(approval_note) if approval_note else approval_note,
         "prompt_summary": _truncate_str(redact_pii(prompt_summary), PROMPT_SUMMARY_MAX_LEN) if prompt_summary else None,
@@ -1660,10 +1777,10 @@ def record_audit_log_finish(cfg: dict, log_name: str, *, status: str, reference_
     if reference_name:
         fields["reference_name"] = reference_name
     if payload_after is not None:
-        fields["payload_after"] = json.dumps(payload_after)
+        fields["payload_after"] = json.dumps(_redact_audit_payload(payload_after))
         diff = _diff_fields(payload_before, payload_after)
         if diff:
-            fields["field_diff"] = json.dumps(diff)
+            fields["field_diff"] = json.dumps(_redact_field_diff(diff))
     if error_detail:
         fields["error_detail"] = error_detail[:1900]  # Small Text-ish headroom
     if audit_comment_posted is not None:
@@ -1679,293 +1796,57 @@ def record_audit_log_finish(cfg: dict, log_name: str, *, status: str, reference_
 # --------------------------------------------------------------------------
 
 # qkeee-erp:write-path
+def _operations():
+    """Lazy import: core/operations.py imports this module."""
+    try:
+        from core import operations
+    except ImportError:  # run with core/ itself on sys.path
+        import operations
+    return operations
+
+
 def mutate_resource(tag: str, doctype: str, action: str, payload: dict = None,
                      name: str = None, mode: str = "read-only", requested_by: str = None,
-                     skip_comment: bool = False,
-                     *, domain: str = None, skill_label: str = None,
-                     session_id: str = None, domain_code: str = None,
-                     channel: str = None, channel_metadata: dict = None,
-                     user_approved: bool = False, approval_note: str = None,
-                     confirmation_token: str = None, issued_at: int = None,
-                     advisory_token_verified: bool = False,
-                     prompt_summary: str = None, latest_prompt: str = None) -> dict:
-    """Generic resource mutate — create/update/submit/cancel/delete a
-    DocType record. The one shared write entry point every domain module's
-    own `mutate()` wrapper calls into (see scripts/domains/*.py).
+                     skip_comment: bool = False, *, domain: str = None, **kwargs) -> dict:
+    """COMPATIBILITY SHIM over core.operations.run_operation(f"{domain}.generic").
 
-    `domain` (see the write-allowlist gate section in this
-    module's docstring): when given, this doctype must appear in
-    DOMAIN_WRITE_ALLOWLISTS[domain] (registered by that domain module at
-    import time via register_domain_allowlist()) or this call is refused
-    with DoctypeNotAllowedError — refused too if `domain` itself was never
-    registered (an unregistered/unimported domain is treated as unknown,
-    not as unrestricted, so a typo'd domain name fails closed rather than
-    silently bypassing the gate). `domain=None` (the default) applies NO
-    allowlist restriction — reserved for gated_mutate_resource()'s own
-    call site and any other core-level caller that intentionally operates
-    outside domain scope; a domain module should always pass its own name.
+    Every write now runs through the operation pipeline (mode, requester,
+    allowlist, ownership, preconditions, confirmation token, RBAC, audit
+    — in that order). `domain` is REQUIRED: the former `domain=None`
+    path wrote to any doctype with no allowlist and no token (write-path
+    hardening W04). For a doctype no domain owns, use
+    gated_mutate_resource() (operation "unscoped.generic").
 
-    `mode` must be passed explicitly by the caller (sourced from
-    metadata.hermes.config qkeee_erp.mode) — this function refuses to
-    guess a safe default and refuses to write unless mode == "read-write".
+    Token policy is the operation's, not the caller's: create/update are
+    ungated draft steps; submit/cancel/delete need a confirmation_token +
+    issued_at + user_confirmation_text from `confirm_token.py render`,
+    plus `expected_modified` (the record's `modified` at render time).
 
-    `requested_by` (the ERPNext user id/email of the human who asked for
-    this change) is required for every write — the connector authenticates
-    as a shared bot account, so without this the ERPNext audit trail would
-    show only the bot, never who actually asked. On success, a best-effort
-    Comment naming the requester is posted to the affected record (see
-    record_comment()).
-
-    `skip_comment=True` suppresses that default Comment — for a caller
-    that's about to post its own, more specific attribution comment right
-    after this call returns. Qkeee Bot Audit Log logging is unaffected
-    either way; only the ERPNext-side Comment is skipped.
-
-    `skill_label` overrides the "[...]" prefix on that default Comment
-    (defaults to `f"qkeee-erp-associate/{domain}"` when `domain` is given,
-    else the module-level SKILL_LABEL) — so a Comment reads e.g.
-    "[qkeee-erp-associate/accounts] created ..." rather than a generic
-    label, without every domain needing its own copy of _do_mutate().
-
-    `user_approved` should be True only when the caller actually ran this
-    write's confirm stage with the user first — it's logged to Qkeee Bot
-    Audit Log's `user_approved` field for later scanning, not enforced as
-    a gate here. Defaults to False deliberately: a caller that forgets to
-    pass it shows up as "Not Confirmed" on scan, which is the intended
-    detection behavior, not a silent default.
-
-    `confirmation_token`/`issued_at`: required, verified in code (not just
-    prompt discipline), whenever `domain` has registered this `action` via
-    register_domain_token_gate() — normally submit/cancel/delete, never
-    create/update (the draft steps this gate exists to be reviewed
-    *before*). See DOMAIN_TOKEN_GATED_ACTIONS above. Ignored for a domain/
-    action combination that hasn't opted in — either because that domain
-    carries its own bespoke, stricter token scheme instead (fixed_assets,
-    system_admin) or because nothing about it warrants one.
-
-    `advisory_token_verified`: INTERNAL — set True only by
-    gated_mutate_resource() calling into this function, after ITS OWN
-    unconditional confirmation_token/issued_at verification against a
-    rendered advisory draft already passed. Not exposed on any domain
-    module's mutate() wrapper or the CLI; a caller asserting this
-    directly would be lying about a verification that never happened, so
-    nothing outside this file should ever pass it. Feeds
-    _validate_prod_requester()'s RBAC-pre-check-unreliable fallback: a
-    write on a doctype no domain owns (e.g. Company) still gets credited
-    with a reviewed safety net if it went through the mandatory
-    draft-then-confirm flow, same as a domain-scoped write's allowlist.
-    """
-    _VALID_ACTIONS = {"create", "update", "submit", "cancel", "delete"}
-    if action not in _VALID_ACTIONS:
-        # Common failure mode: a caller swaps the (doctype, action)
-        # positional args. Catching it here, before any side effect, gives
-        # the actual likely cause instead of a symptom.
-        hint = (
-            f" This looks like doctype/action were swapped — mutate_resource(tag, doctype, "
-            f"action, ...) takes doctype BEFORE action; got doctype='{doctype}', action='{action}'."
-            if doctype in _VALID_ACTIONS else ""
+    `skip_comment` and the former `skill_label`/`advisory_token_verified`
+    keywords are accepted and ignored — comments and labels are decided
+    by the operation."""
+    if domain is None:
+        raise DoctypeNotAllowedError(
+            f"Refusing {action} on '{doctype}': mutate_resource() requires domain=. A write "
+            f"to a doctype no domain owns goes through gated_mutate_resource() (operation "
+            f"'unscoped.generic'), which needs a rendered confirmation token."
         )
-        raise ConnectorError(
-            f"Invalid action '{action}' for doctype '{doctype}'. Expected one of "
-            f"{sorted(_VALID_ACTIONS)}.{hint}"
-        )
-    if mode != "read-write":
-        raise ReadOnlyModeError(
-            f"Refusing {action} on '{doctype}': qkeee_erp.mode is '{mode}', not 'read-write'. "
-            f"Switch modes explicitly if this write is intended."
-        )
-    if not requested_by:
-        raise MissingRequesterError(
-            f"Refusing {action} on '{doctype}': requested_by is missing. There is no "
-            f"env-var or config default for it — resolve the inbound channel identity "
-            f"(the requesting user's own work email/chat identity) as a real ERPNext "
-            f"User and pass it explicitly via --requested-by / requested_by= for this "
-            f"call."
-        )
-    if domain is not None:
-        allowed = DOMAIN_WRITE_ALLOWLISTS.get(domain)
-        if allowed is None:
-            raise DoctypeNotAllowedError(
-                f"Refusing {action} on '{doctype}': domain '{domain}' has no registered "
-                f"ALLOWED_WRITE_DOCTYPES (either an unknown domain name, or its "
-                f"scripts/domains/{domain}.py module hasn't been imported yet in this "
-                f"process — register_domain_allowlist() runs at import time)."
-            )
-        if doctype not in allowed:
-            raise DoctypeNotAllowedError(
-                f"Refusing {action} on '{doctype}': not in domain '{domain}''s "
-                f"ALLOWED_WRITE_DOCTYPES {allowed!r}. If '{doctype}' genuinely belongs to "
-                f"this domain's remit, add it to that tuple deliberately; don't route "
-                f"around this gate."
-            )
-    if domain is not None and action in DOMAIN_TOKEN_GATED_ACTIONS.get(domain, ()):
-        _require_advisory_token(action, doctype, name, payload, requested_by,
-                                 confirmation_token, issued_at)
-    _validate_prod_requester(tag, requested_by, doctype, _MUTATE_ACTION_TO_PTYPE[action],
-                              docname=name, domain=domain,
-                              advisory_token_verified=advisory_token_verified,
-                              session_id=session_id, domain_code=domain_code,
-                              channel=channel, channel_metadata=channel_metadata,
-                              prompt_summary=prompt_summary, latest_prompt=latest_prompt)
-
-    cfg = get_env_config(tag)
-    effective_skill_label = skill_label or (f"qkeee-erp-associate/{domain}" if domain else SKILL_LABEL)
-
-    # Pre-image for Update's field_diff — an extra GET, only when this
-    # doctype is actually audited (skip for any AUDIT_EXEMPT_DOCTYPES
-    # entry, and skip when the doctype isn't exempt but the target
-    # simply doesn't need diffing, e.g. Create has no "before"). Passes
-    # the write's own `requested_by` through (not `internal=True`): the
-    # pre-image read is a real, legitimate access made on the requester's
-    # behalf, so it is gated by _validate_prod_requester() and logged
-    # exactly like any other read, attributed to the same requester and
-    # carrying the same context as the write it's supporting. A
-    # ConnectorError here (e.g. the requester lacks read permission on
-    # this doctype) is swallowed — `payload_before` stays None and the
-    # write proceeds without a `field_diff` rather than failing the write
-    # over a diagnostic-only diff.
-    payload_before = None
-    if action == "update" and doctype not in AUDIT_EXEMPT_DOCTYPES and name:
-        try:
-            payload_before = get_resource(tag, doctype, name, strip_noise=False,
-                                           requested_by=requested_by,
-                                           session_id=session_id, domain_code=domain_code,
-                                           channel=channel, channel_metadata=channel_metadata,
-                                           prompt_summary=prompt_summary, latest_prompt=latest_prompt
-                                           ).get("data")
-        except ConnectorError:
-            payload_before = None
-
-    audit_log_name = record_audit_log_start(
-        cfg, action=action.capitalize(), doctype=doctype, name=name, requested_by=requested_by,
-        session_id=session_id, domain_code=domain_code, channel=channel, channel_metadata=channel_metadata,
-        payload_before=payload_before,
-        user_approved=user_approved, approval_note=approval_note,
-        prompt_summary=prompt_summary, latest_prompt=latest_prompt,
-    )
-
-    try:
-        result = _do_mutate(cfg, doctype, action, payload, name, requested_by,
-                             skip_comment=skip_comment, skill_label=effective_skill_label)
-    except ConnectorError as e:
-        record_audit_log_finish(cfg, audit_log_name, status="Failure", error_detail=str(e))
-        raise
-
-    # Success path: extract whatever's usable as payload_after / the
-    # audit-comment outcome to close out the Attempted row.
-    data = result.get("data") if isinstance(result, dict) else None
-    if data is None and isinstance(result, dict):
-        data = result.get("message")  # submit/cancel return {"message": {...}} instead of {"data": {...}}
-    reference_name = (data or {}).get("name") if isinstance(data, dict) else name
-    if not reference_name:
-        print(
-            f"WARN: {action} on '{doctype}' returned no usable reference name "
-            f"(result keys: {sorted(result.keys()) if isinstance(result, dict) else type(result)}) "
-            f"— Audit Log row {audit_log_name!r} will have a blank Reference Name despite status=Success.",
-            file=sys.stderr,
-        )
-    audit_comment_posted = result.pop("_audit_comment_posted", None) if isinstance(result, dict) else None
-    finish_ok = record_audit_log_finish(
-        cfg, audit_log_name, status="Success", reference_name=reference_name,
-        payload_before=payload_before, payload_after=data if isinstance(data, dict) else None,
-        audit_comment_posted=audit_comment_posted,
-    )
-    if isinstance(result, dict):
-        # Surfaced so a caller (hermes) can proactively flag degraded audit
-        # logging to the user instead of relying on someone reading stderr —
-        # a stale/malformed session_id can silently drop Audit Log rows
-        # for days before anyone notices. "exempt" (doctype in
-        # AUDIT_EXEMPT_DOCTYPES) and "ok" are both healthy; anything else
-        # means this write is NOT in the audit trail.
-        if doctype in AUDIT_EXEMPT_DOCTYPES:
-            result["_audit_log_status"] = "exempt"
-        elif audit_log_name is None:
-            result["_audit_log_status"] = "insert_failed"
-        elif not finish_ok:
-            result["_audit_log_status"] = "update_failed"
-        else:
-            result["_audit_log_status"] = "ok"
-    return result
+    return _operations().call_generic(f"{domain}.generic", tag, doctype, action, payload=payload,
+                                      name=name, mode=mode, requested_by=requested_by, **kwargs)
 
 
 def gated_mutate_resource(tag: str, doctype: str, action: str, payload: dict = None,
                            name: str = None, mode: str = "read-only", requested_by: str = None,
-                           *, confirmation_token: str = None, issued_at: int = None,
-                           user_confirmation_text: str = None,
-                           session_id: str = None, domain_code: str = None,
-                           channel: str = None, channel_metadata: dict = None,
-                           approval_note: str = None,
-                           prompt_summary: str = None, latest_prompt: str = None) -> dict:
-    """The associate's own write entry point for whatever doesn't fit a
-    named domain — wraps mutate_resource() with the token-gated advisory-first
-    check every such write goes through, unconditionally. Unlike a domain
-    module's own `mutate()` wrapper, this is deliberately called WITHOUT
-    `domain=` (no ALLOWED_WRITE_DOCTYPES restriction): nothing routed
-    through here has had the design-time capability review that lets a
-    named domain module declare a fixed allowlist ahead of time — the
-    confirmation-token gate is the control instead.
-
-    confirmation_token/issued_at must come from a render_draft.py's output
-    for this exact (action, doctype, name, payload, requested_by) — see
-    confirm_token.py for the token/freshness mechanics. A caller that
-    tries to skip the render step (e.g. passing a token computed ad hoc,
-    or an old one) is refused here, in code, not just by prompt
-    discipline.
-
-    `user_confirmation_text`: the literal text of the user's own reply
-    confirming the rendered draft. Required, and must contain
-    `confirm_token.confirmation_code(confirmation_token)` (the short code
-    the render step is expected to have shown the user) — see
-    UnconfirmedByUserError and confirmation_code()'s own docstring for
-    exactly what this does and doesn't prove. This check is additional
-    to, not instead of, the confirmation_token match below: the token
-    proves the payload matches what was rendered, this proves (within
-    this skill's existing trust model — see confirmation_code()'s
-    docstring) that a reply from the user actually referenced it.
-    """
-    if not confirmation_token or issued_at is None:
-        raise ConnectorError(
-            f"Refusing {action} on '{doctype}': gated_mutate_resource requires "
-            f"confirmation_token + issued_at — render the draft first and pass its exact "
-            f"token and issued_at here."
-        )
-    if not is_fresh(int(issued_at)):
-        raise StaleConfirmationError(
-            "This draft's confirmation has expired or its issued_at is implausible — "
-            "re-render the draft against current data and reconfirm before retrying."
-        )
-    expected = advisory_write_token(action, doctype, name, payload or {}, requested_by, int(issued_at))
-    if confirmation_token != expected:
-        raise ConnectorError(
-            "confirmation_token does not match the (action, doctype, name, payload, "
-            "requested_by, issued_at) facts — re-render the draft against the current data "
-            "and use that token; don't hand-construct one."
-        )
-    expected_code = confirmation_code(confirmation_token)
-    if not user_confirmation_text:
-        raise UnconfirmedByUserError(
-            f"Refusing {action} on '{doctype}': gated_mutate_resource requires "
-            f"user_confirmation_text — the literal text of the user's own reply. Show them "
-            f"confirmation_code {expected_code!r} in the rendered draft, ask them to include "
-            f"it in their confirmation, and pass their actual reply text here. Do not "
-            f"construct this string yourself — see confirm_token.confirmation_code()'s "
-            f"docstring for why that would defeat the point of this check."
-        )
-    if expected_code not in user_confirmation_text.upper():
-        raise UnconfirmedByUserError(
-            f"Refusing {action} on '{doctype}': user_confirmation_text does not contain "
-            f"confirmation_code {expected_code!r} — either the user replied to a different/"
-            f"stale draft, or this code was never actually shown to them. Re-render and "
-            f"reconfirm; never fabricate a reply that happens to contain the right code."
-        )
-
-    return mutate_resource(
-        tag, doctype, action, payload=payload, name=name, mode=mode, requested_by=requested_by,
-        session_id=session_id, domain_code=domain_code, channel=channel, channel_metadata=channel_metadata,
-        user_approved=True, approval_note=approval_note or "gated_mutate_resource: advisory draft confirmed",
-        advisory_token_verified=True,
-        prompt_summary=prompt_summary, latest_prompt=latest_prompt,
-    )
+                           **kwargs) -> dict:
+    """COMPATIBILITY SHIM over core.operations.run_operation("unscoped.generic")
+    — the write path for a doctype no domain owns (e.g. Item). Every action
+    needs a confirmation_token + issued_at + user_confirmation_text (the
+    user's own reply containing confirmation_code(token)) computed by
+    `confirm_token.py render --op unscoped.generic` over the exact request.
+    Doctypes owned by a domain or by a gated operation, and privilege/
+    system doctypes (operations.UNSCOPED_DENY), are refused."""
+    return _operations().call_generic("unscoped.generic", tag, doctype, action, payload=payload,
+                                      name=name, mode=mode, requested_by=requested_by, **kwargs)
 
 
 # qkeee-erp:write-path
@@ -2102,26 +1983,27 @@ def _parse_json_arg(flag: str, raw: str, expected_type: type):
 
 
 def _cli():
-    """Manual/debug CLI for the core connector. Domain-specific mutate
-    calls should go through each scripts/domains/<slug>.py module's own
-    `mutate()` wrapper (which always passes `domain=`) rather than this
-    generic `mutate` subcommand — this one is deliberately domain-
-    agnostic and exists for ad hoc/debug use and for gated-mutate (the
-    associate's own advisory-first write path, see gated_mutate_resource())."""
+    """Manual/debug CLI for the core connector: read-only subcommands only
+    (health, list-envs, query, get, report, roles).
+
+    There is deliberately no write subcommand here. Every write goes
+    through scripts/execute_write.py, which imports every domain module
+    (so allowlists and token gates are registered), applies schema
+    mapping, and warns on missing audit context. The former `mutate`
+    subcommand reached mutate_resource(domain=None) with no allowlist and
+    no token, and `gated-mutate` duplicated execute_write.py's domain-less
+    path without its checks - both removed (write-path hardening, W04/D4)."""
     p = argparse.ArgumentParser(description="qkeee-erp-associate core connector CLI")
-    p.add_argument("--tag", help="environment tag, from qkeee_erp.active_env (required for health/query/mutate)")
-    p.add_argument("--mode", choices=["read-only", "read-write"],
-                   help="from qkeee_erp.mode (required for mutate/gated-mutate)")
+    p.add_argument("--tag", help="environment tag, from qkeee_erp.active_env (required for health/query/get/report/roles)")
     p.add_argument("--requested-by",
                    help="ERPNext user id/email of the human requesting the change, for THIS call "
                         "only — resolve it from the live inbound channel identity (chat/email "
                         "sender) before passing it here; there is no env-var or config default "
-                        "to fall back on, mandatory on every read/write")
+                        "to fall back on, mandatory on every read")
     p.add_argument("--session-id", help="plain string correlator threaded into Qkeee Bot Audit Log rows")
     p.add_argument("--domain-code", help="e.g. qkeee-erp-associate — threaded into audit rows")
     p.add_argument("--channel", help="conversation surface, e.g. Discord/Telegram/WhatsApp/Email/Web/Slack/CLI/API/Other")
     p.add_argument("--channel-metadata", help='JSON object of channel-specific tracing detail')
-    p.add_argument("--approval-note", help="free text of what was confirmed (mutate only)")
     p.add_argument("--prompt-summary", help="one-line summary of the user request that led to this "
                                              "call — threaded into Qkeee Bot Audit Log rows")
     p.add_argument("--latest-prompt", help="verbatim most-recent user prompt from the driving chat "
@@ -2149,41 +2031,11 @@ def _cli():
     ur = sub.add_parser("roles", help="Fetch a user's assigned roles (authority-check heuristic)")
     ur.add_argument("--user", default="", help="defaults to the authenticated bot account's own user")
 
-    m = sub.add_parser("mutate", help="Domain-agnostic write via plain mutate_resource() — pass "
-                                       "--domain to apply that domain's ALLOWED_WRITE_DOCTYPES gate, "
-                                       "omit it only for core-level/debug use")
-    m.add_argument("doctype")
-    m.add_argument("action", choices=["create", "update", "submit", "cancel", "delete"])
-    m.add_argument("--payload", help="JSON object for create/update")
-    m.add_argument("--name", help="record name, required for update/submit/cancel/delete")
-    m.add_argument("--domain", help="registered domain name (see scripts/domains/*.py) to gate this "
-                                     "write against — import that domain module first so it's registered")
-    m.add_argument("--confirmation-token", help="required for submit/cancel/delete on a domain that has "
-                                                  "registered those actions via register_domain_token_gate() "
-                                                  "(see scripts/core/confirm_token.py's advisory-token CLI)")
-    m.add_argument("--issued-at", type=int, help="epoch seconds the confirmation token was computed at")
-
-    gm = sub.add_parser("gated-mutate", help="Advisory-first gated write — requires a token from a "
-                                              "render_*.py draft script (no domain allowlist)")
-    gm.add_argument("doctype")
-    gm.add_argument("action", choices=["create", "update", "submit", "cancel", "delete"])
-    gm.add_argument("--payload", help="JSON object for create/update")
-    gm.add_argument("--name", help="record name, required for update/submit/cancel/delete")
-    gm.add_argument("--confirmation-token", required=True)
-    gm.add_argument("--issued-at", type=int, required=True)
-    gm.add_argument("--user-confirmation-text", required=True,
-                     help="literal text of the user's own reply confirming the rendered draft "
-                          "— must contain confirm_token.confirmation_code(confirmation_token); "
-                          "see gated_mutate_resource()'s docstring")
-
     args = p.parse_args()
 
-    if args.command in ("health", "query", "get", "report", "roles", "mutate",
-                         "gated-mutate") and not args.tag:
+    if args.command in ("health", "query", "get", "report", "roles") and not args.tag:
         p.error(f"--tag is required for '{args.command}'")
-    if args.command in ("mutate", "gated-mutate") and not args.mode:
-        p.error(f"--mode is required for '{args.command}'")
-    if args.command in ("query", "get", "report", "mutate", "gated-mutate", "roles") and not args.session_id:
+    if args.command in ("query", "get", "report", "roles") and not args.session_id:
         args.session_id = _session_or_fallback(None)
 
     # requested_by is mandatory on every read/write, on every tag — no
@@ -2191,7 +2043,7 @@ def _cli():
     # pure pass-through of --requested-by. See resolve_requested_by().
     effective_requested_by = resolve_requested_by(args.requested_by)
 
-    if args.command in ("query", "get", "report", "mutate", "gated-mutate") and not effective_requested_by:
+    if args.command in ("query", "get", "report") and not effective_requested_by:
         p.error(
             f"--requested-by is required for '{args.command}' — there is no env-var or "
             f"config default. Resolve the inbound channel identity (the requesting "
@@ -2246,32 +2098,6 @@ def _cli():
                                              channel=args.channel, channel_metadata=channel_metadata,
                                              prompt_summary=args.prompt_summary,
                                              latest_prompt=args.latest_prompt), indent=2))
-        elif args.command == "mutate":
-            payload = _parse_json_arg("--payload", args.payload, dict)
-            print(json.dumps(
-                mutate_resource(args.tag, args.doctype, args.action, payload, args.name,
-                                 args.mode, effective_requested_by, domain=args.domain,
-                                 session_id=args.session_id, domain_code=args.domain_code,
-                                 channel=args.channel, channel_metadata=channel_metadata,
-                                 user_approved=bool(args.confirmation_token), approval_note=args.approval_note,
-                                 confirmation_token=args.confirmation_token, issued_at=args.issued_at,
-                                 prompt_summary=args.prompt_summary, latest_prompt=args.latest_prompt),
-                indent=2,
-            ))
-        elif args.command == "gated-mutate":
-            payload = _parse_json_arg("--payload", args.payload, dict)
-            print(json.dumps(
-                gated_mutate_resource(args.tag, args.doctype, args.action, payload, args.name,
-                                       args.mode, effective_requested_by,
-                                       confirmation_token=args.confirmation_token,
-                                       issued_at=args.issued_at,
-                                       user_confirmation_text=args.user_confirmation_text,
-                                       session_id=args.session_id, domain_code=args.domain_code,
-                                       channel=args.channel, channel_metadata=channel_metadata,
-                                       approval_note=args.approval_note,
-                                       prompt_summary=args.prompt_summary, latest_prompt=args.latest_prompt),
-                indent=2,
-            ))
     except ConnectorError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

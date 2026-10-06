@@ -3,32 +3,29 @@
 qkeee-erp-associate — fixed-assets domain (Asset lifecycle: depreciation,
 disposal, transfer).
 
-mutate_resource_with_concurrency() and call_whitelisted_method() (plus its
-_expected_token() helper) below are this domain's genuine business logic
-beyond the shared core connector.
+Every write is a named operation in core/operations.py's pipeline:
 
-call_whitelisted_method() wraps its RPC call with the same two-phase
-record_audit_log_start()/record_audit_log_finish() every other write path
-gets — depreciation runs, scraps, and disposals must be audited there too,
-even though they also post the usual ERPNext Comment; a Comment alone is
-not the audit trail.
+| Operation                     | What it does (ERPNext v16, verified 2026-10-06)        |
+|-------------------------------|---------------------------------------------------------|
+| fixed_assets.generic          | Asset / Asset Movement / Asset Repair create/update (drafts); submit/cancel/delete token-gated and refused if the record changed since render |
+| fixed_assets.depreciation_run | make_depreciation_entry(depr_schedule_name, date): posts a Journal Entry for every due, unbooked schedule row |
+| fixed_assets.scrap            | scrap_asset(asset_name, scrap_date): depreciation up to the date + scrap JE |
+| fixed_assets.restore          | restore_asset(asset_name): reverses disposal depreciation, CANCELS the scrap JE |
+| fixed_assets.sell             | creates a DRAFT Sales Invoice for the asset (mapped by make_sales_invoice, which itself persists nothing) |
 
-depreciation_run_token()/disposal_token() (in _expected_token() below)
-live here, not in core/confirm_token.py — see that module's docstring for
-why capability-specific token constructors stay with their owning domain.
+All four non-generic operations need a rendered token plus the user's
+confirmation code (the domain's double-confirm). Their token covers the
+exact RPC body and the facts shown to the user (book value, pending rows,
+reason). The depreciation slice indices `sch_start_idx`/`sch_end_idx`
+are never accepted (they force-post rows; W24); `scrap_date` is always
+explicit (W25).
 
-ALLOWED_WRITE_DOCTYPES: "Asset" (create/update/submit/cancel via
-render_asset_draft.py/render_movement_draft.py) plus "Asset Movement" and
-"Asset Repair", inferred from references/ and render_movement_draft.py.
-Depreciation/scrap/restore/disposal go through call_whitelisted_method()
-below, which bypasses mutate_resource()'s generic action set (and
-therefore this allowlist) entirely, same as in the original design —
-those four RPCs are individually named/gated (WHITELISTED_METHODS,
-TOKEN_REQUIRED_METHODS), not doctype-allowlisted.
+ALLOWED_WRITE_DOCTYPES: "Asset", "Asset Movement", "Asset Repair". The
+named RPC operations are individually reviewed and skip the doctype
+allowlist; fixed_assets.sell is checked against the accounts allowlist
+(it creates a Sales Invoice).
 """
 
-import hashlib
-import json
 import os
 import sys
 
@@ -37,12 +34,8 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from core import client as core_client
-from core.client import (
-    ConnectorError, ReadOnlyModeError, MissingRequesterError, StaleConfirmationError,
-    SKILL_LABEL, get_env_config, get_resource, mutate_resource, record_comment,
-    record_audit_log_start, record_audit_log_finish, _request,
-)
-from core.confirm_token import is_fresh
+from core import operations
+from core.operations import PreparedRequest, require_args
 
 DOMAIN_NAME = "fixed_assets"
 
@@ -53,218 +46,204 @@ ALLOWED_WRITE_DOCTYPES = (
 )
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
+operations.generic_operation(DOMAIN_NAME)
+
+_DEPRECIATION = "/api/method/erpnext.assets.doctype.asset.depreciation.make_depreciation_entry"
+_SCRAP = "/api/method/erpnext.assets.doctype.asset.depreciation.scrap_asset"
+_RESTORE = "/api/method/erpnext.assets.doctype.asset.depreciation.restore_asset"
+_MAP_SALES_INVOICE = "/api/method/erpnext.assets.doctype.asset.asset.make_sales_invoice"
+
+_READ_CTX = ("session_id", "domain_code", "channel", "channel_metadata",
+             "prompt_summary", "latest_prompt")
 
 
 def mutate(tag: str, doctype: str, action: str, **kwargs) -> dict:
-    """This domain's write entry point — plain mutate_resource() gated by
-    ALLOWED_WRITE_DOCTYPES above (domain="fixed_assets")."""
-    return core_client.mutate_resource(tag, doctype, action, domain=DOMAIN_NAME, **kwargs)
+    """Compatibility shim: operation "fixed_assets.generic"."""
+    return operations.call_generic(f"{DOMAIN_NAME}.generic", tag, doctype, action, **kwargs)
 
 
-# --------------------------------------------------------------------------
-# Token constructors — see module docstring's "SCOPE NOTE on confirm_token.py"
-# --------------------------------------------------------------------------
-
-def _compute_token(**fields) -> str:
-    canonical = json.dumps(fields, sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+def _get(ctx, doctype, name):
+    return core_client.get_resource(ctx.tag, doctype, name, strip_noise=False,
+                                    requested_by=ctx.requested_by, **ctx.audit_kwargs()).get("data") or {}
 
 
-def depreciation_run_token(asset: str, asset_depr_schedule: str, as_of_date: str,
-                            total_depreciation: float, issued_at: int) -> str:
-    return _compute_token(
-        kind="depreciation_run",
-        asset=asset,
-        asset_depr_schedule=asset_depr_schedule,
-        as_of_date=as_of_date,
-        total_depreciation=round(float(total_depreciation), 2),
-        issued_at=int(issued_at),
-    )
+# ---------------------------------------------------------------- depreciation run
+
+def _due_rows(schedule: dict, as_of: str) -> list:
+    return [r for r in schedule.get("depreciation_schedule") or []
+            if not r.get("journal_entry") and str(r.get("schedule_date") or "") <= as_of]
 
 
-def disposal_token(asset: str, method: str, disposal_date: str, amount: float, issued_at: int) -> str:
-    return _compute_token(
-        kind="disposal",
-        asset=asset,
-        method=method,
-        disposal_date=disposal_date,
-        amount=round(float(amount), 2),
-        issued_at=int(issued_at),
-    )
+def _depr_render(args, ctx):
+    import datetime
+    args = dict(args)
+    schedule = _get(ctx, "Asset Depreciation Schedule", args.get("depr_schedule_name"))
+    as_of = args.get("date") or datetime.date.today().isoformat()
+    due = _due_rows(schedule, as_of)
+    args.setdefault("asset", schedule.get("asset"))
+    args.setdefault("pending_rows", len(due))
+    args.setdefault("total_depreciation", round(sum(float(r.get("depreciation_amount") or 0) for r in due), 2))
+    return args
 
 
-# --------------------------------------------------------------------------
-# Genuine domain-specific business logic beyond the shared core connector
-# --------------------------------------------------------------------------
-
-def mutate_resource_with_concurrency(tag: str, doctype: str, action: str, payload: dict = None,
-                                      name: str = None, mode: str = "read-only",
-                                      expected_modified: str = None, requested_by: str = None,
-                                      skip_comment: bool = False,
-                                      *, session_id: str = None, domain_code: str = None,
-                                      user_approved: bool = False, approval_note: str = None) -> dict:
-    """TOCTOU-checked wrapper around the shared core.client.mutate_resource()
-    — this domain's own extension for the submit-time concurrency check
-    (Asset capitalization / depreciation-run / disposal review steps).
-
-    `expected_modified` (submit only): if the caller knows the record's
-    `modified` timestamp from when it last read/staged the draft, pass it
-    here. Before delegating to mutate_resource()'s submit path, this
-    re-fetches the record and refuses (raising ConnectorError, not
-    silently proceeding) if `modified` has moved on since — someone else
-    edited the record between staging and submit. This narrows (does not
-    eliminate) the fetch-then-submit TOCTOU gap; the remaining unmitigated
-    window between this check and the submit POST itself is what
-    frappe.client.submit's own TimestampMismatchError backstops.
-
-    Every other action, and `submit` with `expected_modified` omitted,
-    passes straight through to mutate_resource() unchanged — this wrapper
-    adds a pre-check, it never re-implements the write itself.
-    """
-    if action == "submit" and expected_modified is not None:
-        if not name:
-            raise ConnectorError("submit requires a record 'name'.")
-        current = get_resource(tag, doctype, name, strip_noise=False).get("data") or {}
-        if current.get("modified") != expected_modified:
-            raise ConnectorError(
-                f"'{doctype}' '{name}' was modified since it was last staged "
-                f"(expected modified={expected_modified!r}, now {current.get('modified')!r}). "
-                f"Someone else may have changed it — re-review before submitting."
-            )
-    return mutate_resource(tag, doctype, action, payload, name, mode, requested_by,
-                            skip_comment=skip_comment, domain=DOMAIN_NAME,
-                            session_id=session_id, domain_code=domain_code,
-                            user_approved=user_approved, approval_note=approval_note)
+def _depr_prepare(args, ctx):
+    require_args(args, ["depr_schedule_name", "asset"], ["date", "pending_rows", "total_depreciation"])
+    body = {"depr_schedule_name": args["depr_schedule_name"]}
+    if args.get("date"):
+        body["date"] = args["date"]
+    return PreparedRequest(
+        transport="rpc", doctype="Asset", action="depreciation_run", rpc_path=_DEPRECIATION,
+        body=body, rbac_doctype="Journal Entry", rbac_ptype="create", audit_action="Create",
+        audit_doctype="Asset", audit_reference=args["asset"],
+        bound={"asset": args["asset"], "pending_rows": args.get("pending_rows"),
+               "total_depreciation": args.get("total_depreciation")})
 
 
-WHITELISTED_METHODS = {
-    "make_depreciation_entry": "/api/method/erpnext.assets.doctype.asset.depreciation.make_depreciation_entry",
-    "scrap_asset": "/api/method/erpnext.assets.doctype.asset.depreciation.scrap_asset",
-    "restore_asset": "/api/method/erpnext.assets.doctype.asset.depreciation.restore_asset",
-    "make_sales_invoice": "/api/method/erpnext.assets.doctype.asset.asset.make_sales_invoice",
-}
-
-# These three carry the domain's double-confirm non-negotiable (depreciation
-# runs and disposals) — restore_asset is a recovery action, not a
-# write-off/posting action, so it isn't token-gated.
-TOKEN_REQUIRED_METHODS = {"make_depreciation_entry", "scrap_asset", "make_sales_invoice"}
+def _depr_schedule_matches_asset(req, args, ctx):
+    schedule = _get(ctx, "Asset Depreciation Schedule", args["depr_schedule_name"])
+    if schedule.get("asset") != args["asset"]:
+        raise core_client.PreconditionFailedError(
+            f"Refusing depreciation run: schedule {args['depr_schedule_name']!r} belongs to asset "
+            f"{schedule.get('asset')!r}, not {args['asset']!r}.")
 
 
-def call_whitelisted_method(tag: str, method: str, body: dict, mode: str = "read-only",
-                             confirmation_token: str = None, token_facts: dict = None,
-                             requested_by: str = None, *, session_id: str = None,
-                             domain_code: str = None) -> dict:
-    """Call one of the four domain-specific whitelisted RPC methods.
-
-    `body` is sent to ERPNext verbatim as the RPC's actual arguments —
-    only the exact fields that method's real signature accepts, nothing
-    more.
-
-    These bypass mutate_resource()'s generic create/update/submit/cancel
-    action set (they don't fit it, so ALLOWED_WRITE_DOCTYPES doesn't apply
-    here either), but enforce the same `mode == "read-write"` and
-    `requested_by` gates in code, exactly like mutate_resource().
-
-    For the three double-confirm methods (make_depreciation_entry,
-    scrap_asset, make_sales_invoice), `confirmation_token` is also
-    required and must match the token a render script computed from the
-    same financial facts (depreciation_run_token()/disposal_token()
-    above). `token_facts` carries the identifying facts needed to
-    recompute that token — deliberately kept separate from `body` so
-    verification-only facts never leak into the actual API payload sent
-    to ERPNext.
-
-    On success, posts a best-effort audit Comment onto the relevant Asset
-    record naming the requester. This call is also wrapped in the same
-    two-phase Qkeee Bot Audit Log logging every other write path gets —
-    this RPC shape bypasses mutate_resource() entirely, so without this
-    wrapping it would go unlogged there.
-    """
-    if method not in WHITELISTED_METHODS:
-        raise ConnectorError(
-            f"Unknown whitelisted method '{method}'. Expected one of {sorted(WHITELISTED_METHODS)}."
-        )
-    if mode != "read-write":
-        raise ReadOnlyModeError(
-            f"Refusing '{method}': qkeee_erp.mode is '{mode}', not 'read-write'. "
-            f"Switch modes explicitly if this write is intended."
-        )
-    if not requested_by:
-        raise MissingRequesterError(
-            f"Refusing '{method}': requested_by is missing. There is no config default — "
-            f"resolve the requester's ERPNext user id/email from the live inbound channel "
-            f"identity and pass it explicitly via requested_by= on this call."
-        )
-    if method in TOKEN_REQUIRED_METHODS:
-        if not confirmation_token:
-            raise ConnectorError(
-                f"'{method}' requires confirmation_token — render the double-confirm "
-                f"output first and pass its exact token here. This method cannot be "
-                f"called without one."
-            )
-        issued_at = (token_facts or {}).get("issued_at")
-        if not issued_at:
-            raise ConnectorError(
-                f"'{method}' requires token_facts['issued_at'] — the render script "
-                f"surfaces this alongside the confirmation token; pass it through unchanged."
-            )
-        expected = _expected_token(method, token_facts or {})
-        if confirmation_token != expected:
-            raise ConnectorError(
-                f"confirmation_token does not match token_facts for '{method}' — re-render "
-                f"the confirmation against the current data and use that token, rather than "
-                f"reusing an older one."
-            )
-        if not is_fresh(issued_at):
-            raise StaleConfirmationError(
-                f"confirmation_token for '{method}' has expired (older than 15 minutes) — "
-                f"re-render the confirmation against current data before executing."
-            )
-
-    cfg = get_env_config(tag)
-    asset_name = (body or {}).get("asset_name")
-    audit_log_name = record_audit_log_start(
-        cfg, action=method, doctype="Asset", name=asset_name, requested_by=requested_by,
-        session_id=session_id, domain_code=domain_code,
-        user_approved=method in TOKEN_REQUIRED_METHODS,
-        approval_note=f"call_whitelisted_method: {method}",
-    )
-    try:
-        result = _request(cfg, "POST", WHITELISTED_METHODS[method], payload=body)
-    except ConnectorError as e:
-        record_audit_log_finish(cfg, audit_log_name, status="Failure", error_detail=str(e))
-        raise
-    if asset_name:
-        record_comment(
-            cfg, "Asset", asset_name,
-            f"[{SKILL_LABEL}/{DOMAIN_NAME}] {method} — requested by {requested_by}, applied via qkeee-erp bot.",
-        )
-    record_audit_log_finish(cfg, audit_log_name, status="Success", reference_name=asset_name)
-    return result
+def _depr_partial_outcome(exc, req, args, ctx):
+    """make_depreciation_entry keeps posting rows after one fails, then
+    re-raises (W26) — say which rows now carry a Journal Entry."""
+    schedule = _get(ctx, "Asset Depreciation Schedule", args["depr_schedule_name"])
+    posted = [f"{r.get('schedule_date')}: {r.get('journal_entry')}"
+              for r in schedule.get("depreciation_schedule") or [] if r.get("journal_entry")]
+    return ("depreciation may have PARTIALLY posted — rows now carrying a Journal Entry: "
+            f"{posted or 'none'}. Review these before any retry.")
 
 
-def _expected_token(method: str, facts: dict) -> str:
-    issued_at = facts.get("issued_at", 0)
-    if method == "make_depreciation_entry":
-        return depreciation_run_token(
-            asset=facts.get("asset", ""),
-            asset_depr_schedule=facts.get("asset_depr_schedule", ""),
-            as_of_date=facts.get("as_of_date", ""),
-            total_depreciation=facts.get("total_depreciation", 0),
-            issued_at=issued_at,
-        )
-    if method == "scrap_asset":
-        return disposal_token(
-            asset=facts.get("asset", ""), method="scrap",
-            disposal_date=facts.get("disposal_date", ""),
-            amount=facts.get("amount", 0),
-            issued_at=issued_at,
-        )
-    if method == "make_sales_invoice":
-        return disposal_token(
-            asset=facts.get("asset", ""), method="sale",
-            disposal_date=facts.get("disposal_date", ""),
-            amount=facts.get("amount", 0),
-            issued_at=issued_at,
-        )
-    raise ConnectorError(f"No token scheme defined for '{method}'.")
+operations.register_operation(operations.Operation(
+    key="fixed_assets.depreciation_run", domain=DOMAIN_NAME,
+    summary="post every due, unbooked depreciation row on one Asset Depreciation Schedule",
+    prepare=_depr_prepare, render_defaults=_depr_render, allowlist_domain=None,
+    preconditions=(_depr_schedule_matches_asset,), on_failure=_depr_partial_outcome,
+    args_help={"depr_schedule_name": "Asset Depreciation Schedule name",
+               "date": "post rows due on/before this date (default today)",
+               "asset": "filled by render", "pending_rows": "filled by render",
+               "total_depreciation": "filled by render"},
+))
+
+
+# ---------------------------------------------------------------- scrap / restore
+
+def _book_value(asset_doc: dict):
+    rows = asset_doc.get("finance_books") or []
+    return rows[0].get("value_after_depreciation") if rows else None
+
+
+def _scrap_render(args, ctx):
+    args = dict(args)
+    if args.get("asset") and "book_value" not in args:
+        args["book_value"] = _book_value(_get(ctx, "Asset", args["asset"]))
+    return args
+
+
+def _scrap_prepare(args, ctx):
+    require_args(args, ["asset", "scrap_date", "reason"], ["book_value"])
+    return PreparedRequest(
+        transport="rpc", doctype="Asset", action="scrap", rpc_path=_SCRAP,
+        body={"asset_name": args["asset"], "scrap_date": args["scrap_date"]},
+        rbac_ptype="write", audit_action="Update", audit_reference=args["asset"],
+        bound={"book_value": args.get("book_value"), "reason": args["reason"]})
+
+
+def _restore_prepare(args, ctx):
+    require_args(args, ["asset", "reason"])
+    return PreparedRequest(
+        transport="rpc", doctype="Asset", action="restore", rpc_path=_RESTORE,
+        body={"asset_name": args["asset"]}, rbac_ptype="write", audit_action="Update",
+        audit_reference=args["asset"], bound={"reason": args["reason"]})
+
+
+operations.register_operation(operations.Operation(
+    key="fixed_assets.scrap", domain=DOMAIN_NAME,
+    summary="scrap an asset: depreciation up to scrap_date, then the scrap Journal Entry",
+    prepare=_scrap_prepare, render_defaults=_scrap_render, allowlist_domain=None,
+    args_help={"asset": "Asset name", "scrap_date": "YYYY-MM-DD, required (never defaulted)",
+               "reason": "stated reason", "book_value": "filled by render (finance_books[0])"},
+))
+operations.register_operation(operations.Operation(
+    key="fixed_assets.restore", domain=DOMAIN_NAME,
+    summary="restore a scrapped asset: reverses disposal depreciation and CANCELS the scrap JE",
+    prepare=_restore_prepare, allowlist_domain=None,
+    args_help={"asset": "Asset name", "reason": "stated reason"},
+))
+
+
+# ---------------------------------------------------------------- sale
+
+# Server-generated keys stripped from a mapped (unsaved) document before it
+# is sent as a create payload.
+_SERVER_KEYS = {"name", "owner", "creation", "modified", "modified_by", "idx",
+                "parent", "parentfield", "parenttype", "__islocal", "__unsaved", "docstatus"}
+
+
+def _clean_mapped(doc):
+    if isinstance(doc, dict):
+        return {k: _clean_mapped(v) for k, v in doc.items() if k not in _SERVER_KEYS}
+    if isinstance(doc, list):
+        return [_clean_mapped(x) for x in doc]
+    return doc
+
+
+def map_sales_invoice(tag: str, asset: str, item_code: str, company: str, sell_qty,
+                      serial_no: str = None, *, requested_by: str, **read_ctx) -> dict:
+    """READ: ERPNext's make_sales_invoice mapper — returns the unsaved
+    Sales Invoice it would create for this asset; persists nothing. Gated
+    and logged like any read."""
+    payload = {"asset": asset, "item_code": item_code, "company": company, "sell_qty": sell_qty}
+    if serial_no:
+        payload["serial_no"] = serial_no
+    result = core_client.read_rpc(tag, "POST", _MAP_SALES_INVOICE, payload=payload,
+                                  gate_doctype="Sales Invoice", requested_by=requested_by,
+                                  log_doctype="Asset", log_name=asset,
+                                  **{k: v for k, v in read_ctx.items() if k in _READ_CTX})
+    return _clean_mapped(result.get("message") or {})
+
+
+def _sell_render(args, ctx):
+    args = dict(args)
+    if "invoice" not in args:
+        args["invoice"] = map_sales_invoice(
+            ctx.tag, args.get("asset"), args.get("item_code"), args.get("company"),
+            args.get("sell_qty"), args.get("serial_no"), requested_by=ctx.requested_by,
+            **ctx.audit_kwargs())
+    return args
+
+
+def _sell_prepare(args, ctx):
+    require_args(args, ["asset", "item_code", "company", "sell_qty", "invoice", "reason"],
+                 ["serial_no", "sale_proceeds"])
+    invoice = dict(args["invoice"])
+    if invoice.get("docstatus") not in (None, 0):
+        raise core_client.PreconditionFailedError("fixed_assets.sell only creates a DRAFT invoice.")
+    invoice.pop("docstatus", None)
+    return PreparedRequest(
+        transport="resource", doctype="Sales Invoice", action="create", body=invoice,
+        bound={"asset": args["asset"], "reason": args["reason"],
+               "sale_proceeds": args.get("sale_proceeds")})
+
+
+def _invoice_sells_this_asset(req, args, ctx):
+    rows = (req.body or {}).get("items") or []
+    if not any(r.get("asset") == args["asset"] and r.get("is_fixed_asset") for r in rows):
+        raise core_client.PreconditionFailedError(
+            f"Refusing fixed_assets.sell: the invoice has no fixed-asset item row for asset "
+            f"{args['asset']!r}.")
+
+
+operations.register_operation(operations.Operation(
+    key="fixed_assets.sell", domain=DOMAIN_NAME,
+    summary="create a DRAFT Sales Invoice disposing of an asset (submit it via accounts.generic)",
+    prepare=_sell_prepare, render_defaults=_sell_render, allowlist_domain="accounts",
+    preconditions=(_invoice_sells_this_asset,),
+    args_help={"asset": "Asset name", "item_code": "the asset's item", "company": "company",
+               "sell_qty": "quantity sold (ERPNext v16 requires it)", "serial_no": "optional",
+               "reason": "stated reason", "sale_proceeds": "shown to the user",
+               "invoice": "filled by render from make_sales_invoice; edit rates, then re-render"},
+))

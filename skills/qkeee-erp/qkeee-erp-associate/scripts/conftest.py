@@ -21,3 +21,30 @@ for _sub in ("core", "domains"):
     _path = os.path.join(_SCRIPTS_DIR, _sub)
     if _path not in sys.path:
         sys.path.insert(0, _path)
+
+# One module object per file. Tests import some modules bare (`import client`,
+# `import fixed_assets`) and others package-qualified (`from core import
+# client`, `from domains import fixed_assets`). Without aliasing, Python
+# loads each file TWICE as two unrelated modules: a patch applied to one is
+# invisible to the other, and each copy keeps its own operation registry.
+# Load the package-qualified module first and register it under the bare
+# name too. (Production code only ever uses the package-qualified names.)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+import importlib  # noqa: E402
+
+for _bare, _qualified in (
+        ("confirm_token", "core.confirm_token"),
+        ("client", "core.client"),
+        ("operations", "core.operations"),
+        ("memory_promote", "core.memory_promote"),
+        ("accounts", "domains.accounts"),
+        ("fixed_assets", "domains.fixed_assets"),
+        ("hr_payroll", "domains.hr_payroll"),
+        ("inventory", "domains.inventory"),
+        ("mis", "domains.mis"),
+        ("procurement", "domains.procurement"),
+        ("sales", "domains.sales"),
+        ("system_admin", "domains.system_admin")):
+    sys.modules[_bare] = importlib.import_module(_qualified)

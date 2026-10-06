@@ -29,7 +29,7 @@ place to land.
 | --- | --- | --- |
 | Domain reference | `references/domains/<domain-slug>.md` | `domains/fixed-assets.md` |
 | Domain script module | `scripts/domains/<domain_slug>.py` | `domains/fixed_assets.py` |
-| Draft renderer | `scripts/render_<domain>_<artifact>.py` | `render_inventory_stock_entry.py` |
+| Write operation | `<domain>.<name>` in `scripts/core/operations.py`'s registry | `fixed_assets.scrap`, `sales.generic` |
 | Durable memory, per instance | `<profile>/skills/qkeee-erp-learned/<env-tag>/references/environment.md` (via `skill_manage`) | `qkeee-erp-learned/prod-in/references/environment.md` |
 | Durable memory, custom app | `.../<env-tag>/references/custom-apps/<app-slug>.md` | `custom-apps/qkeee-lending.md` |
 | Durable memory, non-ERPNext | `.../<env-tag>/references/non-erpnext/<system-slug>.md` | `non-erpnext/tally-prime.md` |
@@ -89,29 +89,36 @@ naming styles diverge, deliberately; not an inconsistency to fix.
 
 ## Non-negotiables (code-enforced, not just prompt discipline)
 
-These hold across every domain. Each is enforced in `scripts/core/client.py`
-— consult that module's own docstrings for the exact mechanism.
+These hold across every domain. Writes are enforced by the one write
+pipeline in `scripts/core/operations.py` (every write is a named
+operation; `execute_write.py --list-ops` lists them), reads by
+`scripts/core/client.py` — consult their docstrings for the exact
+mechanism. `references/cli-cookbook.md` has the write flow.
 
 1. **Never issue a write while `qkeee_erp.mode` is `read-only`.**
-   `core.client.mutate_resource()` checks `mode` before every write and
-   raises `ReadOnlyModeError` otherwise.
+   The pipeline checks `mode` before every write and raises
+   `ReadOnlyModeError` otherwise.
 2. **Never issue a read or write without a resolved requester identity.**
    Every read/write authenticates as one shared ERPNext bot/service
    account — without a `requested_by`, ERPNext's own audit trail would show
    only the bot, never who actually asked. There is no env-var or config
    default for `requested_by`: it is resolved fresh, on every call, from
    the live inbound channel identity (the chat/email sender's own work
-   email) and passed explicitly. `mutate_resource()` raises
+   email) and passed explicitly. The pipeline raises
    `MissingRequesterError`; every read/write path raises
    `UnvalidatedProdRequesterError` via `_validate_prod_requester()`
    (universal, not PROD-only) if it's missing or doesn't resolve to a real,
-   permitted ERPNext `User`.
+   permitted ERPNext `User`. No doctype is exempt for a write — User,
+   Role and DocType writes need a requester holding that permission too.
 3. **Never write outside the active domain's `ALLOWED_WRITE_DOCTYPES`.**
    Every `scripts/domains/<slug>.py` module declares this tuple and
-   registers it via `core.client.register_domain_allowlist()`.
-   `mutate_resource(..., domain=<slug>)` raises `DoctypeNotAllowedError`
-   for any doctype outside it, or for an unregistered/unknown domain name
-   — a typo'd domain fails closed, it does not silently skip the check.
+   registers it via `core.client.register_domain_allowlist()`. The
+   `<slug>.generic` operation raises `DoctypeNotAllowedError` for any
+   doctype outside it, or for an unregistered/unknown domain name — a
+   typo'd domain fails closed. A generic operation also refuses any
+   (doctype, action) a gated operation owns (e.g. User create is only
+   `system_admin.create_user`), and `unscoped.generic` refuses every
+   domain-owned doctype and every privilege/code/credential doctype.
    `domains/mis.py` registers an empty tuple, so MIS can never write (see
    `domains/mis.md`).
 4. **Never propose a field, doctype, or workflow step that isn't confirmed
@@ -121,8 +128,10 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
    customized, added, or removed. An honest "I don't see that field on this
    DocType" beats a guessed field name that happens to resolve.
    Code-enforced for every `create`/`update`, not left to `discover.py`
-   being called by hand: `execute_write.py` runs every payload through
-   `schema_mapping.map_payload_for_write()` before dispatch, which fetches
+   being called by hand: every generic create/update runs its payload
+   through `schema_mapping.map_payload_for_write()` (identically at
+   render and execute, so the confirmation token covers the mapped
+   payload), which fetches
    the live schema and maps fields against it instead of relying on a
    domain doc's hand-curated field list. See `schema_mapping.py`'s own
    module docstring for the fuzzy-match confirmation story and the
@@ -136,16 +145,13 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
    the domain's own equivalent) when the review needs child-table data
    (Frappe's list endpoint silently drops child tables even when named in
    `fields`); `query_resource()` with explicit `fields` is far cheaper when
-   it doesn't. `submit`/`cancel` on every domain
-   (accounts/hr-payroll/sales/procurement/inventory) additionally require a
-   fresh `confirmation_token` — `mutate_resource()` refuses either action
-   without one that matches the exact (action, doctype, name, payload,
-   requested_by, issued_at) facts, computed via
-   `scripts/core/confirm_token.py`'s `advisory-token` CLI over what was
-   actually shown to and confirmed by the user. Fixed-assets and
-   system-admin instead carry their own stricter, capability-specific token
-   schemes for their highest-blast-radius actions (see those domains' own
-   modules) — this generic gate backstops the rest.
+   it doesn't. `submit`/`cancel`/`delete` on every domain need a fresh
+   confirmation: render it (`core/confirm_token.py render`), show the user
+   the rendered request and its confirmation code, and execute with their
+   own reply. The render binds the record's `modified`; if the record
+   changed since, the submit is refused. Fixed-assets and system-admin
+   writes are separate named operations that always need the
+   confirmation (see those domains' docs).
 6. **Sensitive data (SSN, credit card numbers, and similar) is never
    written in raw form anywhere.** `core.client.redact_pii()` is a
    code-level backstop applied to Comment content and Audit Log free-text
@@ -204,7 +210,7 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
   the same System-Manager-level DocType read this skill already flags as
   a real gap on a correctly least-privileged bot) both refuse the call
   outright, for read and write alike — a `domain` allowlist or a
-  verified advisory token no longer rescues either case, since those
+  verified confirmation token no longer rescues either case, since those
   attest a write's *shape* was reviewed ahead of time, never that
   `requested_by` specifically can do it. Trade-off, stated plainly: this
   makes System-Manager-level DocType read a hard requirement for ANY
@@ -238,7 +244,7 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
   the one place sensitive fields get scrubbed before display, storage, or
   logging. Never re-implemented per domain.
 - **Requester attribution, on every write, unconditionally.** Every
-  `mutate_resource()`/domain `mutate()` call requires a resolved
+  write operation requires a resolved
   `requested_by` (see Non-negotiable 2). On success, a best-effort Comment
   naming the requester is posted to the affected record:
   `[qkeee-erp-associate/<domain>] <action> — requested by <requested_by>,
@@ -309,7 +315,7 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
   `requested_by`'s own live role list and the doctype's own live DocPerm
   rows, never through the broken RPC. Only a **positively-confirmed grant**
   (`True`) lets the write through on a warning. Neither a `domain=`
-  allowlist nor a verified `gated_mutate_resource()` advisory token rescues
+  allowlist nor a verified confirmation token rescues
   an inconclusive or negative local verdict — both `False` (confirmed no
   granting role) and `None` (the local check itself couldn't complete, e.g.
   this bot also lacks System-Manager-level DocType read) are refused
@@ -339,27 +345,22 @@ These hold across every domain. Each is enforced in `scripts/core/client.py`
   permission-matrix changes get a second, explicit confirmation after the
   first — state the exact before/after or financial impact, then ask
   again, one turn later at minimum. A matching `confirmation_token` proves
-  the call is byte-for-byte identical to what a render script last printed
+  the call is byte-for-byte identical to what `confirm_token.py render` last printed
   and that it happened within the token's freshness window (15 minutes,
   `DEFAULT_TOKEN_TTL_SECONDS`) — it does **not** prove a human read and
   approved it. Never render a confirmation and consume its token in the
   same turn; `confirmation_token`/`issued_at` are only used after the
   user's own reply affirmatively confirms that specific rendered draft.
-- **`gated_mutate_resource()` additionally requires `user_confirmation_text`
-  — the literal text of the user's own reply.** This is the domain-less
-  advisory-token path (a doctype no named domain's `mutate()` has a
-  chance to layer a stricter rule onto, e.g. Item); a
-  matching `confirmation_token` alone is computable and verifiable by the
-  same process in the same turn, proving only that the payload wasn't
-  altered since render — same limit as the paragraph above. The render
-  step must show the user `confirm_token.confirmation_code()`'s short code
-  (not just say "confirmed?") and the execute step must pass their actual
-  reply text — never a string this skill's own process constructs itself,
-  which would defeat the point (see `confirmation_code()`'s own docstring
-  for the honest limits of what this does and doesn't prove). Not required
-  for a domain's own submit/cancel/delete token gate
-  (`register_domain_token_gate()`) — scoped to `gated_mutate_resource()`
-  specifically.
+- **Every confirmed write also requires `user_confirmation_text` — the
+  literal text of the user's own reply.** A matching `confirmation_token`
+  alone is computable and verifiable by the same process in the same
+  turn, proving only that the request wasn't altered since render — same
+  limit as the paragraph above. The render step must show the user the
+  printed `confirmation_code` (not just say "confirmed?") and the execute
+  step must pass their actual reply text — never a string this skill's own
+  process constructs itself, which would defeat the point (see
+  `confirmation_code()`'s own docstring for the honest limits of what this
+  does and doesn't prove).
 - **Non-ERPNext systems** — see `references/non-erpnext-adapter.md`:
   explicitly request API docs, a user guide, or a URL before attempting
   any action against a system that isn't ERPNext.

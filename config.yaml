@@ -174,7 +174,7 @@ tts:
 # 2026-08-23 (adversarial-review follow-up) rather than left in place,
 # since a stray real pattern added here later next to bogus-looking
 # entries could plausibly go unnoticed on review. Every
-# `python scripts/erp_client.py mutate ...` invocation should go through
+# `python .../scripts/execute_write.py ...` invocation should go through
 # Hermes's normal dangerous-command approval flow, on top of (not
 # instead of) this library's own advisory-first/confirmation-token gate.
 command_allowlist: []

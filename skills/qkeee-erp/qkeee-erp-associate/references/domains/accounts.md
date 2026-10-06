@@ -6,17 +6,13 @@ Invoice", "Sales Invoice")` — see that module's docstring). Applies
 `00-conventions.md` and `01-connectivity.md` in full; this file adds only
 what's specific to AP/AR, JE drafting, 3-way match, and tax mechanics.
 
-Every capability routes through `core.client` plus
-`domains.accounts.mutate()` — this domain has no unique connector logic
-of its own. The DRAFT-composition logic (JE balance enforcement,
-cancel-impact wording) belongs in `render_je_draft.py`/
-`render_cancel_confirmation.py`, which don't exist in this skill's
-scripts/ yet — still prompt discipline. The submit/cancel gate itself is
-code-enforced: `accounts.py` registers both actions with
-`core.client.register_domain_token_gate()`, so `mutate_resource()`
-refuses either without a fresh `confirmation_token` computed via
-`scripts/core/confirm_token.py`'s `advisory-token` CLI over the exact
-facts just confirmed with the user.
+Every write is operation `accounts.generic` through `execute_write.py`
+(`--domain accounts` shorthand) — this domain has no unique connector
+logic of its own. Composing the draft (JE balance enforcement,
+cancel-impact wording) is prompt discipline; no script does it. The
+submit/cancel/delete gate is code-enforced: each needs a rendered
+confirmation token plus the user's reply with its code, and is refused
+if the record changed since render.
 
 ## When this domain applies
 
@@ -61,8 +57,8 @@ review, TDS/GST/e-invoicing/e-way-bill questions.
 3. **Journal Entry drafting** is arithmetic-checked before it's ever
    shown — a draft that doesn't balance, or a line with both/neither
    debit and credit set, must be refused before rendering. Present the
-   draft, get explicit confirmation, call `domains.accounts.mutate(...,
-   "create")` (lands `docstatus 0`). Reading the created record's `name`
+   draft, get explicit confirmation, run `accounts.generic` `create`
+   (lands `docstatus 0`). Reading the created record's `name`
    back out of the `create` response uses the `"data"` key; a subsequent
    `submit`/`cancel` response uses `"message"` instead — this is exactly
    the step where reading the wrong key raises a `KeyError`. **Done
@@ -77,18 +73,14 @@ review, TDS/GST/e-invoicing/e-way-bill questions.
    field (`account`, `party`, `cost_center`, `against_account` where set)
    resolves to a real, existing record. Fix via `update` and re-review if
    anything is wrong. Only once the reviewed draft is correct, present it
-   for a second explicit confirmation, compute a `confirmation_token` via
-   `core/confirm_token.py`'s `advisory-token` CLI over the confirmed
-   facts, and call `mutate(..., "submit", confirmation_token=..., issued_at=...)`
-   — `mutate_resource()` refuses the submit without a matching, fresh
-   token. **Cancelling an existing document** gets the same
-   staged-confirmation treatment plus the same token requirement — state
-   the impact, confirm, compute the token, then
-   `mutate(..., "cancel", confirmation_token=..., issued_at=...)`; never
-   cancel off a bare request with nothing staged first. **Done when:**
-   every persisted field is checked against the confirmed draft and a
-   fresh token was computed over those exact facts, before `submit`/
-   `cancel` fires.
+   for a second explicit confirmation: render it (`core/confirm_token.py render --op accounts.generic --args '{"doctype": ..., "action": "submit", "name": ...}'`), show the user the rendered request and confirmation code, and execute with their own reply — see `cli-cookbook.md`.
+   The submit is refused without that, or if the JE changed since render.
+   **Cancelling an existing document** gets the same staged-confirmation
+   treatment and the same gate (`"action": "cancel"`) — state the impact
+   in the render, confirm, execute; never cancel off a bare request with
+   nothing staged first. **Done when:** every persisted field is checked
+   against the confirmed draft, and the submit/cancel was rendered,
+   confirmed by the user's reply with its code, and executed.
 5. **3-way match walks PO → Receipt → Invoice in order**, reporting every
    discrepancy found, not just the first — ERPNext's `per_received`/
    `per_billed` fields make this checkable without re-deriving match state

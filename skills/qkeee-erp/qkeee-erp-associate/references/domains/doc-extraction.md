@@ -27,7 +27,7 @@ or not.
   first — this holds regardless of `qkeee_erp.mode`. Not a self-imposed
   restraint on a capability this domain has and chooses not to use: this
   domain has **no ERPNext connector at all** — no `core.client` import,
-  no `mutate_resource()` call, nothing that can reach ERPNext's write
+  no write operation, nothing that can reach ERPNext's write
   endpoints. Writing to ERPNext from here isn't refrained from, it's
   structurally impossible. This is the one domain in the library not
   gated by `qkeee_erp.mode` at all — its safety property is structural,
@@ -96,8 +96,8 @@ or not.
    report itself, not just something the agent is trusted to remember to
    mention.
 
-   **Known gap:** no dedicated `render_*.py` staged-report script exists
-   in this tree yet — this step has historically been done inline, which
+   **Known gap:** no dedicated staged-report script exists in this tree
+   yet — this step has historically been done inline, which
    is exactly how the confidence-rating/reconciliation-check requirement
    documented here has gone unrun before. The confidence/value-key
    refusal rule IS code-enforced now, one step downstream: when this

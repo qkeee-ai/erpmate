@@ -25,6 +25,20 @@ the rule it produced and where that rule now lives in the shipped skill.
 | F11 | A denied requester-permission check left zero trace in the audit log — the gate raised before the guarded read/write ever ran, and the gate itself never logged | `_log_gate_decision()` writes one row per `_validate_prod_requester()` call, denial or allow | `00-conventions.md` GRC baseline; `domains/grc-audit.md` |
 | F12 | Business-intent reads of `User`/`Role` were silently dropped by a doctype-keyed audit exemption built for a different purpose (stopping internal plumbing calls from logging themselves) | Read-path exemption made purpose-keyed (`internal=True`), not doctype-keyed; a business-intent `User`/`Role` read is now a real logged row | `00-conventions.md` GRC baseline; `domains/grc-audit.md` |
 | F13 | Update's `field_diff` had been silently dead since it was built — the pre-image fetch never passed `requested_by`, so it was refused every time and the refusal was swallowed | Pre-image `get_resource()` call now carries the write's own `requested_by` and full session/channel/prompt context | `core/client.py` `mutate_resource()` (code fix; no doc rule needed) |
+| W01–W29 | Write-path hardening review (2026-10-06): the generic write path could bypass the bespoke gated functions; several tokens weren't bound to what was sent; User/Role writes skipped the requester check and the audit log; RPC audit rows used invalid Select values; the unscoped path could write privilege/code/credential doctypes and bypass the Supplier KYC gate | One registry of named write operations and one pipeline (mode → requester → allowlist → ownership → preconditions → token over the exact request + user code → RBAC → audit → send); `execute_write.py --op` is the only write CLI, `confirm_token.py render` its render step; separate admin credential for system-admin writes | `scripts/core/operations.py`; `cli-cookbook.md` write flow; `00-conventions.md`; domain docs for fixed-assets, system-admin, procurement |
+
+## 2026-10-06 — write-path hardening (P0–P3, plus the P4 docs and tests)
+
+Findings register and tickets: the companion repo's
+`.scratch/qkeee-erp-write-path-hardening/`. Every write now runs through
+`core/operations.py`. `mutate_resource()`/`gated_mutate_resource()` and
+each domain's `mutate()` remain only as compatibility shims onto it. The
+old per-domain token constructors, `call_whitelisted_method()`,
+`destructive_mutate()`, `create_user()`, `gated_config_mutate()`,
+`call_permission_manager()`, `mutate_resource_with_concurrency()` and
+`register_domain_token_gate()` are removed. `core/client.py` has no write
+subcommand. New env vars: `QKEEE_ERP_<TAG>_ADMIN_API_KEY/_SECRET`,
+`QKEEE_ERP_<TAG>_KYC_TAX_ID_FIELD`, `QKEEE_ERP_AUDIT_MASK_FIELDS`.
 
 ## 2026-09-13 — writing pass, batch 1
 

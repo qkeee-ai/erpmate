@@ -4,11 +4,33 @@ This is the widest-blast-radius domain here (user/role/permission changes,
 destructive actions), and it carries the most business logic of any
 domain module. Code: `scripts/domains/system_admin.py`
 (`ALLOWED_WRITE_DOCTYPES = ("User", "Role", "Custom Field", "Property
-Setter", "Webhook", "Workflow")`), which also carries
-`_record_attribution_comment()`, `destructive_mutate()`,
-`get_roles_and_doctypes()`, `get_permissions()`,
-`call_permission_manager()`, `create_user()`, `gated_config_mutate()`, and
-`get_scheduler_status()`.
+Setter", "Webhook", "Workflow")`).
+
+Every write is a named operation through `execute_write.py --op`, sent
+with the tag's separate ADMIN credential
+(`QKEEE_ERP_<TAG>_ADMIN_API_KEY`/`_ADMIN_API_SECRET`, a System Manager
+account). The everyday bot credential never holds System Manager. Every
+operation in this domain, `system_admin.generic` included, always needs
+the confirmation — anything sent with the admin key does: render, show
+the user the rendered request and code, execute with their reply
+(`cli-cookbook.md`).
+
+| Operation | Write | Args |
+|---|---|---|
+| `system_admin.create_user` | User create; every role must exist; elevated roles are flagged in the render | `email`, `first_name`, `roles` (exact names), optional `last_name`, `send_welcome_email` |
+| `system_admin.set_user_roles` | replace a User's role list; render shows before/after; refused if roles changed since render | `name`, `roles` (complete new list), `reason` |
+| `system_admin.disable_user` | User update, exactly `{"enabled": 0}` | `name`, `reason` |
+| `system_admin.delete` | delete a User/Role/Custom Field/Property Setter/Webhook/Workflow | `doctype`, `name`, `reason` |
+| `system_admin.create_webhook` | Webhook create; `request_url` must be https on a public host | `payload`, `reason` |
+| `system_admin.toggle_workflow` | Workflow update, exactly `{"is_active": 0|1}` | `name`, `is_active`, `reason` |
+| `system_admin.permission_add`/`_update`/`_remove`/`_reset` | Role Permission Manager changes; `_update`'s render shows the current value | `doctype`, `role`, `permlevel`, `ptype`/`value` (update), `reason` |
+| `system_admin.generic` | Role create/update, Custom Field/Property Setter create/update — confirmed like every other operation here | `doctype`, `action`, `payload`, `name` |
+
+`system_admin.generic` refuses everything a gated operation owns.
+Webhook update and Workflow create have no write path at all, so give
+UI guidance instead. Every write here runs the requester gate: the
+requester must hold the permission, which in practice means System
+Manager. Every write is in the Qkeee Bot Audit Log.
 
 ## When this domain applies
 
@@ -23,15 +45,14 @@ integrations, checking instance health.
   access" must resolve to specific role names before this domain acts,
   never a blanket grant. Permission changes and destructive actions get a
   DOUBLE confirm (state the exact before/after, then ask again) — enforced
-  in code via the matching `confirmation_token`/`issued_at` gate in
-  `call_permission_manager()`/`destructive_mutate()`. Creating a user with
-  an elevated role (System Manager/Administrator) and the two config
-  writes with real external-facing risk (Webhook create, Workflow
-  `is_active` toggle) get the same token+freshness backstop via
-  `create_user()`/`gated_config_mutate()`.
+  in code: every write operation in this domain needs a rendered token
+  plus the user's reply with its code. User creation (elevated roles are
+  flagged in the render), role changes, and the two config writes with
+  real external-facing risk (Webhook create, Workflow `is_active`
+  toggle) all get the same backstop.
 - **Know the token gate's limit before treating it as sufficient on its
   own.** A matching `confirmation_token` proves the call being made is
-  byte-for-byte identical to what a render script last printed, and that
+  byte-for-byte identical to what `confirm_token.py render` last printed, and that
   it happened within 15 minutes — no more. It does **not** prove a human
   read the rendered confirmation and said yes. `issued_at`/token must
   only be used after the user's own reply affirmatively confirms that
@@ -52,24 +73,25 @@ integrations, checking instance health.
    Always read-only, never gated. **Done when:** the read used
    `get_roles_and_doctypes()`/`get_permissions()`, never a raw
    `DocPerm` query.
-3. **User creation** goes through `create_user()`. Never infer roles from
+3. **User creation** is `system_admin.create_user`. Never infer roles from
    a vague request ("give them access to procurement") — resolve to exact
    role names first (`query_resource("Role", ...)` lists what actually
-   exists), pass them as `existing_roles` so a typo surfaces here instead
-   of as an opaque ERPNext error. If any requested role is `System
-   Manager` or `Administrator`, the draft is blocked until
-   `elevated_roles_acknowledged: true` is set AND a matching elevated-role
-   `confirmation_token`/`issued_at` is supplied — the single
-   highest-privilege action this domain can take gets the same code-level
-   backstop as a permission change. Present, confirm, then
-   `create_user(..., elevated_confirmation_token=..., issued_at=...)`.
+   exists) and check every requested role is in that list before
+   rendering (the operation also refuses a role that doesn't exist). If
+   any requested role is `System Manager` or `Administrator`, the render
+   lists it under `elevated_roles` — say so explicitly to the user; the
+   single highest-privilege grant this domain can make. Render, confirm,
+   execute. Changing an existing user's roles later is
+   `system_admin.set_user_roles`, whose render shows the exact before/
+   after.
    Re-fetch via `core.client.get_resource()` afterward (not
    `query_resource` — it silently drops the `roles` child table) and check
    that the `roles` table lists exactly the confirmed role names and no
    extra role slipped in. User isn't submittable — this re-fetch is the
    only checkpoint. **Done when:** the re-fetched `roles` table matches
    the confirmed role names exactly, no extra role present.
-4. **Any permission change** goes through `call_permission_manager()` —
+4. **Any permission change** is `system_admin.permission_add`/`_update`/
+   `_remove`/`_reset` —
    and requires asking a second time after showing it. Four actions, all
    token-gated: `add` (bare new row, every right off — grants nothing by
    itself), `update` (flips ONE right on an existing row — fetch the
@@ -114,10 +136,11 @@ integrations, checking instance health.
 8. **Integration/webhook config review** — `query_resource("Webhook",
    ...)` lists configured webhooks. Creating a new Webhook is a real
    outbound data-destination change — an attack surface, not a passive
-   setting — and goes through `gated_config_mutate(kind="create_webhook")`.
-   Workflow `is_active` toggling goes through the same path
-   (`kind="toggle_workflow"`), since it can halt every in-flight approval
-   on that document type; anything more (new states/transitions) is
+   setting — and is `system_admin.create_webhook` (https, public host;
+   private, loopback and internal host names are refused). Workflow
+   `is_active` toggling is `system_admin.toggle_workflow` (body exactly
+   `{"is_active": 0|1}`), since it can halt every in-flight approval on
+   that document type; anything more (new states/transitions) is
    guidance only. Re-fetch and confirm the persisted fields after either
    write, same as any other domain's save-then-review discipline. **Done
    when:** the re-fetched fields are confirmed persisted, for either
@@ -133,21 +156,23 @@ integrations, checking instance health.
    are combined in the report, or the specific gap (e.g. `RQ Job`) is
    named with its fallback rather than silently omitted.
 10. **Disabling/deleting a user, or deleting a Custom Field/Property
-    Setter/Webhook/Workflow**, always goes through `destructive_mutate()`
+    Setter/Webhook/Workflow**, is `system_admin.disable_user` or
+    `system_admin.delete`
     — and requires asking a second time after showing it. Require a
     stated `reason`. Prefer `disable_user` over `delete_user` unless the
     account must be gone entirely — disable is reversible; delete is
     confirmed to fail with `LinkExistsError` on any user who owns/created
     other records (a never-referenced user deletes cleanly). Only after
-    both confirmations, call `destructive_mutate()` with the printed
-    token. **Done when:** a stated reason and both confirmations are in
-    place before `destructive_mutate()` fires.
+    both confirmations, execute with the printed args and token. A
+    failed delete leaves no Comment behind; the audit row records it.
+    **Done when:** a stated reason and both confirmations are in place
+    before the operation runs.
 
 ## Quick reference
 
 | Capability | Outcome | Notes |
 | --- | --- | --- |
-| User creation & role assignment | New user provisioned correctly | Elevated role needs a fresh, matching confirmation_token |
+| User creation & role assignment | New user provisioned correctly | Always confirmed; elevated roles flagged in the render |
 | Permission/role matrix review | Current access visibility | Read-only, never gated |
 | Role/permission change | Access grant/revoke applied | DOUBLE confirm; states exact before/after |
 | Workflow configuration assist | `is_active` toggle applied, rest is guidance | Token-gated |

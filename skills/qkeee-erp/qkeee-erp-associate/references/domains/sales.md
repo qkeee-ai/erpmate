@@ -4,9 +4,10 @@ Code: `scripts/domains/sales.py` (`ALLOWED_WRITE_DOCTYPES = ("Customer",
 "Quotation", "Sales Order", "Delivery Note")`). Deliberately scoped to
 ERPNext's Selling module, not a full CRM replacement.
 
-This domain has no unique connector logic of its own — the domain logic
-below belongs in `render_customer_draft.py`/`render_quotation_draft.py`/
-`render_report.py`, which don't exist in this skill's scripts/ yet.
+This domain has no unique connector logic of its own. Writes are
+operation `sales.generic` through `execute_write.py` (`--domain sales`);
+submit/cancel/delete need a rendered confirmation (`cli-cookbook.md`).
+Composing drafts and reports below is prompt discipline.
 
 ## When this domain applies
 
@@ -61,7 +62,7 @@ or Delivery Note stands, a lightweight sales pipeline view.
    specific `ValidationError` if skipped. `party_name` (the customer link)
    is required by this domain even though ERPNext's own schema doesn't
    flag it — a Quotation created without it is silently accepted as a
-   "quotation to nobody." Present, confirm, `mutate(..., "create")`
+   "quotation to nobody." Present, confirm, `sales.generic` `create`
    (lands `docstatus 0`). **Save-draft-then-review-then-submit:** re-fetch
    via `get_resource()` (the line-item child table check needs it) and
    confirm every Link field resolves to a real record before ever

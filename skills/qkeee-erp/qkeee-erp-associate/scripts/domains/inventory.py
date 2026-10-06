@@ -2,19 +2,20 @@
 """
 qkeee-erp-associate — inventory domain (Stock, transfers, reconciliation).
 
+Writes run as operation "inventory.generic" (core/operations.py): create/
+update land drafts; submit/cancel/delete are token-gated.
+
 Unlike most other domain modules, this one carries genuine business logic
 beyond the shared core connector: get_stock_reconciliation_items(),
 bin_rows_to_actual_source_qty(), and get_bin_qty() below (see their
 docstrings) exist to prevent a batch-tracked-item Stock Reconciliation
-footgun.
+footgun. Both reads are gated and audit-logged like every other read
+(write-path hardening W13) — pass `requested_by` and the usual context.
 
-ALLOWED_WRITE_DOCTYPES covers render_stock_entry_draft.py /
-render_material_request_draft.py / render_reconciliation_draft.py's target
-doctypes. Cross-check against references/domains/inventory.md before
-expanding.
+ALLOWED_WRITE_DOCTYPES: cross-check against references/domains/
+inventory.md before expanding.
 """
 
-import json
 import os
 import sys
 
@@ -23,7 +24,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from core import client as core_client
-from core.client import _request, get_env_config
+from core import operations
 
 DOMAIN_NAME = "inventory"
 
@@ -35,21 +36,30 @@ ALLOWED_WRITE_DOCTYPES = (
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 
-# Submit/cancel require a fresh confirmation_token from
-# core/confirm_token.py's advisory-token CLI, verified in mutate_resource()
-# — the code-level backstop.
-core_client.register_domain_token_gate(DOMAIN_NAME, {"submit", "cancel"})
+# Operation "inventory.generic": create/update are ungated draft steps;
+# submit/cancel/delete need a rendered confirmation token + the user's
+# confirmation code, and `expected_modified` (the record must not have
+# changed since it was confirmed). See core/operations.py.
+operations.generic_operation(DOMAIN_NAME)
 
 
 def mutate(tag: str, doctype: str, action: str, **kwargs) -> dict:
-    """This domain's write entry point — plain mutate_resource() gated by
-    ALLOWED_WRITE_DOCTYPES above (domain="inventory")."""
-    return core_client.mutate_resource(tag, doctype, action, domain=DOMAIN_NAME, **kwargs)
+    """Compatibility shim: operation "inventory.generic" via
+    operations.call_generic() — mutate_resource()-style keywords
+    (payload, name, mode, requested_by, session_id, ..., confirmation_token,
+    issued_at, user_confirmation_text, expected_modified)."""
+    return operations.call_generic(f"{DOMAIN_NAME}.generic", tag, doctype, action, **kwargs)
+
+
+# Read context keywords accepted by the read helpers below.
+_READ_CTX = ("session_id", "domain_code", "channel", "channel_metadata",
+             "prompt_summary", "latest_prompt")
 
 
 def get_stock_reconciliation_items(tag: str, warehouse: str, company: str,
                                     posting_date: str, item_code: str = None,
-                                    posting_time: str = "23:59:59") -> dict:
+                                    posting_time: str = "23:59:59", *, requested_by: str,
+                                    **read_ctx) -> dict:
     """Resolve authoritative current qty/valuation (and, for batch-tracked
     items, per-batch rows) for a warehouse/item via ERPNext's own
     get_items whitelisted method — NEVER guess or hand-supply current_qty
@@ -73,7 +83,6 @@ def get_stock_reconciliation_items(tag: str, warehouse: str, company: str,
     reconciling a whole warehouse's physical count in one resolver call
     instead of one per item.
     """
-    cfg = get_env_config(tag)
     payload = {
         "warehouse": warehouse,
         "posting_date": posting_date,
@@ -82,10 +91,12 @@ def get_stock_reconciliation_items(tag: str, warehouse: str, company: str,
     }
     if item_code:
         payload["item_code"] = item_code
-    result = _request(
-        cfg, "POST",
+    # get_items computes and persists nothing — a read, gated as one.
+    result = core_client.read_rpc(
+        tag, "POST",
         "/api/method/erpnext.stock.doctype.stock_reconciliation.stock_reconciliation.get_items",
-        payload=payload,
+        payload=payload, gate_doctype="Stock Reconciliation", requested_by=requested_by,
+        **{k: v for k, v in read_ctx.items() if k in _READ_CTX},
     )
     rows = result.get("message", [])
     return {"item_code": item_code, "warehouse": warehouse, "rows": rows, "batch_tracked": any(r.get("batch_no") for r in rows)}
@@ -106,17 +117,17 @@ def bin_rows_to_actual_source_qty(bin_rows: list) -> dict:
     return {(row["item_code"], row["warehouse"]): row["actual_qty"] for row in bin_rows}
 
 
-def get_bin_qty(tag: str, item_code: str, warehouse: str = None) -> dict:
+def get_bin_qty(tag: str, item_code: str, warehouse: str = None, *, requested_by: str,
+                **read_ctx) -> dict:
     """Read the live Bin (actual on-hand qty) for an item, optionally
     scoped to one warehouse. Authoritative for non-batch/non-serial items;
     for batch-tracked items prefer get_stock_reconciliation_items() to
     also see the per-batch breakdown before staging a reconciliation.
     """
-    cfg = get_env_config(tag)
     filters = [["item_code", "=", item_code]]
     if warehouse:
         filters.append(["warehouse", "=", warehouse])
-    params = {"filters": json.dumps(filters), "fields": json.dumps(["item_code", "warehouse", "actual_qty"]),
-              "limit_page_length": 100}
-    result = _request(cfg, "GET", "/api/resource/Bin", params=params)
-    return {"data": result.get("data", [])}
+    result = core_client.query_resource(
+        tag, "Bin", filters, ["item_code", "warehouse", "actual_qty"], limit=100,
+        requested_by=requested_by, **{k: v for k, v in read_ctx.items() if k in _READ_CTX})
+    return {"data": result.get("data", []), "has_more": result.get("has_more", False)}

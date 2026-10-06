@@ -32,27 +32,27 @@ not a repo-side config change.
 real, tested code, including RBAC-every-environment and always-on read
 audit logging (see `00-conventions.md`'s GRC baseline).
 
-Two distinct things sit under "advisory-first draft," and only one of
-them is code-enforced today:
+Two distinct things sit under "advisory-first draft":
 
-- **The double-confirm GATE on submit/cancel/delete** (never let a write
-  through without a fresh, exact-match confirmation over what was just
-  shown to the user) **is code-enforced**, uniformly, via
-  `core.client.mutate_resource()`'s `DOMAIN_TOKEN_GATED_ACTIONS` registry
-  (`register_domain_token_gate()`) for accounts/hr-payroll/sales/
-  procurement/inventory's submit/cancel, and via each domain's own
-  bespoke token scheme for fixed-assets' depreciation/disposal and
-  system-admin's destructive/permission/config actions. Compute the token
-  via `scripts/core/confirm_token.py`'s `advisory-token` CLI (or a
-  domain's own token constructor) over the exact facts confirmed — never
-  hand-construct one.
-- **Composing the draft's actual content** — a Journal Entry's balance
-  check and narration, a cancel's impact statement, a Quotation's
-  presentation — still depends on the `render_*.py` scripts several
-  domain files describe, which are **not yet present in this skill's
-  `scripts/` directory**. The gate above will refuse an unconfirmed
-  submit/cancel either way, but nothing yet code-assists producing the
-  draft itself; that part is still prompt discipline.
+- **The confirmation GATE is code-enforced, uniformly.** Every write is a
+  named operation in `scripts/core/operations.py`'s pipeline. A gated
+  operation is refused unless it gets a fresh `confirmation_token`
+  recomputed over the EXACT request about to be sent, plus the user's own
+  reply containing the confirmation code. Gated operations are:
+  - every fixed-assets and system-admin operation
+  - submit/cancel/delete in every domain
+  - every unscoped write
+
+  `core/confirm_token.py render` computes the token and prints the
+  request to show; never hand-construct one. This proves the request
+  matches what was rendered and that a reply referenced it. It does not
+  prove the human understood it; see `00-conventions.md`.
+- **Composing the draft's content is still prompt discipline.** Examples
+  are a Journal Entry's balance check and narration, a cancel's impact
+  statement, or a Quotation's presentation. The render prints the exact
+  request and, for some operations, live facts: pending depreciation
+  rows, book value, roles before/after, current permission value. There
+  are no per-domain draft-composition scripts.
 
 Don't claim a capability is fully enforced in code without confirming it
 in `scripts/` — say what's live vs. planned plainly, the same discipline

@@ -1,11 +1,35 @@
 # Domain: fixed-assets (Asset lifecycle)
 
 Code: `scripts/domains/fixed_assets.py`
-(`ALLOWED_WRITE_DOCTYPES = ("Asset", "Asset Movement", "Asset Repair")`),
-which also carries this domain's genuine connector logic:
-`mutate_resource_with_concurrency()`, `call_whitelisted_method()` (see
-that module's docstring — `call_whitelisted_method()` also writes to
-`Qkeee Bot Audit Log`, not just the usual ERPNext Comment).
+(`ALLOWED_WRITE_DOCTYPES = ("Asset", "Asset Movement", "Asset Repair")`).
+Every write is a named operation through `execute_write.py --op`
+(`cli-cookbook.md` has the render → confirm → execute flow). ERPNext v16
+signatures were verified on 2026-10-06.
+
+| Operation | Does | Args |
+|---|---|---|
+| `fixed_assets.generic` | Asset / Asset Movement / Asset Repair `create`/`update` (drafts) and `submit`/`cancel`/`delete` (confirmed; refused if the record changed since render) | `doctype`, `action`, `payload`, `name` |
+| `fixed_assets.depreciation_run` | `make_depreciation_entry`: posts a Journal Entry for every due, unbooked row of one schedule | `depr_schedule_name`, optional `date`; render fills `asset`, `pending_rows`, `total_depreciation` |
+| `fixed_assets.scrap` | `scrap_asset`: depreciation up to `scrap_date`, then the scrap JE | `asset`, `scrap_date` (required, never defaulted), `reason`; render fills `book_value` |
+| `fixed_assets.restore` | `restore_asset`: reverses disposal depreciation and CANCELS the scrap JE (a GL change) | `asset`, `reason` |
+| `fixed_assets.sell` | creates a DRAFT Sales Invoice for the asset (`make_sales_invoice` only maps one, it persists nothing; v16 needs `sell_qty`) | `asset`, `item_code`, `company`, `sell_qty`, `reason`, optional `sale_proceeds`/`serial_no`; render fills `invoice` |
+
+All four non-generic operations always need the confirmation: render,
+show the user the rendered request (it includes the live facts above)
+and its code, then execute with their reply. Their token covers the
+exact RPC body and the facts shown. `sch_start_idx`/`sch_end_idx` are
+never accepted. With both set, ERPNext posts every row in the slice even
+if it is already booked or not yet due.
+
+**Partial depreciation.** If a run fails part-way, ERPNext keeps posting
+the other rows. The error then lists which rows now carry a Journal
+Entry, and execute_write exits with code 4. Review those rows with the
+user before any retry.
+
+**Sale.** `fixed_assets.sell` creates the invoice as a draft. Edit the
+rendered `invoice` (e.g. the selling rate), re-render, confirm. Submitting
+it is a separate `accounts.generic` submit — gain/loss is realized only
+then.
 
 ## When this domain applies
 
@@ -43,30 +67,24 @@ of or scrapping an asset, running a physical asset verification.
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
    **Done when:** the target doctype/RPC is confirmed inside this
    domain's scope before any write is proposed.
-2. **Route the four disposal/depreciation RPCs**
-   (`make_depreciation_entry`, `scrap_asset`, `restore_asset`,
-   `make_sales_invoice`) through
-   `domains.fixed_assets.call_whitelisted_method()` — never a raw request.
-   It enforces `read-write` mode in code, and for the three double-confirm
-   methods (`make_depreciation_entry`, `scrap_asset`, `make_sales_invoice`)
-   additionally requires a `confirmation_token` matching what a render
-   script computed — the call is refused without it. `restore_asset` is
-   mode-gated but not token-gated (a recovery action, not a write-off).
-   **Done when:** the call went through `call_whitelisted_method()`, never
-   a raw request, and (for the three double-confirm methods) carried a
-   fresh matching token.
+2. **Depreciation, scrap, restore and sale are the operations
+   `fixed_assets.depreciation_run`/`scrap`/`restore`/`sell`** — never a
+   raw request. Each needs a rendered confirmation and the user's reply
+   with its code. A render for one asset cannot run against another.
+   **Done when:** the operation ran through `execute_write.py --op` with
+   the render's args, token and the user's reply.
 3. **Asset capitalization**: a draft is only "ready" when cost basis is
    present and nonzero (or a stated reason for zero), the source is
    unambiguous (a linked purchase document, or `is_existing_asset`
    stated), `asset_category` is set, and — if `calculate_depreciation` is
    set — the finance book (method, total periods, frequency, start date)
-   is complete. Present, confirm, `mutate(..., "create")` (lands
+   is complete. Present, confirm, `fixed_assets.generic` `create` (lands
    `docstatus 0`). **Save-draft-then-review-then-submit:** if capitalizing
    immediately, re-fetch via `core.client.get_resource()` (needed for the
    `finance_books` child table, and to keep `modified` unstripped for the
-   next step) and call `domains.fixed_assets.mutate_resource_with_concurrency()`
-   for the `submit` — never call plain `mutate()` for an Asset submit, or
-   the TOCTOU concurrency check is silently skipped. Submitting an Asset
+   next step) and render the `fixed_assets.generic` `submit`: the render
+   binds the record's current `modified`, and the submit is refused if
+   anyone changes the record before it runs. Submitting an Asset
    also submits its auto-created Asset Depreciation Schedule in the same
    call — the review must cover the schedule config too. **Done when:**
    cost basis, source, and (if applicable) the finance book are all
@@ -78,9 +96,10 @@ of or scrapping an asset, running a physical asset verification.
    value from `Asset.finance_books[N].value_after_depreciation`, NOT the
    top-level `Asset.value_after_depreciation` field, which is confirmed
    live to NOT update after a run (a stale-field trap). Only after both
-   the render and the second confirmation, call
-   `call_whitelisted_method()` with `"make_depreciation_entry"` and the
-   printed `confirmation_token`. **Done when:** the pending-rows fetch,
+   the render and the second confirmation, execute
+   `fixed_assets.depreciation_run` with the printed args and token. Its
+   render already shows the due rows and their total — check them
+   against what you computed. **Done when:** the pending-rows fetch,
    the current-book-value read from `finance_books[N]` (never the stale
    top-level field), and both confirmations all happened before the RPC
    fired.
@@ -100,17 +119,17 @@ of or scrapping an asset, running a physical asset verification.
    estimated gain/loss explicitly — and be clear that the drafted Sales
    Invoice is NOT submitted by this domain; gain/loss is only realized
    when someone submits that invoice separately. Only after both
-   confirmations, call `call_whitelisted_method()` with `"scrap_asset"`/
-   `"make_sales_invoice"` and the printed token. **The sale path
-   (`make_sales_invoice` through eventual submission) is not confirmed
-   live-tested end to end** — treat its exact field defaults/error modes
-   as unconfirmed until it is. **Done when:** a stated reason, the
+   confirmations, execute `fixed_assets.scrap` (with an explicit
+   `scrap_date`) or `fixed_assets.sell` with the printed args and token.
+   **The sale path (draft invoice through eventual submission) is not
+   confirmed live-tested end to end** — treat its exact field defaults/
+   error modes as unconfirmed until it is. **Done when:** a stated reason, the
    correct book-value/proceeds figure, and both confirmations are in
    place before the RPC fires.
 7. **Asset maintenance scheduling and Asset Repair** are moderate-risk,
    single-confirm (not double) — they don't carry the same book-value/
    write-off stakes. Stage a normal draft, confirm, `create`/`update` via
-   `mutate()`, submit via `mutate_resource_with_concurrency()`. If
+   `fixed_assets.generic`, submit via a rendered `fixed_assets.generic` submit. If
    `capitalize_repair_cost` is set on a repair, say so explicitly since it
    changes the asset's book value going forward. **Done when:** one
    confirmation is given and, if `capitalize_repair_cost` is set, that

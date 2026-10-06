@@ -27,6 +27,20 @@ if _THIS_DIR not in sys.path:
 from core import client as core_client  # noqa: E402
 
 import procurement  # noqa: E402
+import schema_mapping  # noqa: E402
+import testsupport  # noqa: E402
+
+_OFFLINE = testsupport.offline_schema()
+
+
+def setUpModule():
+    for p in _OFFLINE:
+        p.start()
+
+
+def tearDownModule():
+    for p in _OFFLINE:
+        p.stop()
 
 
 def _patched_connector(created_name="GNR Solution Private Limited"):
@@ -147,6 +161,139 @@ class SupplierCreateWithKycTests(unittest.TestCase):
         self.assertEqual(len(address_payload["links"]), 2)
         self.assertIn({"link_doctype": "Company", "link_name": "DEMO LLP"}, address_payload["links"])
         self.assertIn({"link_doctype": "Supplier", "link_name": "Acme"}, address_payload["links"])
+
+
+class KycTaxIdAndPrevalidationTests(unittest.TestCase):
+    """Ticket 13 / D2 (C): refused BEFORE the Supplier create when the
+    address carries no tax ID, or when Address/Contact miss a mandatory
+    field per live meta."""
+
+    def _create(self, kyc, waiver=False):
+        return procurement.mutate(
+            "test", "Supplier", "create",
+            payload={"supplier_name": "Acme", "supplier_type": "Company"},
+            kyc=kyc, kyc_waiver_confirmed=waiver,
+            mode="read-write", requested_by="tester@example.com")
+
+    def test_address_without_tax_id_is_refused(self):
+        patches = _patched_connector()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as do_mutate:
+            with self.assertRaises(procurement.IncompleteSupplierKYCError) as ctx:
+                self._create({"address": {"address_line1": "1 Main St"}})
+            do_mutate.assert_not_called()
+        self.assertIn("tax ID", str(ctx.exception))
+
+    def test_each_default_tax_id_field_satisfies_it(self):
+        for field in procurement.KYC_TAX_ID_FIELDS:
+            with self.subTest(field=field):
+                patches = _patched_connector(created_name="Acme")
+                with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                     patch.object(core_client, "_do_mutate",
+                                  side_effect=[{"data": {"name": "Acme"}},
+                                               {"data": {"name": "ADDR-1"}}]) as do_mutate:
+                    self._create({"address": {field: "X123"}})
+                self.assertEqual(do_mutate.call_count, 2)
+
+    def test_env_override_names_the_tax_id_field(self):
+        env = {"QKEEE_ERP_TEST_KYC_TAX_ID_FIELD": "vat_no"}
+        patches = _patched_connector()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as do_mutate, \
+             patch.object(core_client, "_qkeee_env", return_value=env):
+            with self.assertRaises(procurement.IncompleteSupplierKYCError):
+                self._create({"address": {"gstin": "27AAECG2483J1ZE"}})
+            do_mutate.assert_not_called()
+
+    def test_waiver_allows_address_without_tax_id(self):
+        patches = _patched_connector(created_name="Acme")
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch.object(core_client, "_do_mutate",
+                          side_effect=[{"data": {"name": "Acme"}},
+                                       {"data": {"name": "ADDR-1"}}]):
+            result = self._create({"address": {"address_line1": "1 Main St"}}, waiver=True)
+        self.assertFalse(result["_kyc"]["waived"])  # an address WAS captured
+        self.assertEqual(result["_kyc"]["address"]["data"]["name"], "ADDR-1")
+
+    def test_missing_mandatory_address_field_is_refused_before_any_write(self):
+        meta = [{"fieldname": "city", "fieldtype": "Data", "reqd": 1},
+                {"fieldname": "address_line1", "fieldtype": "Data", "reqd": 1},
+                {"fieldname": "links", "fieldtype": "Table", "reqd": 1},
+                {"fieldname": "country", "fieldtype": "Link", "reqd": 1, "default": "India"}]
+        patches = _patched_connector()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as do_mutate, \
+             patch.object(schema_mapping, "get_doctype_schema", return_value=(meta, None)):
+            with self.assertRaises(procurement.IncompleteSupplierKYCError) as ctx:
+                self._create({"address": {"gstin": "X", "address_line1": "1 Main St"}})
+            do_mutate.assert_not_called()
+        self.assertIn("['city']", str(ctx.exception))
+
+
+class KycRollbackTests(unittest.TestCase):
+    """Ticket 13 / D2 (A): a server-side failure of the linked create
+    deletes the just-created Supplier again; if that fails too, the error
+    names what was left behind."""
+
+    def _create(self):
+        return procurement.mutate(
+            "test", "Supplier", "create",
+            payload={"supplier_name": "Acme", "supplier_type": "Company"},
+            kyc={"address": {"gstin": "X"}, "contact": {"first_name": "Priya"}},
+            mode="read-write", requested_by="tester@example.com")
+
+    def test_address_failure_deletes_the_supplier_again(self):
+        patches = _patched_connector()
+        effects = [{"data": {"name": "Acme"}},
+                   core_client.ConnectorError("ERPNext API error (417): city is mandatory"),
+                   {}]
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch.object(core_client, "_do_mutate", side_effect=effects) as do_mutate:
+            with self.assertRaises(procurement.KycLinkFailedError) as ctx:
+                self._create()
+        delete_call = do_mutate.call_args_list[2]
+        self.assertEqual(delete_call.args[1:3], ("Supplier", "delete"))
+        self.assertEqual(delete_call.args[4], "Acme")
+        self.assertIn("nothing is left behind", str(ctx.exception))
+
+    def test_contact_failure_after_address_still_rolls_back(self):
+        patches = _patched_connector()
+        effects = [{"data": {"name": "Acme"}}, {"data": {"name": "ADDR-1"}},
+                   core_client.ConnectorError("contact invalid"), {}]
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch.object(core_client, "_do_mutate", side_effect=effects) as do_mutate:
+            with self.assertRaises(procurement.KycLinkFailedError):
+                self._create()
+        self.assertEqual(do_mutate.call_args_list[3].args[1:3], ("Supplier", "delete"))
+
+    def test_rollback_failure_names_what_was_left_behind(self):
+        patches = _patched_connector()
+        effects = [{"data": {"name": "Acme"}},
+                   core_client.ConnectorError("address invalid"),
+                   core_client.ConnectorError("LinkExistsError")]
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch.object(core_client, "_do_mutate", side_effect=effects):
+            with self.assertRaises(procurement.KycPartialFailureError) as ctx:
+                self._create()
+        self.assertIn("'Acme'", str(ctx.exception))
+        self.assertIsInstance(ctx.exception, core_client.PartialOutcomeError)
+
+
+class KycMappingRunsAtRenderAndExecuteTests(unittest.TestCase):
+    """The KYC Address is mapped against Address's live schema in
+    enrich(), so render shows (and the token covers) the mapped fields."""
+
+    def test_render_shows_mapped_kyc(self):
+        from core import operations
+
+        def fake_map(tag, doctype, payload, **kw):
+            mapped = {("gstin" if k == "GSTIN" else k): v for k, v in (payload or {}).items()}
+            return {"payload": mapped, "status": "ok", "detail": None,
+                    "suggested_mappings": [], "unmatched": [], "high_risk": []}
+        with patch.object(schema_mapping, "map_payload_for_write", new=fake_map):
+            out = operations.prepare_only(
+                "procurement.generic",
+                {"doctype": "Supplier", "action": "create", "payload": {"supplier_name": "Acme"},
+                 "kyc": {"address": {"GSTIN": "27AAECG2483J1ZE"}}},
+                operations.WriteContext(tag="test", requested_by="tester@example.com"))
+        self.assertEqual(out["request"]["confirmed_facts"]["kyc"]["address"], {"gstin": "27AAECG2483J1ZE"})
 
 
 class SupplierUpdateIsNotGatedTests(unittest.TestCase):
