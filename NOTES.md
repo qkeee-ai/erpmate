@@ -30,6 +30,7 @@
 
 15. Review and crisp up the scripts (.py) files.
 
+16. Jev routing.json periodic update and syncup basis the preference for reasoning level vs pricing and latest deprecations of models.
 
 # EVAL Scenarios
 
