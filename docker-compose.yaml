@@ -114,7 +114,12 @@ services:
       #   docker compose exec hermes /opt/data/bin/jev setup-key --provider openrouter
       # Honored only when that provider actually has a stored key.
       - JEV_PROVIDER=${JEV_PROVIDER:-}   # empty = typesafe | openrouter | venice | zen
+      # Every jev toggle defaults to OFF, so a fresh profile routes nothing even
+      # with pools configured and a key present until these are set — 019-jev-init
+      # writes them so `/jev routing on` + `/jev skills on` are not a manual step.
+      # An operator's later `/jev ...` choice is never overridden.
       - JEV_ROUTING_MODE=${JEV_ROUTING_MODE:-on}   # on | shadow | off
+      - JEV_SKILLS_MODE=${JEV_SKILLS_MODE:-on}   # on | off (jev-driven skill selection)
       # 0 = the curated pools in docker/defaults/jev/routing.json win (they are
       # validated against the catalog and know this agent's workload).
       # 1 = let `jev models suggest --write` pick pools from the live catalog

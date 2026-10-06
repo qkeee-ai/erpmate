@@ -15,6 +15,8 @@
 #   JEV_INIT_PROFILES          space-separated profiles ("default" = $HERMES_HOME);
 #                              default: $HERMES_PROFILE_NAME
 #   JEV_ROUTING_MODE           on | shadow | off   (default: on)
+#   JEV_SKILLS_MODE            on | off            (default: on) — jev-driven
+#                              skill selection (`/jev skills`); no shadow rung
 #
 # Idempotent: `models suggest --write` overwrites routing.json, so it runs once
 # per profile (marker file); a routing mode already in state.json (e.g. the
@@ -24,6 +26,7 @@
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 MODE="${JEV_ROUTING_MODE:-on}"
+SKILLS="${JEV_SKILLS_MODE:-on}"
 # Default target: the profile resolved by 016-profile-install.
 TARGETS="${JEV_INIT_PROFILES:-${HERMES_PROFILE_NAME:-$(cat /run/hermes-profile-name 2>/dev/null)}}"
 [ -n "$TARGETS" ] || { echo "[jev-init] no target profile (016 skipped?); set JEV_INIT_PROFILES" >&2; exit 0; }
@@ -31,6 +34,8 @@ JEV=/opt/jev-skills/bin/jev
 [ -x "$JEV" ] || JEV=jev
 
 case "$MODE" in on|shadow|off) ;; *) echo "[jev-init] WARNING: bad JEV_ROUTING_MODE=$MODE; using shadow" >&2; MODE=shadow ;; esac
+# jev's own `/jev skills` accepts on|off only — no shadow rung.
+case "$SKILLS" in on|off) ;; *) echo "[jev-init] WARNING: bad JEV_SKILLS_MODE=$SKILLS; using off" >&2; SKILLS=off ;; esac
 
 # jev resolves the profile from HERMES_HOME (profiles/<name> => that profile).
 jrun() { HOME=/opt/data HERMES_HOME="$H" s6-setuidgid hermes "$@"; }
@@ -117,26 +122,63 @@ for name in $TARGETS; do
         suggest || echo "$tag keeping the seeded routing.json" >&2
     fi
 
-    # Routing can only be switched on once jev can actually answer.
-    [ "$key_present" = 1 ] || { echo "$tag routing left unchanged (no key)" >&2; continue; }
+    # Equivalent of `/jev routing $MODE` + `/jev skills $SKILLS` on a fresh
+    # profile. Every jev toggle defaults to OFF, so without this a new profile
+    # has pools configured and a key present and still routes nothing until
+    # someone types the slash commands by hand.
+    #
+    # Written REGARDLESS of key presence (this used to `continue` when `jev
+    # doctor` failed, which is why the mode was never written on any boot: the
+    # key only appears after `jev setup-key`, and nothing re-ran afterwards).
+    # Safe because jev fails open, per its README: "No key, timeout, rate limit,
+    # malformed reply, low confidence: routing keeps your current model, memory
+    # returns the original list, compaction drops nothing, skill selection
+    # suggests nothing". So routing=on with no key is a no-op that becomes live
+    # the moment a key is stored — no restart, no second manual step.
+    #
+    # An existing value for a toggle is never overridden: `/jev routing shadow`
+    # typed by an operator survives every later boot.
+    jrun python3 - "$H/jev/state.json" "routing=$MODE" "skills=$SKILLS" <<'PY'
+import json, sys
 
-    # Equivalent of `/jev routing $MODE`; never overrides an existing choice.
-    jrun python3 - "$H/jev/state.json" "$MODE" <<'PY'
-import json, os, sys
-path, mode = sys.argv[1:3]
+path, pairs = sys.argv[1], [a.split("=", 1) for a in sys.argv[2:]]
 try:
     with open(path) as f:
         state = json.load(f)
 except FileNotFoundError:
     state = {}
 except ValueError:
-    print("state.json unparsable; leaving it alone"); sys.exit(0)
-if "routing" in state:
-    print("routing already %r; leaving it" % state["routing"]); sys.exit(0)
-state["routing"] = mode
-with open(path, "w") as f:
-    json.dump(state, f, indent=2)
-print("routing set to %r" % mode)
+    print("state.json unparsable; leaving it alone")
+    sys.exit(0)
+if not isinstance(state, dict):
+    print("state.json is not an object; leaving it alone")
+    sys.exit(0)
+
+set_, kept = [], []
+for key, value in pairs:
+    if not value:
+        continue
+    if key in state:
+        kept.append("%s=%r" % (key, state[key]))
+    else:
+        state[key] = value
+        set_.append("%s=%r" % (key, value))
+if set_:
+    with open(path, "w") as f:
+        json.dump(state, f, indent=2)
+print("; ".join(filter(None, [
+    ("set " + ", ".join(set_)) if set_ else "",
+    ("left alone " + ", ".join(kept)) if kept else "",
+    "nothing to do" if not set_ and not kept else "",
+])))
 PY
+
+    # Report what jev actually believes, so a store-format change upstream shows
+    # up here instead of silently no-opping. jev 0.22 added toggles beyond
+    # `routing` (skills/notice/screen/gate/...); if this disagrees with the
+    # values above, the toggles have moved and this hook needs updating.
+    if doc="$(jrun "$JEV" doctor 2>&1)"; then
+        echo "$tag doctor after init: $doc"
+    fi
 done
 exit 0
