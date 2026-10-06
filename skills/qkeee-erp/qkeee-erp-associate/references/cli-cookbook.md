@@ -14,7 +14,7 @@ directly for manual/ad hoc use. See `core/client.py`'s own `_cli()` for
 the full subcommand list (`health`, `list-envs`, `query`, `get`, `report`,
 `roles`). All of them are read-only.
 
-**`core/client.py` has no write subcommand. Use `execute_write.py` for every write.** The former `mutate` and `gated-mutate` subcommands were removed. `mutate` without `--domain` wrote to any doctype with no allowlist and no token, and `gated-mutate` skipped `execute_write.py`'s schema mapping and context warnings. `scripts/execute_write.py` imports every `domains/*.py` module up front, so each domain's allowlist and token gate is registered before the write fires. It handles both write shapes: with `--domain <slug>` it calls that domain module's own `mutate()`, and without `--domain` it calls `gated_mutate_resource()`, which needs `--confirmation-token`, `--issued-at` and `--user-confirmation-text`. It WARNs on stderr, before the write fires, if `--session-id`, `--channel-metadata` or `--latest-prompt` is missing. Never route around that by calling `mutate_resource()` or `gated_mutate_resource()` from a hand-written script.
+**`core/client.py` has no write subcommand. Use `execute_write.py` for every write.** It imports every `domains/*.py` module up front, so every domain's allowlist and operations are registered before the write runs, and it runs a named operation (`--op`, or the `--domain`/`--doctype`/`--action` shorthand for a `<domain>.generic` operation — `unscoped.generic` when `--domain` is omitted). See "Write calls" below. Never route around it by calling the pipeline or a domain function from a hand-written script. In Python (tests, other skills' scripts), the write API is `core/operations.py`: `run_operation(op_key, args, WriteContext(...))`, `prepare_only()` to render, and `call_generic()` as the keyword-style spelling for a generic operation — `core/client.py` has no write function.
 
 **Exact path — don't guess it.** The script lives at
 `<profile>/skills/qkeee-erp/qkeee-erp-associate/scripts/core/client.py`
@@ -74,14 +74,19 @@ Every write is a named **operation**, run through one pipeline:
 9. send
 
 `execute_write.py` is the only write CLI. Never hand-write a script that
-calls the pipeline, `mutate_resource()` or a domain function directly. For
+calls the pipeline or a domain function directly. For
 the exact payload shape and required fields, see the matching
 `domains/<slug>.md`; don't freehand a payload from this cookbook alone.
 
 ```
-# Every operation, its arguments, and whether it needs a confirmation
+# Every operation, its arguments, whether it needs a confirmation, and a
+# ready-to-edit worked example (`example_args`) for each one
 python execute_write.py --list-ops
 ```
+
+Start every write from that operation's `example_args`: replace the
+values, keep the keys. They are the same examples the test suite drives
+through every gate, so they stay valid as the code changes.
 
 **Which writes need a confirmation:**
 
@@ -137,6 +142,13 @@ need no token. `--list-ops` shows each operation's rule.
 | 2 | usage error |
 | 3 | refused by a gate, nothing was sent |
 | 4 | outcome unknown or partial — re-read the record before any retry |
+
+**Deletes on an instance provisioned before 2026-10-06** fail with
+`LinkExistsError` ("linked with Qkeee Bot Audit Log") until an admin
+re-runs `init_bot.py` there. Its audit log still links to every record
+it describes, which blocks the delete. Tell the user the delete needs
+that one-time migration; for a draft, offer to disable or leave it
+instead. Never retry the delete.
 
 ### Worked examples
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Item payload helpers for the domain-less gated_mutate_resource() write
-path. `Item` has no owning domain yet — these two narrow data-quality
-fixes live at the payload-shaping step, ahead of and independent from
-whatever a larger schema-first design eventually does with Item. If/when
-Item gets a real domain module, that module's `mutate()` should call into
-these same functions rather than re-deriving the logic — don't duplicate
-it there.
+Item payload helpers for the domain-less write path (operation
+"unscoped.generic"). `Item` has no owning domain yet — these two narrow
+data-quality fixes live at the payload-shaping step: the generic
+operation's enrich step applies apply_purchase_sourced_item_defaults()
+when the args carry `purchase_sourced_item`. If/when Item gets a real
+domain module, its operation should call into these same functions
+rather than re-deriving the logic — don't duplicate it there.
 
 Deliberately NOT wired into `core/client.py` or `execute_write.py`'s
 generic dispatch as a hardcoded rule: Item-specific business judgment
@@ -80,11 +80,11 @@ def build_standard_buying_item_price_payload(item_code: str, rate: float, curren
                                               price_list: str = "Standard Buying") -> dict:
     """The buying-side counterpart to what a bare `standard_rate` on Item
     create would auto-create on the selling side instead. Feed this to a
-    separate `gated_mutate_resource(tag, "Item Price", "create", ...)`
-    call (`Item Price` is itself domain-less — no domain's
-    ALLOWED_WRITE_DOCTYPES claims it — same advisory-token/
-    user_confirmation_text path as Item) — a distinct, explicitly
-    confirmed write, not something this helper fires on its own."""
+    separate `unscoped.generic` "Item Price" create (`Item Price` is
+    itself domain-less — no domain's ALLOWED_WRITE_DOCTYPES claims it —
+    so it needs the same render + token + user code as Item) — a
+    distinct, explicitly confirmed write, not something this helper fires
+    on its own."""
     return {
         "item_code": item_code,
         "price_list": price_list,

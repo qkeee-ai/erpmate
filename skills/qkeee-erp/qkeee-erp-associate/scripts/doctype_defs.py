@@ -64,8 +64,13 @@ AUDIT_LOG = {
          "in_list_view": 1},
         {"fieldname": "reference_doctype", "label": "Reference DocType", "fieldtype": "Link",
          "options": "DocType", "reqd": 1, "in_list_view": 1},
-        {"fieldname": "reference_name", "label": "Reference Name", "fieldtype": "Dynamic Link",
-         "options": "reference_doctype", "in_list_view": 1},
+        # Data, NOT Dynamic Link: an audit trail must outlive the records it
+        # describes. As a Dynamic Link, every audited record became
+        # undeletable (Frappe's check_if_doc_is_dynamically_linked raises
+        # LinkExistsError) — found live on DEMO_ERP, 2026-10-06. init_bot.py
+        # migrates an existing instance (MIGRATABLE_FIELDS below).
+        {"fieldname": "reference_name", "label": "Reference Name", "fieldtype": "Data",
+         "in_list_view": 1},
         {"fieldname": "requested_by", "label": "Requested By", "fieldtype": "Link",
          "options": "User", "reqd": 1, "in_list_view": 1},
         {"fieldname": "timestamp", "label": "Timestamp", "fieldtype": "Datetime", "reqd": 1,
@@ -116,3 +121,11 @@ AUDIT_LOG = {
 # to document — kept as a single-element list for init_bot.py's existing
 # iteration shape.
 ALL_DOCTYPES = [AUDIT_LOG]
+
+
+# Fields whose type init_bot.py may change on an ALREADY-provisioned
+# instance, to converge it on the definitions above. Only these — nothing
+# else about a live doctype is ever modified by a re-run.
+MIGRATABLE_FIELDS = {
+    "Qkeee Bot Audit Log": ("reference_name",),
+}

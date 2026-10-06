@@ -40,17 +40,7 @@ core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 # submit/cancel/delete need a rendered confirmation token + the user's
 # confirmation code, and `expected_modified` (the record must not have
 # changed since it was confirmed). See core/operations.py.
-operations.generic_operation(DOMAIN_NAME)
-
-
-def mutate(tag: str, doctype: str, action: str, **kwargs) -> dict:
-    """Compatibility shim: operation "inventory.generic" via
-    operations.call_generic() — mutate_resource()-style keywords
-    (payload, name, mode, requested_by, session_id, ..., confirmation_token,
-    issued_at, user_confirmation_text, expected_modified)."""
-    return operations.call_generic(f"{DOMAIN_NAME}.generic", tag, doctype, action, **kwargs)
-
-
+operations.generic_operation(DOMAIN_NAME, example_args={"doctype": "Stock Entry", "action": "submit", "name": "MAT-STE-2026-00001"})
 # Read context keywords accepted by the read helpers below.
 _READ_CTX = ("session_id", "domain_code", "channel", "channel_metadata",
              "prompt_summary", "latest_prompt")

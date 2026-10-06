@@ -261,7 +261,7 @@ class GetUserRolesTests(unittest.TestCase):
 
 
 class UpdatePreImageAttributionTests(unittest.TestCase):
-    """F13, .scratch/hermes-erp-bot-reliability/spec.md: mutate_resource()'s
+    """F13, .scratch/hermes-erp-bot-reliability/spec.md: the write pipeline's
     Update pre-image fetch (for field_diff) used to omit `requested_by`
     entirely, so get_resource()'s own gate refused it every single time —
     caught and discarded by the surrounding `except ConnectorError`, so
@@ -281,12 +281,7 @@ class UpdatePreImageAttributionTests(unittest.TestCase):
             self, mocked_cfg, mocked_gate, mocked_get_resource, mocked_do_mutate,
             mocked_start, mocked_finish, mocked_comment):
         mocked_get_resource.return_value = {"data": {"name": "SO-0001", "status": "Draft"}}
-        ec.mutate_resource("prod", "Sales Order", "update", payload={"status": "Closed"},
-                            name="SO-0001", mode="read-write", requested_by="priya@org.com",
-                            domain="sales",
-                            session_id="sess-1", domain_code="sales", channel="Slack",
-                            channel_metadata={"x": 1}, prompt_summary="close it",
-                            latest_prompt="please close SO-0001")
+        operations.call_generic('sales.generic', 'prod', 'Sales Order', 'update', payload={'status': 'Closed'}, name='SO-0001', mode='read-write', requested_by='priya@org.com', session_id='sess-1', domain_code='sales', channel='Slack', channel_metadata={'x': 1}, prompt_summary='close it', latest_prompt='please close SO-0001')
         mocked_get_resource.assert_called_once_with(
             "prod", "Sales Order", "SO-0001", strip_noise=False,
             requested_by="priya@org.com", session_id="sess-1", domain_code="sales",
@@ -301,7 +296,7 @@ class UpdatePreImageAttributionTests(unittest.TestCase):
 
 class UpdateAuditRowVolumeTests(unittest.TestCase):
     """Issue 03, .scratch/hermes-erp-bot-reliability/issues/
-    03-update-audit-row-volume.md: F13's fix (mutate_resource()'s Update
+    03-update-audit-row-volume.md: F13's fix (the write pipeline's Update
     pre-image fetch now carries requested_by, so it's a real, gated,
     non-internal read, not connector plumbing) means one allowed Update
     now writes FOUR Qkeee Bot Audit Log documents, not the two spec.md's
@@ -309,7 +304,7 @@ class UpdateAuditRowVolumeTests(unittest.TestCase):
     read/create, not Update): a gate-decision row for the write itself, a
     gate-decision row for the pre-image read, the pre-image Read row
     itself, and the write's own Attempted->Success row. This pins that
-    count with a real (mocked-HTTP-only) run through mutate_resource() —
+    count with a real (mocked-HTTP-only) run through the write pipeline —
     not a mocked _validate_prod_requester() — so a future change to this
     path can't silently change the count again without a test failing.
     Intentionally takes no side on issue 03's own open question (accept
@@ -337,15 +332,9 @@ class UpdateAuditRowVolumeTests(unittest.TestCase):
             self, mocked_exists, mocked_trust, mocked_perm, mocked_request,
             mocked_do_mutate, mocked_insert, mocked_update, mocked_submit):
         with patch.dict("os.environ", self.ENV, clear=True):
-            ec.mutate_resource(
-                "rowvol", "Sales Order", "update", payload={"status": "Closed"},
-                name="SO-0001", mode="read-write", requested_by="priya@org.com", domain="sales",
-                session_id="sess-1", domain_code="sales", channel="Slack",
-                channel_metadata={"x": 1}, prompt_summary="close it",
-                latest_prompt="please close SO-0001",
-            )
+            operations.call_generic('sales.generic', 'rowvol', 'Sales Order', 'update', payload={'status': 'Closed'}, name='SO-0001', mode='read-write', requested_by='priya@org.com', session_id='sess-1', domain_code='sales', channel='Slack', channel_metadata={'x': 1}, prompt_summary='close it', latest_prompt='please close SO-0001')
 
-        # 4 distinct documents, in the order mutate_resource() actually
+        # 4 distinct documents, in the order the pipeline actually
         # produces them: the write's own gate-decision, then the
         # pre-image read's gate-decision + its real Read row, then the
         # write's Attempted row (flipped to Success via _audit_update,
@@ -365,10 +354,10 @@ class UpdateAuditRowVolumeTests(unittest.TestCase):
         self.assertEqual(mocked_update.call_args.args[2]["status"], "Success")
 
 
-class TestGatedMutateResource(unittest.TestCase):
-    """gated_mutate_resource() is this skill's own write entry point,
+class TestUnscopedGenericWrite(unittest.TestCase):
+    """unscoped.generic is this skill's write path for doctypes no domain owns,
     merged in from the former qkeee-erp-catch-all skill (2026-08-18) —
-    this skill's own extra layer on top of mutate_resource()'s
+    this skill's own extra layer on top of the pipeline's
     mode/requested_by gate, enforced in code, not just prompt."""
 
     QA_ENV = {
@@ -380,8 +369,7 @@ class TestGatedMutateResource(unittest.TestCase):
     def test_refuses_without_token(self):
         with patch.object(ec, "_request") as mocked_request:
             with self.assertRaises(ec.ConnectorError):
-                ec.gated_mutate_resource("qa", "CRM Lead", "create", {"x": 1}, mode="read-write",
-                                          requested_by="priya@org.com")
+                operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com')
             mocked_request.assert_not_called()
 
     def test_refuses_with_stale_token(self):
@@ -389,9 +377,7 @@ class TestGatedMutateResource(unittest.TestCase):
         token = advisory_write_token("create", "CRM Lead", None, {"x": 1}, "priya@org.com", old_issued_at)
         with patch.object(ec, "_request") as mocked_request:
             with self.assertRaises(ec.StaleConfirmationError):
-                ec.gated_mutate_resource("qa", "CRM Lead", "create", {"x": 1}, mode="read-write",
-                                          requested_by="priya@org.com",
-                                          confirmation_token=token, issued_at=old_issued_at)
+                operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=old_issued_at)
             mocked_request.assert_not_called()
 
     def test_refuses_with_mismatched_payload(self):
@@ -402,9 +388,7 @@ class TestGatedMutateResource(unittest.TestCase):
         token = advisory_write_token("create", "CRM Lead", None, {"x": 1}, "priya@org.com", issued_at)
         with patch.object(ec, "_request") as mocked_request:
             with self.assertRaises(ec.ConnectorError):
-                ec.gated_mutate_resource("qa", "CRM Lead", "create", {"x": 2}, mode="read-write",
-                                          requested_by="priya@org.com",
-                                          confirmation_token=token, issued_at=issued_at)
+                operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload={'x': 2}, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at)
             mocked_request.assert_not_called()
 
     def test_refuses_without_user_confirmation_text(self):
@@ -416,9 +400,7 @@ class TestGatedMutateResource(unittest.TestCase):
         token = advisory_write_token("create", "CRM Lead", None, {"x": 1}, "priya@org.com", issued_at)
         with patch.object(ec, "_request") as mocked_request:
             with self.assertRaises(ec.UnconfirmedByUserError):
-                ec.gated_mutate_resource("qa", "CRM Lead", "create", {"x": 1}, mode="read-write",
-                                          requested_by="priya@org.com",
-                                          confirmation_token=token, issued_at=issued_at)
+                operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at)
             mocked_request.assert_not_called()
 
     def test_refuses_when_confirmation_text_lacks_the_code(self):
@@ -426,10 +408,7 @@ class TestGatedMutateResource(unittest.TestCase):
         token = advisory_write_token("create", "CRM Lead", None, {"x": 1}, "priya@org.com", issued_at)
         with patch.object(ec, "_request") as mocked_request:
             with self.assertRaises(ec.UnconfirmedByUserError):
-                ec.gated_mutate_resource("qa", "CRM Lead", "create", {"x": 1}, mode="read-write",
-                                          requested_by="priya@org.com",
-                                          confirmation_token=token, issued_at=issued_at,
-                                          user_confirmation_text="yes, go ahead")
+                operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at, user_confirmation_text='yes, go ahead')
             mocked_request.assert_not_called()
 
     def test_confirmation_text_check_is_case_insensitive(self):
@@ -446,10 +425,7 @@ class TestGatedMutateResource(unittest.TestCase):
                 patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True}), \
                 patch.dict("os.environ", self.QA_ENV, clear=True), \
                 patch.object(ec, "_request", return_value={"data": {"name": "CRM-LEAD-0001"}}):
-            result = ec.gated_mutate_resource("qa", "CRM Lead", "create", payload, mode="read-write",
-                                               requested_by="priya@org.com",
-                                               confirmation_token=token, issued_at=issued_at,
-                                               user_confirmation_text=f"yes {code.lower()} confirmed")
+            result = operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload=payload, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at, user_confirmation_text=f'yes {code.lower()} confirmed')
         self.assertEqual(result["data"]["name"], "CRM-LEAD-0001")
 
     def test_confirmation_text_for_a_different_tokens_code_is_refused(self):
@@ -460,10 +436,7 @@ class TestGatedMutateResource(unittest.TestCase):
         other_token = advisory_write_token("create", "CRM Lead", None, {"x": 999}, "priya@org.com", issued_at)
         with patch.object(ec, "_request") as mocked_request:
             with self.assertRaises(ec.UnconfirmedByUserError):
-                ec.gated_mutate_resource("qa", "CRM Lead", "create", {"x": 1}, mode="read-write",
-                                          requested_by="priya@org.com",
-                                          confirmation_token=token, issued_at=issued_at,
-                                          user_confirmation_text=f"yes {confirmation_code(other_token)}")
+                operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at, user_confirmation_text=f'yes {confirmation_code(other_token)}')
             mocked_request.assert_not_called()
 
     def test_succeeds_with_matching_fresh_token(self):
@@ -483,10 +456,7 @@ class TestGatedMutateResource(unittest.TestCase):
                 patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True}), \
                 patch.dict("os.environ", self.QA_ENV, clear=True), \
                 patch.object(ec, "_request", return_value={"data": {"name": "CRM-LEAD-0001"}}) as mocked:
-            result = ec.gated_mutate_resource("qa", "CRM Lead", "create", payload, mode="read-write",
-                                               requested_by="priya@org.com",
-                                               confirmation_token=token, issued_at=issued_at,
-                                               user_confirmation_text=f"yes {confirmation_code(token)}")
+            result = operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload=payload, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at, user_confirmation_text=f'yes {confirmation_code(token)}')
         self.assertEqual(result["data"]["name"], "CRM-LEAD-0001")
         mocked.assert_called_once()
 
@@ -516,10 +486,7 @@ class TestGatedMutateResource(unittest.TestCase):
                 patch.dict("os.environ", self.QA_ENV, clear=True), \
                 patch.object(ec, "_request", return_value={"data": {"name": "DVSISTEMS"}}) as mocked:
             with self.assertRaises(ec.UnvalidatedProdRequesterError):
-                ec.gated_mutate_resource("qa", "Company", "create", payload, mode="read-write",
-                                          requested_by="priya@org.com",
-                                          confirmation_token=token, issued_at=issued_at,
-                                          user_confirmation_text=f"confirmed, code {confirmation_code(token)}")
+                operations.call_generic('unscoped.generic', 'qa', 'Company', 'create', payload=payload, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at, user_confirmation_text=f'confirmed, code {confirmation_code(token)}')
         mocked.assert_not_called()  # refused before the actual write ever fired
         mocked_perm.assert_not_called()  # never trust a permission answer we know is meaningless
 
@@ -545,10 +512,7 @@ class TestGatedMutateResource(unittest.TestCase):
                                             "precheck_discriminates": True}), \
                 patch.dict("os.environ", self.QA_ENV, clear=True), \
                 patch.object(ec, "_request", return_value={"data": {"name": "DVSISTEMS"}}) as mocked:
-            result = ec.gated_mutate_resource("qa", "Company", "create", payload, mode="read-write",
-                                               requested_by="priya@org.com",
-                                               confirmation_token=token, issued_at=issued_at,
-                                               user_confirmation_text=f"confirmed, code {confirmation_code(token)}")
+            result = operations.call_generic('unscoped.generic', 'qa', 'Company', 'create', payload=payload, mode='read-write', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at, user_confirmation_text=f'confirmed, code {confirmation_code(token)}')
         self.assertEqual(result["data"]["name"], "DVSISTEMS")
         mocked.assert_called_once()
         mocked_perm.assert_not_called()  # never trust a permission answer we know is meaningless
@@ -556,15 +520,12 @@ class TestGatedMutateResource(unittest.TestCase):
     def test_still_refuses_read_only_even_with_valid_token(self):
         """The token gate (and the user_confirmation_text gate alongside
         it) is additive, not a replacement for the mode/requested_by gate
-        mutate_resource() already enforces."""
+        the pipeline already enforces."""
         issued_at = int(time.time())
         token = advisory_write_token("create", "CRM Lead", None, {"x": 1}, "priya@org.com", issued_at)
         with patch.object(ec, "_request") as mocked_request:
             with self.assertRaises(ec.ReadOnlyModeError):
-                ec.gated_mutate_resource("qa", "CRM Lead", "create", {"x": 1}, mode="read-only",
-                                          requested_by="priya@org.com",
-                                          confirmation_token=token, issued_at=issued_at,
-                                          user_confirmation_text=f"yes {confirmation_code(token)}")
+                operations.call_generic('unscoped.generic', 'qa', 'CRM Lead', 'create', payload={'x': 1}, mode='read-only', requested_by='priya@org.com', confirmation_token=token, issued_at=issued_at, user_confirmation_text=f'yes {confirmation_code(token)}')
             mocked_request.assert_not_called()
 
 
@@ -956,7 +917,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
     @patch.object(ec, "resource_exists", return_value=True)
     def test_domain_scoped_write_also_refused_when_role_verdict_inconclusive(
             self, mocked_exists, mocked_perm, mocked_trust):
-        # A `domain=`-scoped write has cleared mutate_resource()'s
+        # A domain-scoped write has cleared the pipeline's
         # ALLOWED_WRITE_DOCTYPES gate before this function ever runs —
         # that used to be enough to proceed on a warning; per the
         # 2026-09-11 decision it no longer is, once the local role check
@@ -975,7 +936,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
     def test_advisory_token_verified_write_also_refused_when_role_verdict_inconclusive(
             self, mocked_exists, mocked_perm, mocked_trust):
         # advisory_token_verified=True (only ever set by
-        # gated_mutate_resource() after its own confirmation_token check
+        # the unscoped operation after its own confirmation_token check
         # already passed) used to be its own sufficient fallback here too
         # — same 2026-09-11 change applies: it isn't anymore.
         with self.assertRaises(ec.UnvalidatedProdRequesterError):
@@ -1022,7 +983,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
     @patch.object(ec, "check_user_permission")
     @patch.object(ec, "resource_exists", return_value=True)
     @patch.object(ec, "_audit_insert", return_value=None)
-    def test_mutate_resource_refuses_write_when_precheck_unreliable(
+    def test_write_refuses_write_when_precheck_unreliable(
             self, mocked_audit_insert, mocked_exists, mocked_perm, mocked_role_verdict, mocked_trust):
         # _audit_insert mocked (F11's gate-decision row now fires on this
         # denial too) so this stays a real-network-free unit test — same
@@ -1034,8 +995,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
             "QKEEE_ERP_TAGK_API_SECRET": "secret",
         }, clear=True):
             with self.assertRaises(ec.UnvalidatedProdRequesterError):
-                ec.mutate_resource("tagk", "Sales Order", "create", payload={"x": 1},
-                                    mode="read-write", requested_by="priya@org.com", domain="sales")
+                operations.call_generic('sales.generic', 'tagk', 'Sales Order', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com')
 
     @patch.object(ec, "verify_rbac_precheck_reliable",
                    return_value={"reliable": False, "bot_user": "Administrator",
@@ -1045,10 +1005,10 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
     @patch.object(ec, "check_user_permission")
     @patch.object(ec, "resource_exists", return_value=True)
     @patch.object(ec, "_audit_insert", return_value=None)
-    def test_mutate_resource_also_refuses_domain_scoped_write_when_role_verdict_inconclusive(
+    def test_write_also_refuses_domain_scoped_write_when_role_verdict_inconclusive(
             self, mocked_audit_insert, mocked_exists, mocked_perm, mocked_role_verdict, mocked_trust):
         # Same broken-precheck scenario as
-        # test_mutate_resource_refuses_write_when_precheck_unreliable
+        # test_write_refuses_write_when_precheck_unreliable
         # above, but with `domain=` set to an allowlisted, registered
         # domain — used to proceed on that allowlist alone (+ a warning);
         # per the 2026-09-11 decision it no longer does once the local
@@ -1064,8 +1024,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
             "QKEEE_ERP_TAGKK_API_SECRET": "secret",
         }, clear=True):
             with self.assertRaises(ec.UnvalidatedProdRequesterError):
-                ec.mutate_resource("tagkk", "Sales Order", "create", payload={"x": 1},
-                                    mode="read-write", requested_by="priya@org.com", domain=fake_domain)
+                operations.call_generic(f'{fake_domain}.generic', 'tagkk', 'Sales Order', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com')
         mocked_perm.assert_not_called()
 
     @patch.object(ec, "verify_rbac_precheck_reliable",
@@ -1077,7 +1036,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
     @patch.object(ec, "resource_exists", return_value=True)
     @patch.object(ec, "record_comment")
     @patch.object(ec, "_audit_insert", return_value=None)
-    def test_mutate_resource_proceeds_for_domain_scoped_write_when_role_verdict_confirms_it(
+    def test_write_proceeds_for_domain_scoped_write_when_role_verdict_confirms_it(
             self, mocked_audit_insert, mocked_comment, mocked_exists, mocked_perm,
             mocked_role_verdict, mocked_trust):
         # The success companion: same broken-precheck, same domain-scoped
@@ -1096,8 +1055,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
                 patch.object(ec, "_do_mutate", return_value={"data": {"name": "SO-0001"}}), \
                 patch.object(ec, "record_audit_log_start", return_value="AUDITLOG-0002"), \
                 patch.object(ec, "record_audit_log_finish"):
-            ec.mutate_resource("tagkk2", "Sales Order", "create", payload={"x": 1},
-                                mode="read-write", requested_by="priya@org.com", domain=fake_domain)  # no raise
+            operations.call_generic(f'{fake_domain}.generic', 'tagkk2', 'Sales Order', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com')  # no raise
         mocked_perm.assert_not_called()
 
     @patch.object(ec, "get_user_roles",
@@ -1364,17 +1322,13 @@ class ProdGateWiringTests(unittest.TestCase):
     @patch.object(ec, "_do_mutate", return_value={"data": {"name": "SO-0001"}})
     @patch.object(ec, "_validate_prod_requester")
     @patch.object(ec, "get_env_config", return_value={"tag": "prod"})
-    def test_mutate_resource_gates_with_action_specific_ptype(self, mocked_cfg, mocked_gate,
+    def test_write_gates_with_action_specific_ptype(self, mocked_cfg, mocked_gate,
                                                                 mocked_do_mutate, mocked_start, mocked_finish):
         issued_at = int(time.time())
         token = advisory_write_token("submit", "Sales Order", "SO-0001", None, "priya@org.com",
                                      issued_at, op="sales.generic", expected_modified="M1")
         with patch.object(operations, "_live_modified", return_value="M1"):
-            ec.mutate_resource("prod", "Sales Order", "submit", name="SO-0001", mode="read-write",
-                                requested_by="priya@org.com", domain="sales",
-                                expected_modified="M1", confirmation_token=token,
-                                issued_at=issued_at,
-                                user_confirmation_text=f"yes {confirmation_code(token)}")
+            operations.call_generic('sales.generic', 'prod', 'Sales Order', 'submit', name='SO-0001', mode='read-write', requested_by='priya@org.com', expected_modified='M1', confirmation_token=token, issued_at=issued_at, user_confirmation_text=f'yes {confirmation_code(token)}')
         mocked_gate.assert_called_once_with("prod", "priya@org.com", "Sales Order", "submit",
                                              docname="SO-0001", for_write=True, domain="sales",
                                              session_id=None, domain_code=None,
@@ -1383,12 +1337,11 @@ class ProdGateWiringTests(unittest.TestCase):
 
     @patch.object(ec, "_validate_prod_requester", side_effect=ec.UnvalidatedProdRequesterError("nope"))
     @patch.object(ec, "get_env_config", return_value={"tag": "prod"})
-    def test_mutate_resource_blocks_before_any_write_when_gate_fails(self, mocked_cfg, mocked_gate):
+    def test_write_blocks_before_any_write_when_gate_fails(self, mocked_cfg, mocked_gate):
         with patch.object(ec, "_do_mutate") as mocked_do_mutate, \
                 patch.object(ec, "record_audit_log_start") as mocked_start:
             with self.assertRaises(ec.UnvalidatedProdRequesterError):
-                ec.mutate_resource("prod", "Sales Order", "create", payload={"customer": "X"},
-                                    mode="read-write", requested_by="priya@org.com", domain="sales")
+                operations.call_generic('sales.generic', 'prod', 'Sales Order', 'create', payload={'customer': 'X'}, mode='read-write', requested_by='priya@org.com')
             mocked_do_mutate.assert_not_called()
             mocked_start.assert_not_called()
 
@@ -1438,9 +1391,7 @@ class DomainTokenGateTests(unittest.TestCase):
         )
 
     def _submit(self, **kw):
-        return ec.mutate_resource("qa", "Fake Doctype", kw.pop("action", "submit"), name="FD-0001",
-                                  mode="read-write", requested_by="priya@org.com",
-                                  domain=self.FAKE_DOMAIN, **kw)
+        return operations.call_generic(f'{self.FAKE_DOMAIN}.generic', 'qa', 'Fake Doctype', kw.pop('action', 'submit'), name='FD-0001', mode='read-write', requested_by='priya@org.com', **kw)
 
     def test_submit_refused_without_token(self):
         with self.assertRaises(ec.ConfirmationRequiredError) as ctx:
@@ -1475,9 +1426,7 @@ class DomainTokenGateTests(unittest.TestCase):
                 patch.object(ec, "resource_exists", return_value=True), \
                 patch.object(ec, "check_user_permission", return_value=True), \
                 patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True}):
-            result = ec.mutate_resource("qa", "Fake Doctype", "create", payload={"x": 1},
-                                         mode="read-write", requested_by="priya@org.com",
-                                         domain=self.FAKE_DOMAIN)
+            result = operations.call_generic(f'{self.FAKE_DOMAIN}.generic', 'qa', 'Fake Doctype', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com')
         self.assertEqual(result["data"]["name"], "FD-0001")
 
     def test_submit_refused_with_stale_token(self):

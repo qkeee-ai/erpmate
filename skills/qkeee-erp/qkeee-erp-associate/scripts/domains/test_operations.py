@@ -48,45 +48,30 @@ LIVE = {"name": "X", "modified": "M1", "asset": "A-1",
             {"schedule_date": "2099-01-31", "depreciation_amount": 10.0, "journal_entry": None}]}
 
 MAPPED_INVOICE = {"doctype": "Sales Invoice", "company": "Acme", "customer": None,
-                  "items": [{"item_code": "LAPTOP", "asset": "A-1", "is_fixed_asset": 1, "qty": 1}]}
+                  "items": [{"item_code": "LAPTOP", "asset": "ACC-ASS-2026-00001", "is_fixed_asset": 1,
+                             "qty": 1}]}
 
-# Minimal valid args per CLI operation, and how to tamper with them after
-# render (any change to what is sent or confirmed must break the token).
-EXAMPLES = {
-    "accounts.generic": ({"doctype": "Journal Entry", "action": "submit", "name": "JE-1"}, "name"),
-    "sales.generic": ({"doctype": "Sales Order", "action": "submit", "name": "SO-1"}, "name"),
-    "hr_payroll.generic": ({"doctype": "Leave Application", "action": "cancel", "name": "LA-1"}, "name"),
-    "inventory.generic": ({"doctype": "Stock Entry", "action": "delete", "name": "STE-1"}, "name"),
-    "procurement.generic": ({"doctype": "Purchase Order", "action": "submit", "name": "PO-1"}, "name"),
-    "fixed_assets.generic": ({"doctype": "Asset", "action": "submit", "name": "A-1"}, "name"),
-    "system_admin.generic": ({"doctype": "Role", "action": "create", "payload": {"role_name": "R"}}, "payload"),
-    "mis.generic": None,  # always refused — see MisAndUnscopedTests
-    "unscoped.generic": ({"doctype": "Item", "action": "create",
-                          "payload": {"item_code": "X", "item_name": "X"}}, "payload"),
-    "fixed_assets.depreciation_run": ({"depr_schedule_name": "ADS-1", "date": "2026-03-01"},
-                                      "total_depreciation"),
-    "fixed_assets.scrap": ({"asset": "A-1", "scrap_date": "2026-10-01", "reason": "broken"}, "reason"),
-    "fixed_assets.restore": ({"asset": "A-1", "reason": "scrapped by mistake"}, "reason"),
-    "fixed_assets.sell": ({"asset": "A-1", "item_code": "LAPTOP", "company": "Acme",
-                           "sell_qty": 1, "reason": "sold"}, "reason"),
-    "system_admin.create_user": ({"email": "n@x.com", "first_name": "N",
-                                  "roles": ["Accounts User"]}, "first_name"),
-    "system_admin.disable_user": ({"name": "u@x.com", "reason": "left"}, "reason"),
-    "system_admin.set_user_roles": ({"name": "u@x.com", "roles": ["Accounts User", "Sales User"],
-                                     "reason": "moved team"}, "reason"),
-    "system_admin.delete": ({"doctype": "Webhook", "name": "WH-1", "reason": "unused"}, "reason"),
-    "system_admin.create_webhook": ({"payload": {"request_url": "https://hooks.example.com/x",
-                                                 "webhook_doctype": "Supplier"},
-                                     "reason": "sync"}, "reason"),
-    "system_admin.toggle_workflow": ({"name": "WF-1", "is_active": 0, "reason": "pause"}, "reason"),
-    "system_admin.permission_add": ({"doctype": "Supplier", "role": "Accounts User",
-                                     "reason": "r"}, "reason"),
-    "system_admin.permission_update": ({"doctype": "Supplier", "role": "Accounts User",
-                                        "ptype": "write", "value": 1, "reason": "r"}, "reason"),
-    "system_admin.permission_remove": ({"doctype": "Supplier", "role": "Accounts User",
-                                        "reason": "r"}, "reason"),
-    "system_admin.permission_reset": ({"doctype": "Supplier", "reason": "r"}, "reason"),
+# How to tamper with each operation's declared example after render: any
+# change to what is sent or confirmed must break the token. The examples
+# themselves live on the operations (Operation.example_args) — the same
+# ones `execute_write.py --list-ops` prints.
+TAMPER = {
+    "accounts.generic": "name", "sales.generic": "name", "hr_payroll.generic": "name",
+    "inventory.generic": "name", "procurement.generic": "name", "fixed_assets.generic": "name",
+    "system_admin.generic": "payload", "unscoped.generic": "payload",
+    "fixed_assets.depreciation_run": "total_depreciation", "fixed_assets.scrap": "reason",
+    "fixed_assets.restore": "reason", "fixed_assets.sell": "reason",
+    "system_admin.create_user": "first_name", "system_admin.disable_user": "reason",
+    "system_admin.set_user_roles": "reason", "system_admin.delete": "reason",
+    "system_admin.create_webhook": "reason", "system_admin.toggle_workflow": "reason",
+    "system_admin.permission_add": "reason", "system_admin.permission_update": "reason",
+    "system_admin.permission_remove": "reason", "system_admin.permission_reset": "reason",
 }
+NO_EXAMPLE = {"mis.generic"}  # refuses every write — see OwnershipAndUnscopedTests
+
+
+def _example(key):
+    return copy.deepcopy(operations.get_operation(key).example_args)
 
 
 def _tamper(args, field):
@@ -134,9 +119,13 @@ def _sent(m) -> bool:
 
 class RegistryTests(unittest.TestCase):
 
-    def test_every_cli_operation_has_an_example(self):
-        cli_ops = {op.key for op in operations.list_operations()}
-        self.assertEqual(cli_ops, set(EXAMPLES), "add an EXAMPLES entry for every new operation")
+    def test_every_cli_operation_has_an_example_and_a_tamper_rule(self):
+        for op in operations.list_operations():
+            with self.subTest(op=op.key):
+                if op.key in NO_EXAMPLE:
+                    continue
+                self.assertTrue(op.example_args, "declare example_args on the operation")
+                self.assertIn(op.key, TAMPER, "add a TAMPER entry for the new operation")
 
     def test_provisioning_ops_are_not_cli(self):
         import init_bot  # noqa: F401 — registers provisioning.*
@@ -193,9 +182,9 @@ class OperationMatrixTests(unittest.TestCase):
     """Ticket 18: every CLI operation x every gate."""
 
     def _ops(self):
-        for key, example in sorted(EXAMPLES.items()):
-            if example:
-                yield key, example[0], example[1]
+        for op in operations.list_operations():
+            if op.key not in NO_EXAMPLE:
+                yield op.key, _example(op.key), TAMPER[op.key]
 
     def _render(self, key, args):
         with connector():
@@ -277,7 +266,7 @@ class OperationMatrixTests(unittest.TestCase):
                         m["record_audit_log_start"].assert_not_called()
 
     def test_token_for_one_requester_does_not_work_for_another(self):
-        full_args, ctx, _ = self._render("system_admin.disable_user", EXAMPLES["system_admin.disable_user"][0])
+        full_args, ctx, _ = self._render("system_admin.disable_user", _example("system_admin.disable_user"))
         ctx.requested_by = "someone.else@example.com"
         with connector() as m:
             with self.assertRaises(core_client.TokenMismatchError):
@@ -420,7 +409,9 @@ _REAL_MAP = _sm.map_payload_for_write
 class InvariantTests(unittest.TestCase):
     """No domain module sends a write outside the pipeline."""
 
-    FORBIDDEN_CALLS = {"_do_mutate", "mutate_resource", "gated_mutate_resource"}
+    # Domain modules never touch the transport at all: writes go through
+    # operations, reads through client.read_rpc/query_resource/get_resource.
+    FORBIDDEN_CALLS = {"_do_mutate", "_request", "mutate_resource", "gated_mutate_resource"}
 
     def test_domain_modules_send_no_write_outside_the_pipeline(self):
         for path in sorted(glob.glob(os.path.join(_DOMAINS_DIR, "*.py"))):
@@ -433,9 +424,37 @@ class InvariantTests(unittest.TestCase):
                 name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
                 with self.subTest(file=os.path.basename(path), line=node.lineno):
                     self.assertNotIn(name, self.FORBIDDEN_CALLS)
-                    if name == "_request" and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                        self.assertEqual(node.args[1].value, "GET",
-                                         "a domain module may only READ via _request")
+
+    # Every public function a domain module exposes, by kind. A new public
+    # function must be added here deliberately — and is then exercised by
+    # the gated-read tests (reads) or the operation matrix (writes go
+    # through operations, never a public function of their own).
+    PUBLIC_CALLABLES = {
+        "accounts": {},
+        "sales": {},
+        "hr_payroll": {},
+        "mis": {},
+        "procurement": {"prepare": "operation hook",
+                        "enrich": "operation hook", "check_kyc": "operation hook",
+                        "create_linked_kyc": "operation hook"},
+        "inventory": {"get_stock_reconciliation_items": "gated read",
+                      "get_bin_qty": "gated read", "bin_rows_to_actual_source_qty": "pure"},
+        "fixed_assets": {"map_sales_invoice": "gated read"},
+        "system_admin": {"get_roles_and_doctypes": "gated read",
+                         "get_permissions": "gated read", "get_scheduler_status": "gated read"},
+    }
+
+    def test_every_public_callable_is_accounted_for(self):
+        import importlib
+        import inspect
+        for module_name, expected in self.PUBLIC_CALLABLES.items():
+            module = importlib.import_module(f"domains.{module_name}")
+            public = {n for n, obj in vars(module).items()
+                      if inspect.isfunction(obj) and obj.__module__ == module.__name__
+                      and not n.startswith("_")}
+            with self.subTest(module=module_name):
+                self.assertEqual(public, set(expected))
+
 
     def test_list_ops_matches_registry(self):
         import execute_write
@@ -481,16 +500,46 @@ class OwnershipAndUnscopedTests(unittest.TestCase):
         self.assertIn("system_admin.create_user", self._run(
             "unscoped.generic", {"doctype": "User", "action": "create", "payload": {}}))
 
+    def test_delete_without_token_is_refused_in_every_writer_domain(self):
+        for domain, doctype in (("accounts", "Journal Entry"), ("sales", "Sales Order"),
+                                ("hr_payroll", "Leave Application"), ("inventory", "Stock Entry"),
+                                ("procurement", "Purchase Order"), ("fixed_assets", "Asset")):
+            # (system_admin.generic refuses deletes outright — system_admin.delete owns them.)
+            with self.subTest(domain=domain), connector() as m:
+                with self.assertRaises(core_client.ConfirmationRequiredError):
+                    operations.run_operation(f"{domain}.generic",
+                                             {"doctype": doctype, "action": "delete", "name": "X",
+                                              "expected_modified": "M1"}, testsupport.ctx())
+                self.assertFalse(_sent(m))
+
     def test_mis_refuses_everything(self):
         with connector():
             with self.assertRaises(core_client.DoctypeNotAllowedError):
                 operations.run_operation("mis.generic", {"doctype": "GL Entry", "action": "create",
                                                          "payload": {}}, testsupport.ctx())
 
-    def test_domain_shorthand_without_domain_is_refused(self):
-        with self.assertRaises(core_client.DoctypeNotAllowedError):
-            core_client.mutate_resource("t", "Sales Order", "create", payload={}, mode="read-write",
-                                        requested_by=REQ)
+    def test_client_exposes_no_write_entry_point(self):
+        """Every write goes through core/operations.py. client.py is the
+        lower layer: no mutate_resource()/gated_mutate_resource(), and it
+        never imports operations (no dependency cycle)."""
+        for name in ("mutate_resource", "gated_mutate_resource", "_operations"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(core_client, name))
+        tree = ast.parse(open(core_client.__file__, encoding="utf-8").read())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {a.name for a in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                imported |= {f"{node.module}.{a.name}" for a in node.names} | {node.module or ""}
+        self.assertFalse({i for i in imported if "operations" in i}, "client.py must not import operations")
+
+    def test_domain_modules_expose_no_mutate_wrapper(self):
+        import importlib
+        for name in ("accounts", "sales", "hr_payroll", "inventory", "mis", "procurement",
+                     "fixed_assets", "system_admin"):
+            with self.subTest(module=name):
+                self.assertFalse(hasattr(importlib.import_module(f"domains.{name}"), "mutate"))
 
 
 class SystemAdminRuleTests(unittest.TestCase):
@@ -524,7 +573,7 @@ class SystemAdminRuleTests(unittest.TestCase):
     def test_set_user_roles_refused_if_roles_changed_since_render(self):
         with connector():
             args, ctx, _ = testsupport.render("system_admin.set_user_roles",
-                                              EXAMPLES["system_admin.set_user_roles"][0])
+                                              _example("system_admin.set_user_roles"))
         self.assertEqual(args["roles_before"], ["Accounts User"])
         changed = dict(LIVE, roles=[{"role": "Accounts User"}, {"role": "System Manager"}])
         with connector() as m:
@@ -536,14 +585,14 @@ class SystemAdminRuleTests(unittest.TestCase):
     def test_disable_user_sends_exactly_enabled_0(self):
         with connector():
             args, ctx, _ = testsupport.render("system_admin.disable_user",
-                                              EXAMPLES["system_admin.disable_user"][0])
+                                              _example("system_admin.disable_user"))
         with connector() as m:
             operations.run_operation("system_admin.disable_user", args, ctx)
         self.assertEqual(m["_do_mutate"].call_args.args[3], {"enabled": 0})
 
     def test_delete_posts_no_comment_and_refuses_other_doctypes(self):
         with connector():
-            args, ctx, _ = testsupport.render("system_admin.delete", EXAMPLES["system_admin.delete"][0])
+            args, ctx, _ = testsupport.render("system_admin.delete", _example("system_admin.delete"))
         with connector() as m:
             operations.run_operation("system_admin.delete", args, ctx)
         self.assertTrue(m["_do_mutate"].call_args.kwargs["skip_comment"])
@@ -559,7 +608,7 @@ class SystemAdminRuleTests(unittest.TestCase):
             key = f"system_admin.permission_{action}"
             with self.subTest(op=key):
                 with connector():
-                    args, ctx, _ = testsupport.render(key, EXAMPLES[key][0])
+                    args, ctx, _ = testsupport.render(key, _example(key))
                 with connector() as m:
                     operations.run_operation(key, args, ctx)
                 start = m["record_audit_log_start"].call_args.kwargs
@@ -570,14 +619,14 @@ class SystemAdminRuleTests(unittest.TestCase):
     def test_permission_update_render_records_current_value(self):
         with connector():
             out = operations.prepare_only("system_admin.permission_update",
-                                          EXAMPLES["system_admin.permission_update"][0],
+                                          _example("system_admin.permission_update"),
                                           testsupport.ctx())
         self.assertEqual(out["args"]["current_value"], 0)
 
     def test_admin_send_but_bot_audit(self):
         with connector():
             args, ctx, _ = testsupport.render("system_admin.toggle_workflow",
-                                              EXAMPLES["system_admin.toggle_workflow"][0])
+                                              _example("system_admin.toggle_workflow"))
         with connector() as m:
             operations.run_operation("system_admin.toggle_workflow", args, ctx)
         self.assertEqual(m["_do_mutate"].call_args.args[0]["credential"], "admin")
@@ -593,6 +642,31 @@ class FixedAssetRuleTests(unittest.TestCase):
                                           testsupport.ctx())
         self.assertEqual((out["args"]["pending_rows"], out["args"]["total_depreciation"]), (2, 20.0))
         self.assertEqual(out["request"]["body"], {"depr_schedule_name": "ADS-1", "date": "2026-03-01"})
+
+    def test_rpc_audit_rows_reference_the_asset(self):
+        for key in ("fixed_assets.depreciation_run", "fixed_assets.scrap", "fixed_assets.restore"):
+            with self.subTest(op=key):
+                with connector():
+                    args, ctx, _ = testsupport.render(key, _example(key))
+                with connector() as m:
+                    operations.run_operation(key, args, ctx)
+                start = m["record_audit_log_start"].call_args.kwargs
+                self.assertEqual((start["doctype"], start["name"]), ("Asset", "A-1" if key.endswith("run")
+                                                                     else _example(key)["asset"]))
+                self.assertEqual(m["record_audit_log_finish"].call_args.kwargs["reference_name"],
+                                 start["name"])
+
+    def test_finalizing_action_on_a_missing_record_is_a_gate_refusal(self):
+        """Live-found (DEMO_ERP smoke): a 404 in the unchanged-since-render
+        read must surface as a refusal (exit 3), not an ERPNext error."""
+        with connector() as m:
+            m["get_resource"].side_effect = core_client.ConnectorError(
+                "ERPNext API error (404) on GET /api/resource/Journal Entry/X: not found")
+            with self.assertRaises(core_client.PreconditionFailedError):
+                operations.run_operation("accounts.generic",
+                                         {"doctype": "Journal Entry", "action": "delete", "name": "X",
+                                          "expected_modified": "M1"}, testsupport.ctx())
+            self.assertFalse(_sent(m))
 
     def test_depreciation_slice_indices_are_refused(self):
         with connector():
@@ -629,15 +703,17 @@ class FixedAssetRuleTests(unittest.TestCase):
             with self.assertRaises(core_client.ConnectorError):
                 operations.prepare_only("fixed_assets.scrap", {"asset": "A-1", "reason": "x"},
                                         testsupport.ctx())
-            out = operations.prepare_only("fixed_assets.scrap", EXAMPLES["fixed_assets.scrap"][0],
+            out = operations.prepare_only("fixed_assets.scrap", _example("fixed_assets.scrap"),
                                           testsupport.ctx())
-        self.assertEqual(out["request"]["body"], {"asset_name": "A-1", "scrap_date": "2026-10-01"})
+        example = _example("fixed_assets.scrap")
+        self.assertEqual(out["request"]["body"], {"asset_name": example["asset"],
+                                                  "scrap_date": example["scrap_date"]})
         self.assertEqual(out["request"]["confirmed_facts"]["book_value"], 500.0)
 
     def test_sell_creates_a_draft_invoice_checked_against_accounts(self):
         with connector():
-            args, ctx, _ = testsupport.render("fixed_assets.sell", EXAMPLES["fixed_assets.sell"][0])
-        self.assertEqual(args["invoice"]["items"][0]["asset"], "A-1")
+            args, ctx, _ = testsupport.render("fixed_assets.sell", _example("fixed_assets.sell"))
+        self.assertEqual(args["invoice"]["items"][0]["asset"], "ACC-ASS-2026-00001")
         with connector() as m:
             operations.run_operation("fixed_assets.sell", args, ctx)
         self.assertEqual(m["_do_mutate"].call_args.args[1:3], ("Sales Invoice", "create"))

@@ -68,21 +68,15 @@ operations.generic_operation(DOMAIN_NAME, credential="admin",
                              token_actions=frozenset(operations.RESOURCE_ACTIONS),
                              summary="Role create/update, Custom Field/Property Setter "
                                      "create/update — every action confirmed (admin credential)",
+                             example_args={"doctype": "Role", "action": "create",
+                                           "payload": {"role_name": "Expense Approver",
+                                                       "desk_access": 1}},
                              refuse=(
     (("Webhook", "update"), "this skill has no gated path for editing a webhook (it could "
                             "repoint the destination) — give the user UI-level guidance."),
     (("Workflow", "create"), "creating workflows is guidance only — give the user UI-level "
                              "guidance."),
 ))
-
-
-def mutate(tag: str, doctype: str, action: str, **kwargs) -> dict:
-    """Compatibility shim: operation "system_admin.generic" — Role create/
-    update and Custom Field/Property Setter create/update only; every
-    gated write is refused there and named."""
-    return operations.call_generic(f"{DOMAIN_NAME}.generic", tag, doctype, action, **kwargs)
-
-
 def _admin_op(**kw) -> Operation:
     kw.setdefault("domain", DOMAIN_NAME)
     kw.setdefault("credential", "admin")
@@ -91,16 +85,8 @@ def _admin_op(**kw) -> Operation:
 
 def _role_exists(ctx, role: str) -> bool:
     """Role is System-Manager-readable only, so this checks with the admin
-    credential (a GET; 404 means absent)."""
-    import urllib.parse
-    cfg = core_client.get_env_config(ctx.tag, credential="admin")
-    try:
-        core_client._request(cfg, "GET", f"/api/resource/Role/{urllib.parse.quote(role)}")
-        return True
-    except core_client.ConnectorError as e:
-        if "(404)" in str(e):
-            return False
-        raise
+    credential (404 means absent)."""
+    return core_client.resource_exists(ctx.tag, "Role", role, credential="admin")
 
 
 def _roles_exist(roles, ctx) -> None:
@@ -136,6 +122,8 @@ _admin_op(key="system_admin.create_user",
           summary="create a User with exact, existing roles (elevated roles flagged)",
           prepare=_create_user_prepare, owns=frozenset({("User", "create")}),
           preconditions=(lambda req, args, ctx: _roles_exist(_role_list(args), ctx),),
+          example_args={"email": "new.joiner@example.com", "first_name": "New",
+                        "roles": ["Accounts User"]},
           args_help={"email": "", "first_name": "", "last_name": "optional",
                      "roles": "list of exact role names", "send_welcome_email": "bool"})
 
@@ -149,6 +137,7 @@ def _disable_user_prepare(args, ctx):
 _admin_op(key="system_admin.disable_user",
           summary="disable a User (enabled=0) — reversible; prefer over delete",
           prepare=_disable_user_prepare, owns=frozenset({("User", "update")}),
+          example_args={"name": "leaver@example.com", "reason": "left the company"},
           args_help={"name": "User id", "reason": "stated reason"})
 
 
@@ -188,6 +177,8 @@ _admin_op(key="system_admin.set_user_roles",
           summary="replace a User's role list (render shows exact before/after)",
           prepare=_set_roles_prepare, render_defaults=_set_roles_render,
           preconditions=(_roles_unchanged_since_render,),
+          example_args={"name": "staff@example.com", "roles": ["Accounts User", "Sales User"],
+                        "reason": "moved to sales ops"},
           args_help={"name": "User id", "roles": "complete new role list", "reason": "",
                      "roles_before": "filled by render"})
 
@@ -210,6 +201,7 @@ _admin_op(key="system_admin.delete",
           summary="delete a User/Role/Custom Field/Property Setter/Webhook/Workflow (prefer disable_user for users)",
           prepare=_delete_prepare, skip_comment=True,
           owns=frozenset((d, "delete") for d in DELETABLE_DOCTYPES),
+          example_args={"doctype": "Webhook", "name": "HOOK-0001", "reason": "integration retired"},
           args_help={"doctype": f"one of {DELETABLE_DOCTYPES}", "name": "", "reason": ""})
 
 
@@ -228,6 +220,9 @@ _admin_op(key="system_admin.create_webhook",
           prepare=_webhook_prepare, owns=frozenset({("Webhook", "create")}),
           preconditions=(lambda req, args, ctx: operations.check_public_https_url(
               (req.body or {}).get("request_url")),),
+          example_args={"payload": {"webhook_doctype": "Supplier", "webhook_docevent": "after_insert",
+                                    "request_url": "https://hooks.example.com/erp/supplier"},
+                        "reason": "sync suppliers to procurement portal"},
           args_help={"payload": "Webhook fields incl. request_url (https, public host)",
                      "reason": ""})
 
@@ -244,6 +239,8 @@ def _workflow_prepare(args, ctx):
 _admin_op(key="system_admin.toggle_workflow",
           summary="switch a Workflow on/off — can halt every in-flight approval on its doctype",
           prepare=_workflow_prepare, owns=frozenset({("Workflow", "update")}),
+          example_args={"name": "Purchase Order Approval", "is_active": 0,
+                        "reason": "pause approvals during migration"},
           args_help={"name": "Workflow name", "is_active": "0 or 1", "reason": ""})
 
 
@@ -309,6 +306,9 @@ for _action in _PERMISSION_ACTIONS:
                        "reset": "wipe ALL custom permission overrides on a doctype"}[_action],
               prepare=_permission_prepare(_action), allowlist_domain=None, skip_comment=True,
               render_defaults=_permission_update_render if _action == "update" else None,
+              example_args=dict({"doctype": "Supplier", "reason": "least privilege review"},
+                                **({} if _action == "reset" else {"role": "Accounts User"}),
+                                **({"ptype": "write", "value": 0} if _action == "update" else {})),
               args_help={"doctype": "target DocType", "role": "", "permlevel": "default 0",
                          "ptype": "update only", "value": "update only, 0/1", "reason": "",
                          "current_value": "update only, filled by render"})

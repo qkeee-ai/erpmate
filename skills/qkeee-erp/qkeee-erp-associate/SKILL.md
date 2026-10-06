@@ -181,13 +181,20 @@ all** (a third-party tool, an internal API) follows
 - `references/domains/*.md` — one per domain slug above, lazily latched.
 - `scripts/core/client.py` — the shared connector: reads, the requester
   gate, audit logging, transport, and the write-allowlist registry
-  (`register_domain_allowlist()`).
+  (`register_domain_allowlist()`). It has **no write function** and never
+  imports `operations.py`.
 - `scripts/core/operations.py` — the one write pipeline and the registry of
-  named write operations; `scripts/execute_write.py` is its only CLI
+  named write operations, and the only write API: `run_operation()`,
+  `prepare_only()` (render), `call_generic()` (keyword spelling for a
+  generic operation). `scripts/execute_write.py` is its only CLI
   (`--list-ops`), `scripts/core/confirm_token.py render` its render step.
-- `scripts/domains/*.py` — one per domain with a write path (nine of
-  eleven — `mis` registers an empty allowlist, `doc-extraction` has no
-  connector, `manufacturing` has no module yet).
+  Dependencies run one way: domains → operations → client.
+- `scripts/domains/*.py` — eight modules for the eleven domains: `mis`'s
+  registers an empty allowlist; `doc-extraction` has no connector,
+  `manufacturing` no write path yet, and `grc-audit` is review-only, so
+  those three have no module. Each declares its
+  allowlist, operations and gated reads; none has a write function of
+  its own.
 - `scripts/init_bot.py` — admin-invoked, one-time provisioning helper
   (not part of this associate's normal conversational flow); provisions
   the `Qkeee Bot` Role and `Qkeee Bot Audit Log` doctype.

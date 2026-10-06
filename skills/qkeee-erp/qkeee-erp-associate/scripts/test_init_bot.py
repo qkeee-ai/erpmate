@@ -71,7 +71,8 @@ class RunRealCallsLogRoleProvisioningAfterDoctypesTests(unittest.TestCase):
     @patch.object(init_bot, "ensure_doctype", return_value=True)
     @patch.object(init_bot, "ensure_role", return_value=True)
     @patch.object(init_bot.core_client, "health_check", return_value={"status": "ok"})
-    @patch.object(init_bot, "compute_plan", return_value={"role_needed": True, "doctypes_needed": ["Qkeee Bot Audit Log"]})
+    @patch.object(init_bot, "compute_plan", return_value={"role_needed": True, "doctypes_needed": ["Qkeee Bot Audit Log"],
+                                                       "fields_to_migrate": []})
     def test_log_role_provisioning_called_after_doctype_loop(
             self, mocked_plan, mocked_health, mocked_role, mocked_doctype, mocked_env, mocked_log):
         calls = []
@@ -86,6 +87,74 @@ class RunRealCallsLogRoleProvisioningAfterDoctypesTests(unittest.TestCase):
 
         self.assertEqual(calls, ["role", "doctype", "log"])
         mocked_log.assert_called_once_with("qa", "admin@org.com", True, unittest.mock.ANY)
+
+
+class AuditFieldMigrationTests(unittest.TestCase):
+    """reference_name moved from Dynamic Link to Data: as a Dynamic Link
+    every audited record became undeletable (LinkExistsError, found live on
+    DEMO_ERP 2026-10-06). init_bot detects and migrates an existing
+    instance; the provisioning operation can only converge the doctype on
+    doctype_defs.py."""
+
+    AUDIT = "Qkeee Bot Audit Log"
+
+    def _live(self, reference_type):
+        from doctype_defs import ALL_DOCTYPES
+        fields = [dict(f, name=f"row-{i}") for i, f in
+                  enumerate(next(d for d in ALL_DOCTYPES if d["name"] == self.AUDIT)["fields"])]
+        for f in fields:
+            if f["fieldname"] == "reference_name":
+                f["fieldtype"] = reference_type
+        return {"name": self.AUDIT, "fields": fields}
+
+    def test_definition_is_data_not_dynamic_link(self):
+        from doctype_defs import ALL_DOCTYPES
+        ref = next(f for f in next(d for d in ALL_DOCTYPES if d["name"] == self.AUDIT)["fields"]
+                   if f["fieldname"] == "reference_name")
+        self.assertEqual(ref["fieldtype"], "Data")
+
+    def test_plan_detects_a_dynamic_link_instance(self):
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True),                 patch.object(init_bot, "_live_doctype", return_value=self._live("Dynamic Link")):
+            plan = init_bot.compute_plan("qa")
+        self.assertEqual(plan["fields_to_migrate"],
+                         [f"{self.AUDIT}.reference_name: Dynamic Link -> Data"])
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True),                 patch.object(init_bot, "_live_doctype", return_value=self._live("Data")):
+            self.assertEqual(init_bot.compute_plan("qa")["fields_to_migrate"], [])
+
+    def test_plan_token_covers_the_migration(self):
+        a = init_bot._init_plan_token("qa", "a@b.c", False, [], issued_at=1, fields_to_migrate=[])
+        b = init_bot._init_plan_token("qa", "a@b.c", False, [], issued_at=1, fields_to_migrate=["x"])
+        self.assertNotEqual(a, b)
+
+    def test_migration_patches_only_the_migratable_field_through_the_pipeline(self):
+        live = self._live("Dynamic Link")
+        with patch.object(init_bot, "_live_doctype", return_value=live),                 patch.object(init_bot.operations, "run_operation") as run_op:
+            migrated = init_bot.migrate_fields("qa", "admin@org.com", "confirmed")
+        self.assertEqual(migrated, [f"{self.AUDIT}.reference_name"])
+        key, args, _ctx = run_op.call_args.args
+        self.assertEqual(key, "provisioning.migrate_fields")
+        sent = {f["fieldname"]: f for f in args["fields"]}
+        self.assertEqual(sent["reference_name"]["fieldtype"], "Data")
+        self.assertEqual(sent["reference_name"]["name"], live["fields"][
+            [f["fieldname"] for f in live["fields"]].index("reference_name")]["name"])
+        untouched = [f for f in args["fields"] if f["fieldname"] != "reference_name"]
+        self.assertEqual(untouched, [f for f in live["fields"] if f["fieldname"] != "reference_name"])
+
+    def test_migrate_operation_refuses_anything_but_the_definition(self):
+        from core import operations
+        ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
+        op = operations.get_operation("provisioning.migrate_fields")
+        good = self._live("Data")["fields"]
+        op.prepare({"doctype_name": self.AUDIT, "fields": good}, ctx)  # accepted
+        for label, fields in (
+                ("other type", self._live("Long Text")["fields"]),
+                ("extra field", good + [{"fieldname": "evil", "fieldtype": "Code"}]),
+                ("missing field", good[1:])):
+            with self.subTest(case=label):
+                with self.assertRaises(init_bot.core_client.DoctypeNotAllowedError):
+                    op.prepare({"doctype_name": self.AUDIT, "fields": fields}, ctx)
+        with self.assertRaises(init_bot.core_client.DoctypeNotAllowedError):
+            op.prepare({"doctype_name": "User", "fields": good}, ctx)
 
 
 if __name__ == "__main__":

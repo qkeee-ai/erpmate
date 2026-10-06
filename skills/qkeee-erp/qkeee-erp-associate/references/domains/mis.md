@@ -20,8 +20,7 @@ question over ERPNext's accounts data.
   unconditionally, via `DoctypeNotAllowedError` — before any read. Treat any proposal to
   add a doctype to this domain's allowlist as a decision that
   contradicts this domain's entire purpose, not a routine capability
-  expansion. `domains.mis.mutate()` exists only for interface symmetry
-  with every other domain module; calling it always fails.
+  expansion.
 - **Numbers must tie out before they're presented.** Every report
   self-checks a reconciliation (debits vs credits, assets vs
   liabilities+equity, segment-sum vs company-total, drill-down-sum vs

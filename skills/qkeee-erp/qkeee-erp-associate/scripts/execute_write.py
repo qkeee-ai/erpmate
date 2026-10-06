@@ -132,6 +132,7 @@ def _list_ops() -> list:
             "confirmation": _confirmation_label(op),
             "owns": sorted(f"{d} {a}" for d, a in op.owns),
             "args": op.args_help,
+            "example_args": op.example_args,
         })
     return out
 

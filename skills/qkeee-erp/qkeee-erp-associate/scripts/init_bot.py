@@ -26,6 +26,14 @@ operations below (core/operations.py pipeline: requester gate + audit),
 restricted to exactly the Role and Audit Log DocType this script defines,
 and are not reachable from execute_write.py.
 
+**Re-run it on an already-provisioned instance after upgrading this skill.**
+The plan also converges existing provisioned doctypes on doctype_defs.py's
+MIGRATABLE_FIELDS — currently the audit log's `reference_name`, changed
+from Dynamic Link to Data because a Dynamic Link made every audited record
+undeletable (LinkExistsError) and silently dropped audit rows naming a
+record that doesn't exist. Until that migration runs, deletes of records
+the skill has audited fail on that instance.
+
 `--requested-by` must be a real ERPNext User who holds create permission
 on Role and DocType (in practice: System Manager). Role/DocType writes
 are no longer exempt from core.client's requester gate — see
@@ -68,7 +76,9 @@ from core import client as core_client
 from core import operations
 from core.client import ConnectorError, _qkeee_env_file_path, _audit_insert, _audit_submit, _now_iso
 from core.confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECONDS
-from doctype_defs import ALL_DOCTYPES, ROLE_NAME, ROLE_PAYLOAD
+import urllib.parse
+
+from doctype_defs import ALL_DOCTYPES, MIGRATABLE_FIELDS, ROLE_NAME, ROLE_PAYLOAD
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +107,34 @@ def _provision_doctype_prepare(args, ctx):
                                       body=dict(defs[args["doctype_name"]]))
 
 
+def _definition(doctype_name: str) -> dict:
+    return next(d for d in ALL_DOCTYPES if d["name"] == doctype_name)
+
+
+def _provision_migrate_prepare(args, ctx):
+    """Field-type migration of an existing provisioned doctype. The body's
+    fields must name exactly the shipped definition's fields with exactly
+    the shipped types, so this can only converge the live doctype on
+    doctype_defs.py — never add a field, drop one, or set any other type."""
+    name = args.get("doctype_name")
+    if set(args) != {"doctype_name", "fields"} or name not in MIGRATABLE_FIELDS:
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.migrate_fields only migrates {sorted(MIGRATABLE_FIELDS)}.")
+    want = {f["fieldname"]: f["fieldtype"] for f in _definition(name)["fields"]}
+    got = {f.get("fieldname"): f.get("fieldtype") for f in args["fields"]}
+    if got != want:
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.migrate_fields: the fields sent for {name!r} must match "
+            f"doctype_defs.py exactly (names and types).")
+    return operations.PreparedRequest(transport="resource", doctype="DocType", action="update",
+                                      name=name, body={"fields": args["fields"]})
+
+
 for _key, _prep, _summary in (
         ("provisioning.create_role", _provision_role_prepare, f"create the {ROLE_NAME} Role"),
-        ("provisioning.create_doctype", _provision_doctype_prepare, "create the audit DocType")):
+        ("provisioning.create_doctype", _provision_doctype_prepare, "create the audit DocType"),
+        ("provisioning.migrate_fields", _provision_migrate_prepare,
+         "converge a provisioned doctype's field types on doctype_defs.py")):
     operations.register_operation(operations.Operation(
         key=_key, domain=None, summary=_summary, prepare=_prep,
         token_policy=operations.POLICY_NONE, credential="admin", allowlist_domain=None,
@@ -142,7 +177,8 @@ def ensure_qkeee_env_file_skeleton() -> bool:
 
 
 def _init_plan_token(tag: str, requested_by: str, role_needed: bool,
-                      doctypes_needed: list, issued_at: int = None) -> str:
+                      doctypes_needed: list, issued_at: int = None,
+                      fields_to_migrate: list = ()) -> str:
     """Token over the init plan: which tag, who's running it, whether the
     Role needs creating, and exactly which doctype names need creating
     (sorted, so ordering never causes a spurious mismatch). issued_at
@@ -157,6 +193,7 @@ def _init_plan_token(tag: str, requested_by: str, role_needed: bool,
         requested_by=requested_by,
         role_needed=bool(role_needed),
         doctypes_needed=sorted(doctypes_needed),
+        fields_to_migrate=sorted(fields_to_migrate),
         issued_at=int(issued_at),
     )
 
@@ -176,7 +213,54 @@ def compute_plan(tag: str) -> dict:
         d["name"] for d in ALL_DOCTYPES
         if not core_client.resource_exists(tag, "DocType", d["name"])
     ]
-    return {"role_needed": role_needed, "doctypes_needed": doctypes_needed}
+    fields_to_migrate = []
+    for name, fieldnames in sorted(MIGRATABLE_FIELDS.items()):
+        if name in doctypes_needed:
+            continue  # created fresh from the current definition
+        live = {f.get("fieldname"): f.get("fieldtype") for f in _live_doctype(tag, name).get("fields", [])}
+        want = {f["fieldname"]: f["fieldtype"] for f in _definition(name)["fields"]}
+        fields_to_migrate += [f"{name}.{fn}: {live.get(fn)} -> {want[fn]}"
+                              for fn in fieldnames if live.get(fn) != want[fn]]
+    return {"role_needed": role_needed, "doctypes_needed": doctypes_needed,
+            "fields_to_migrate": fields_to_migrate}
+
+
+def _live_doctype(tag: str, name: str) -> dict:
+    """Read a provisioned DocType with the admin credential (DocType meta is
+    System-Manager-readable). A read, not a write — no operation needed."""
+    cfg = core_client.get_env_config(tag, credential="admin")
+    return core_client._request(cfg, "GET", f"/api/resource/DocType/{urllib.parse.quote(name)}").get("data") or {}
+
+
+def migrate_fields(tag: str, requested_by: str, approval_note: str) -> list:
+    """Converge each provisioned doctype's MIGRATABLE_FIELDS on
+    doctype_defs.py. Keeps every live field row (so Frappe updates rows in
+    place) and changes only the type/options of the migratable ones."""
+    migrated = []
+    for name, fieldnames in sorted(MIGRATABLE_FIELDS.items()):
+        live_fields = _live_doctype(tag, name).get("fields", [])
+        want = {f["fieldname"]: f for f in _definition(name)["fields"]}
+        changed = [f["fieldname"] for f in live_fields
+                   if f.get("fieldname") in fieldnames
+                   and f.get("fieldtype") != want[f["fieldname"]]["fieldtype"]]
+        if not changed:
+            continue
+        patched = []
+        for f in live_fields:
+            f = dict(f)
+            if f.get("fieldname") in changed:
+                f["fieldtype"] = want[f["fieldname"]]["fieldtype"]
+                f["options"] = want[f["fieldname"]].get("options")
+            patched.append(f)
+        operations.run_operation("provisioning.migrate_fields",
+                                 {"doctype_name": name, "fields": patched},
+                                 operations.WriteContext(tag=tag, mode="read-write",
+                                                         requested_by=requested_by,
+                                                         user_approved=True,
+                                                         approval_note=approval_note))
+        migrated += [f"{name}.{fn}" for fn in changed]
+        print(f"Migrated {name}: {changed} -> doctype_defs.py types.")
+    return migrated
 
 
 def ensure_role(tag: str, requested_by: str, approval_note: str) -> bool:
@@ -270,14 +354,15 @@ def run_dry_run(tag: str, requested_by: str) -> dict:
 
     _step("Plan")
     plan = compute_plan(tag)
-    nothing_needed = not plan["role_needed"] and not plan["doctypes_needed"]
+    nothing_needed = (not plan["role_needed"] and not plan["doctypes_needed"]
+                      and not plan["fields_to_migrate"])
     if nothing_needed:
         print("Nothing to do — role and doctype already in place.")
         return {"tag": tag, "dry_run": True, **plan, "confirm_token": None, "issued_at": None}
 
     issued_at = int(time.time())
     token = _init_plan_token(tag, requested_by, plan["role_needed"], plan["doctypes_needed"],
-                              issued_at=issued_at)
+                              issued_at=issued_at, fields_to_migrate=plan["fields_to_migrate"])
 
     if plan["role_needed"]:
         print(f"[dry-run] Would create Role '{ROLE_NAME}'.")
@@ -286,6 +371,8 @@ def run_dry_run(tag: str, requested_by: str) -> dict:
         print(f"[dry-run] Would create DocType '{name}' with "
               f"{len(doctype_def['fields'])} fields, "
               f"{len(doctype_def['permissions'])} permission rows.")
+    for change in plan["fields_to_migrate"]:
+        print(f"[dry-run] Would migrate field {change}.")
 
     _step("Confirm token")
     print(f"To run this for real, re-invoke with:\n"
@@ -303,7 +390,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
     _step("Plan (recomputed against current target state)")
     plan = compute_plan(tag)
 
-    action_needed = plan["role_needed"] or plan["doctypes_needed"]
+    action_needed = plan["role_needed"] or plan["doctypes_needed"] or plan["fields_to_migrate"]
     if action_needed:
         if not confirm_token or issued_at is None:
             raise ConnectorError(
@@ -318,7 +405,8 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
                 f"a fresh token."
             )
         expected = _init_plan_token(tag, requested_by, plan["role_needed"],
-                                     plan["doctypes_needed"], issued_at=issued_at)
+                                     plan["doctypes_needed"], issued_at=issued_at,
+                                     fields_to_migrate=plan["fields_to_migrate"])
         if expected != confirm_token:
             raise ConnectorError(
                 "--confirm-token does not match the current plan for this target. Either "
@@ -338,6 +426,9 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         _step(f"DocType: {doctype_def['name']}")
         results[doctype_def["name"]] = ensure_doctype(tag, doctype_def, requested_by, approval_note)
 
+    _step("Field migrations")
+    migrated = migrate_fields(tag, requested_by, approval_note) if plan["fields_to_migrate"] else []
+
     _step("Qkeee Bot Audit Log: recording Role provisioning")
     log_role_provisioning(tag, requested_by, role_created, approval_note)
 
@@ -353,6 +444,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         "role_created": role_created,
         "doctypes_created": [name for name, created in results.items() if created],
         "doctypes_already_present": [name for name, created in results.items() if not created],
+        "fields_migrated": migrated,
         "qkeee_env_file_created": env_created,
     }
     print(json.dumps(summary, indent=2))

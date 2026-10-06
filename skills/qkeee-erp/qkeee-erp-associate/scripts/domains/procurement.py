@@ -193,12 +193,5 @@ operations.generic_operation(
         "kyc": 'Supplier create: {"address": {...incl. tax ID}, "contact": {...}}',
         "kyc_waiver_confirmed": "Supplier create: true only when the user explicitly waived KYC",
     },
+    example_args={"doctype": "Purchase Order", "action": "submit", "name": "PUR-ORD-2026-00001"},
 )
-
-
-def mutate(tag: str, doctype: str, action: str, *, kyc: dict = None,
-           kyc_waiver_confirmed: bool = False, **kwargs) -> dict:
-    """Compatibility shim: operation "procurement.generic"."""
-    return operations.call_generic(
-        f"{DOMAIN_NAME}.generic", tag, doctype, action,
-        extra_args={"kyc": kyc, "kyc_waiver_confirmed": kyc_waiver_confirmed or None}, **kwargs)

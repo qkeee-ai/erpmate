@@ -61,6 +61,28 @@ class ImportRegistersEverythingTests(unittest.TestCase):
         self.assertFalse(any(k.startswith("provisioning.") for k in keys))
 
 
+class DocsNameEveryOperationTests(unittest.TestCase):
+    """Ticket 17: every CLI operation is named in the references, and the
+    cookbook points at --list-ops for each operation's worked example."""
+
+    def test_every_operation_key_is_documented(self):
+        import glob
+        import os
+        refs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "references")
+        text = "".join(open(p, encoding="utf-8").read()
+                       for p in glob.glob(os.path.join(refs, "**", "*.md"), recursive=True))
+        for op in operations.list_operations():
+            with self.subTest(op=op.key):
+                self.assertIn(op.key, text)
+
+    def test_list_ops_prints_an_example_for_every_writer_operation(self):
+        code, out, _ = run(["--list-ops"])
+        for o in json.loads(out):
+            with self.subTest(op=o["op"]):
+                if o["op"] != "mis.generic":
+                    self.assertTrue(o["example_args"])
+
+
 class ArgumentTests(unittest.TestCase):
 
     def setUp(self):

@@ -7,9 +7,8 @@ MIS's read-only posture is enforced by an EMPTY allowlist:
     ALLOWED_WRITE_DOCTYPES = ()
 
 so operation "mis.generic" refuses every doctype at the allowlist step,
-unconditionally. mutate() exists only for interface symmetry with the
-other domain modules; calling it always fails closed. Keep this covered
-by scripts/domains/test_allowlist_gates.py.
+unconditionally — before any read. Keep this covered by
+scripts/domains/test_allowlist_gates.py.
 """
 
 import os
@@ -32,9 +31,3 @@ ALLOWED_WRITE_DOCTYPES = ()
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 operations.generic_operation(DOMAIN_NAME, summary="mis is read-only — every write is refused")
-
-
-def mutate(tag: str, doctype: str, action: str, **kwargs) -> dict:
-    """Always raises core.client.DoctypeNotAllowedError — ALLOWED_WRITE_DOCTYPES
-    is empty by design."""
-    return operations.call_generic(f"{DOMAIN_NAME}.generic", tag, doctype, action, **kwargs)

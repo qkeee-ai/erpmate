@@ -8,31 +8,15 @@ doc's hand-curated field list forgot to mention it.
 
 ## Design decisions
 
-- **Lives at the call-site tier (execute_write.py calls in), not inside
-  mutate_resource()/gated_mutate_resource().** Doctype-field-shape
-  judgment is call-site judgment, not ERP-agnostic connector logic — the
-  same layering item_write_helpers.py already draws for Item's business
-  defaults, and 01-connectivity.md draws for domain judgment generally.
-  Embedding this in mutate_resource() would also mean every one of
-  core/test_client.py's existing tests (which build payloads with
-  already-correct fieldnames and mock at the HTTP layer) would need a new
-  DocType-meta mock just to keep passing, for a check that changes
-  nothing about a payload that was already correct. execute_write.py is
-  the single write entry point every real write goes through, so "runs
-  on every create/update, unconditionally" holds in practice without
-  touching the connector's own tested surface. A caller that mutates
-  outside execute_write.py — e.g. procurement.py's own
-  `_create_linked_kyc_record()`, which calls `core_client.mutate_resource`
-  directly for the Address/Contact half of a Supplier-KYC create — does
-  NOT get a second, redundant schema-mapping pass at THAT call site;
-  instead, `execute_write.py`'s own `_apply_kyc_schema_mapping()` maps
-  `kyc["address"]`/`kyc["contact"]` against Address's/Contact's own live
-  schema BEFORE dispatch, so by the time `_create_linked_kyc_record()`
-  actually fires, the sub-payload it receives is already schema-mapped —
-  same "call-site tier, not the connector" placement as everything else
-  in this module, just at the point where the KYC sub-payload's shape is
-  actually known (`execute_write.py`'s `--kyc` handling), not inside
-  `procurement.py`'s own `mutate()`.
+- **Lives in the operation pipeline's enrich step, not in the
+  connector.** Doctype-field-shape judgment is not ERP-agnostic transport
+  logic, so core/client.py never calls this module. Every generic
+  create/update maps its payload here in core/operations.py's
+  enrich_generic(), and identically at render (prepare_only) and execute
+  (run_operation), so the confirmation token covers the MAPPED payload.
+  Procurement's Supplier-KYC Address/Contact sub-payloads are mapped
+  against THEIR own live schema in procurement.py's enrich(), at the same
+  point.
 - **Exact/normalized match auto-applies; fuzzy/synonym matches are
   suggestions, never silently written.** A candidate key that equals a
   live fieldname, or normalizes to one (case/space/hyphen/underscore-

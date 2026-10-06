@@ -186,6 +186,10 @@ class Operation:
     comment_label: Optional[str] = None
     audit: bool = True                   # False only for init_bot provisioning (logs itself)
     args_help: dict = field(default_factory=dict)
+    # A minimal, valid argument set — printed by `execute_write.py
+    # --list-ops` as the operation's worked example, and driven through
+    # every gate by domains/test_operations.py, so it can't silently rot.
+    example_args: dict = field(default_factory=dict)
     cli: bool = True
 
     def policy_for(self, req: PreparedRequest) -> str:
@@ -226,19 +230,14 @@ def owned_by(doctype: str, action: str) -> Optional[str]:
 
 
 def get_operation(key: str) -> Operation:
-    if key not in REGISTRY:
-        # A domain's operations register when its module is imported; load
-        # it on demand so a caller can't hit a spurious "unknown operation"
-        # just because nothing imported the domain yet.
-        domain = key.split(".", 1)[0]
-        if domain and domain != "unscoped" and domain.isidentifier():
-            try:
-                __import__(f"domains.{domain}")
-            except ImportError:
-                pass
+    """A domain's operations register when its module is imported —
+    execute_write.py (and confirm_token.py render, via it) import every
+    domain up front. This module never imports a domain module itself, so
+    the dependency runs one way: domains -> operations -> client."""
     if key not in REGISTRY:
         raise _c.DoctypeNotAllowedError(
-            f"Unknown operation {key!r}. Registered: {sorted(REGISTRY)}."
+            f"Unknown operation {key!r} (is its domain module imported? execute_write.py imports "
+            f"them all). Registered: {sorted(REGISTRY)}."
         )
     return REGISTRY[key]
 
@@ -677,8 +676,18 @@ def _generic_policy(token_actions):
 
 
 def _live_modified(ctx: WriteContext, doctype: str, name: str):
-    data = _c.get_resource(ctx.tag, doctype, name, strip_noise=False,
-                           requested_by=ctx.requested_by, **ctx.audit_kwargs()).get("data") or {}
+    try:
+        data = _c.get_resource(ctx.tag, doctype, name, strip_noise=False,
+                               requested_by=ctx.requested_by, **ctx.audit_kwargs()).get("data") or {}
+    except _c.GateRefusal:
+        raise
+    except _c.ConnectorError as e:
+        if "(404)" in str(e):
+            # A gate refusal, not an ERPNext rejection: nothing was sent.
+            raise _c.PreconditionFailedError(
+                f"Refusing: {doctype} {name!r} does not exist (it may have been deleted or "
+                f"renamed since render, or the args were changed) — re-render.") from e
+        raise
     return data.get("modified")
 
 
@@ -713,7 +722,8 @@ def check_not_modified_since_render(req: PreparedRequest, args: dict, ctx: Write
 
 def generic_operation(domain: Optional[str], *, token_actions=FINALIZING_ACTIONS, refuse=(),
                       preconditions=(), post=None, prepare=None, enrich=None,
-                      extra_args_help=None, summary=None, credential: str = "bot") -> Operation:
+                      extra_args_help=None, summary=None, credential: str = "bot",
+                      example_args: dict = None) -> Operation:
     key = f"{domain}.generic" if domain else "unscoped.generic"
     return register_operation(Operation(
         key=key, domain=domain,
@@ -727,31 +737,36 @@ def generic_operation(domain: Optional[str], *, token_actions=FINALIZING_ACTIONS
         preconditions=(check_not_modified_since_render,) + tuple(preconditions),
         render_defaults=render_expected_modified, post=post, enrich=enrich or enrich_generic,
         args_help=dict(GENERIC_ARGS_HELP, **(extra_args_help or {})),
+        example_args=dict(example_args or {}),
     ))
 
 
 # The domain-less operation: every action needs the full confirmation.
-generic_operation(None, token_actions=frozenset(RESOURCE_ACTIONS))
+generic_operation(None, token_actions=frozenset(RESOURCE_ACTIONS), example_args={
+    "doctype": "Item", "action": "create", "purchase_sourced_item": True,
+    "payload": {"item_code": "WIDGET-01", "item_name": "Widget", "item_group": "Products",
+                "stock_uom": "Nos"}})
 
 
 # ---------------------------------------------------------------------------
-# Compatibility adapter (mutate_resource-style keyword calls)
+# Keyword-style convenience for generic operations
 # ---------------------------------------------------------------------------
 
 _CTX_KEYS = {f.name for f in dataclasses.fields(WriteContext)} - {"tag", "mode", "requested_by"}
-_IGNORED_COMPAT_KEYS = {"skip_comment", "skill_label", "advisory_token_verified"}
+
 
 
 def call_generic(op_key: str, tag: str, doctype: str, action: str, *, payload: dict = None,
                  name: str = None, mode: str = "read-only", requested_by: str = None,
                  extra_args: dict = None, **kwargs) -> dict:
-    """Adapter for the old `mutate_resource(tag, doctype, action, ...)`
-    keyword style (client.mutate_resource / gated_mutate_resource and each
-    domain's mutate() shim)."""
+    """Run a generic operation (`<domain>.generic` / `unscoped.generic`)
+    from keyword arguments instead of an args dict + WriteContext:
+    `call_generic("sales.generic", tag, "Sales Order", "create",
+    payload={...}, mode=..., requested_by=..., session_id=..., ...)`.
+    Context keywords are WriteContext's fields; domain-specific args (e.g.
+    procurement's kyc) go in `extra_args`. Same pipeline, same gates as
+    run_operation() — this only changes how the call is spelled."""
     ctx_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in _CTX_KEYS}
-    for k in list(kwargs):
-        if k in _IGNORED_COMPAT_KEYS:
-            kwargs.pop(k)
     expected_modified = kwargs.pop("expected_modified", None)
     if kwargs:
         raise TypeError(f"unexpected keyword argument(s) {sorted(kwargs)}")

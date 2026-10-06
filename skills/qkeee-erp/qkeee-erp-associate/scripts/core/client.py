@@ -29,7 +29,7 @@ from the live inbound channel identity instead — see "Requester identity
 comes from the channel, never from config" below.
 
 Non-negotiable: never issue a write call while mode == "read-only". This is
-enforced in mutate_resource() below, not just in the calling domain's
+enforced by the operation pipeline (core/operations.py), not just in the calling domain's
 prompt/reference doc.
 
 Bot account + requester attribution: the API key/secret above must belong
@@ -38,7 +38,7 @@ login. Every write additionally requires `requested_by` (the ERPNext user
 id/email of the human who asked for the change) and, on success, posts a
 best-effort audit Comment on the affected record naming that requester — so
 ERPNext's own audit trail shows who asked, not just that the bot acted. See
-record_comment()/mutate_resource() below.
+record_comment() below and the operation pipeline.
 
 Requester identity comes from the channel, never from config: the CALLER
 (the Hermes agent driving this CLI, not this module) is responsible for
@@ -97,9 +97,10 @@ registers an EMPTY allowlist, so every doctype is refused there.
 Every write goes through core/operations.py's run_operation() — one
 registry of named operations, one pipeline, one token constructor
 (write-path hardening, agents/.scratch/qkeee-erp-write-path-hardening).
-mutate_resource()/gated_mutate_resource() below are thin compatibility
-shims onto that pipeline; this module keeps the pieces the pipeline is
-built from (requester gate, audit logging, transport, _do_mutate).
+This module is the LOWER layer the pipeline is built from (requester
+gate, audit logging, transport, _do_mutate) and never imports
+core/operations.py — the dependency runs one way only. It has no public
+write function of its own.
 """
 
 import argparse
@@ -125,7 +126,7 @@ except ImportError:
     from core.confirm_token import compute_token, confirmation_code, is_fresh
 
 # Default attribution label for audit Comments when no domain-specific
-# label is supplied — see mutate_resource()'s `domain`/`skill_label` params.
+# label is supplied — see _do_mutate()'s `skill_label` param.
 SKILL_LABEL = "qkeee-erp-associate"
 
 # Qkeee Bot audit-trail doctype (see scripts/init_bot.py). A target
@@ -226,7 +227,7 @@ _NEVER_SUBSTITUTE_REQUESTER = (
 # (case-insensitive), independent of role membership.
 _BOT_FORBIDDEN_ROLES = {"System Manager"}
 
-# mutate_resource()'s action -> frappe.client.has_permission's perm_type.
+# A resource write's action -> frappe.client.has_permission's perm_type.
 _MUTATE_ACTION_TO_PTYPE = {
     "create": "create", "update": "write", "submit": "submit",
     "cancel": "cancel", "delete": "delete",
@@ -236,10 +237,10 @@ _MUTATE_ACTION_TO_PTYPE = {
 # Write-allowlist gate
 #
 # Domain modules register their ALLOWED_WRITE_DOCTYPES here at import time
-# via register_domain_allowlist(). mutate_resource(domain=...) then checks
+# via register_domain_allowlist(). The operation pipeline then checks
 # against this registry before any create/update/submit/cancel/delete. A
 # domain that hasn't been imported yet (so hasn't registered) is treated as
-# unknown, not as unrestricted — see mutate_resource()'s docstring.
+# unknown, not as unrestricted — see core/operations.py _check_allowlist().
 # --------------------------------------------------------------------------
 DOMAIN_WRITE_ALLOWLISTS: dict = {}
 
@@ -345,17 +346,15 @@ class StaleConfirmationError(GateRefusal):
 
 
 class UnconfirmedByUserError(GateRefusal):
-    """Raised by gated_mutate_resource() when user_confirmation_text is
+    """Raised by the operation pipeline when user_confirmation_text is
     missing, or doesn't contain the confirmation_token's derived
     confirmation_code — see confirm_token.confirmation_code()'s own
     docstring for what this does and doesn't prove. A matching
     confirmation_token alone proves the payload wasn't tampered with
     since render; it does NOT prove the render was ever shown to the
     actual requester — the same process can compute and verify that
-    token in one turn. This is the additional check for gated_mutate_
-    resource()'s domain-less write path specifically (a doctype no
-    named domain's own mutate() has a chance to layer a stricter rule
-    onto, unlike e.g. procurement's Supplier-KYC gate)."""
+    token in one turn. Required by every operation whose token policy is
+    "token+user_code" (core/operations.py)."""
 
 
 class ConfirmationRequiredError(GateRefusal):
@@ -380,7 +379,7 @@ class PartialOutcomeError(ConnectorError):
 
 
 class DoctypeNotAllowedError(GateRefusal):
-    """Raised when mutate_resource(domain=...) targets a doctype outside
+    """Raised when a write operation targets a doctype outside
     that domain's registered ALLOWED_WRITE_DOCTYPES (or the domain itself
     is unknown/unregistered) — see the write-allowlist gate section above."""
 
@@ -421,7 +420,7 @@ def resolve_requested_by(cli_value: str) -> str:
     from the inbound channel identity before calling — see the module
     docstring's "Requester identity comes from the channel, never from
     config". An absent value here is returned as "" and caught downstream
-    by `_validate_prod_requester()` / `mutate_resource()`, which fail
+    by `_validate_prod_requester()` / the operation pipeline, which fail
     closed rather than silently proceeding unattributed."""
     return cli_value or ""
 
@@ -721,7 +720,7 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     universal.)
 
     `domain`/`advisory_token_verified` are still accepted
-    (mutate_resource()/gated_mutate_resource() thread them through — the
+    (the operation pipeline threads them through — the
     allowlist and advisory-token-confirm checks that produce them remain
     real, valuable, INDEPENDENT controls at their own gates: allowlist
     scopes which doctypes a domain may touch at all, advisory-token-
@@ -742,7 +741,7 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
 
     No-op for any doctype in PROD_GATE_EXEMPT_DOCTYPES on a read, or in the
     much narrower WRITE_GATE_EXEMPT_DOCTYPES when `for_write=True` (always
-    passed by mutate_resource()) - see that set's comment for why User/
+    passed by the operation pipeline) - see that set's comment for why User/
     Role/DocType writes are gated even though their reads are not.
     Otherwise:
 
@@ -763,7 +762,7 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
 
     Raises UnvalidatedProdRequesterError on any failure — fails closed,
     never proceeds unverified. Called from query_resource()/get_resource()/
-    run_query_report()/mutate_resource() — every read and write. Every
+    run_query_report()/the operation pipeline — every read and write. Every
     raise, and the final allow, is also logged to Qkeee Bot Audit Log as
     one gate-decision row — a denial otherwise leaves zero trace."""
     exempt = WRITE_GATE_EXEMPT_DOCTYPES if for_write else PROD_GATE_EXEMPT_DOCTYPES
@@ -1100,13 +1099,13 @@ def health_check(tag: str = "default") -> dict:
             f"This tag's RBAC pre-check cannot be trusted: bot identity "
             f"{trust['bot_user']!r} is privileged={trust['privileged_identity']} "
             f"and the live has_permission probe discriminates="
-            f"{trust['precheck_discriminates']}. Per-requester permission can't be "
-            f"verified on this tag: a domain-scoped write (allowlisted doctype) or a "
-            f"gated_mutate_resource() write with a verified advisory-draft token still "
-            f"proceeds, on that reviewed control + mandatory review-before-submit as the "
-            f"safety net; a write with neither (no `domain`, no verified token) is refused "
-            f"outright. Provision a narrow-role dedicated bot account to restore real "
-            f"per-requester verification — see init_bot.py / 00-conventions.md."
+            f"{trust['precheck_discriminates']}. frappe.client.has_permission can't verify "
+            f"the requester on this tag, so every read and write falls back to a local check "
+            f"(the requester's live roles against the doctype's DocPerm rows) and proceeds "
+            f"only on a confirmed grant — an allowlist or a confirmation token never rescues "
+            f"an unverified requester. The fallback can't see User Permissions or if_owner "
+            f"rows. Provision a narrow-role dedicated bot account to restore the real check — "
+            f"see init_bot.py / 00-conventions.md."
         )
     return out
 
@@ -1241,13 +1240,20 @@ def read_rpc(tag: str, method: str, path: str, *, gate_doctype: str, requested_b
     return result
 
 
-def resource_exists(tag: str, doctype: str, name: str) -> bool:
+def resource_exists(tag: str, doctype: str, name: str, credential: str = "bot") -> bool:
     """404-tolerant existence check. Never logged (internal=True,
     regardless of doctype), never gated (PROD_GATE_EXEMPT_DOCTYPES covers
     "User"/"DocType"/"Role", the only doctypes this is ever called
     against)."""
     try:
-        get_resource(tag, doctype, name, strip_noise=False, internal=True)
+        if credential == "bot":
+            get_resource(tag, doctype, name, strip_noise=False, internal=True)
+        else:
+            # Same internal, unlogged existence check, made with another key
+            # pair — for doctypes only that credential can read (e.g. Role,
+            # System-Manager-readable only, checked with the admin key).
+            _request(get_env_config(tag, credential=credential), "GET",
+                     f"/api/resource/{urllib.parse.quote(doctype)}/{urllib.parse.quote(name)}")
         return True
     except ConnectorError as e:
         if "(404)" in str(e):
@@ -1613,7 +1619,7 @@ def _log_read(cfg: dict, doctype: str, name: str, requested_by: str, session_id:
 # perm_type ("read"/"write"/"create"/"submit"/"cancel"/"delete", the
 # vocabulary _validate_prod_requester()/_MUTATE_ACTION_TO_PTYPE use)
 # mapped onto the "action" values Qkeee Bot Audit Log already accepts
-# elsewhere (_log_read()'s "Read", mutate_resource()'s action.capitalize()
+# elsewhere (_log_read()'s "Read", a write's PreparedRequest.audit_action
 # — "Create"/"Update"/"Submit"/"Cancel"/"Delete"). Deliberately reuses
 # this existing vocabulary rather than inventing a new one (e.g. a
 # "Permission Check" action) — this doctype is provisioned live on each
@@ -1769,7 +1775,7 @@ def record_audit_log_finish(cfg: dict, log_name: str, *, status: str, reference_
     payload_before/payload_after when both are present (Update only).
     Best-effort; failures here are swallowed, same rationale as
     everywhere else in this section. Returns whether the update actually
-    landed, so a caller (mutate_resource) can surface degraded audit
+    landed, so a caller (the operation pipeline) can surface degraded audit
     logging instead of it being visible only on stderr."""
     if not log_name:
         return False
@@ -1796,70 +1802,17 @@ def record_audit_log_finish(cfg: dict, log_name: str, *, status: str, reference_
 # --------------------------------------------------------------------------
 
 # qkeee-erp:write-path
-def _operations():
-    """Lazy import: core/operations.py imports this module."""
-    try:
-        from core import operations
-    except ImportError:  # run with core/ itself on sys.path
-        import operations
-    return operations
-
-
-def mutate_resource(tag: str, doctype: str, action: str, payload: dict = None,
-                     name: str = None, mode: str = "read-only", requested_by: str = None,
-                     skip_comment: bool = False, *, domain: str = None, **kwargs) -> dict:
-    """COMPATIBILITY SHIM over core.operations.run_operation(f"{domain}.generic").
-
-    Every write now runs through the operation pipeline (mode, requester,
-    allowlist, ownership, preconditions, confirmation token, RBAC, audit
-    — in that order). `domain` is REQUIRED: the former `domain=None`
-    path wrote to any doctype with no allowlist and no token (write-path
-    hardening W04). For a doctype no domain owns, use
-    gated_mutate_resource() (operation "unscoped.generic").
-
-    Token policy is the operation's, not the caller's: create/update are
-    ungated draft steps; submit/cancel/delete need a confirmation_token +
-    issued_at + user_confirmation_text from `confirm_token.py render`,
-    plus `expected_modified` (the record's `modified` at render time).
-
-    `skip_comment` and the former `skill_label`/`advisory_token_verified`
-    keywords are accepted and ignored — comments and labels are decided
-    by the operation."""
-    if domain is None:
-        raise DoctypeNotAllowedError(
-            f"Refusing {action} on '{doctype}': mutate_resource() requires domain=. A write "
-            f"to a doctype no domain owns goes through gated_mutate_resource() (operation "
-            f"'unscoped.generic'), which needs a rendered confirmation token."
-        )
-    return _operations().call_generic(f"{domain}.generic", tag, doctype, action, payload=payload,
-                                      name=name, mode=mode, requested_by=requested_by, **kwargs)
-
-
-def gated_mutate_resource(tag: str, doctype: str, action: str, payload: dict = None,
-                           name: str = None, mode: str = "read-only", requested_by: str = None,
-                           **kwargs) -> dict:
-    """COMPATIBILITY SHIM over core.operations.run_operation("unscoped.generic")
-    — the write path for a doctype no domain owns (e.g. Item). Every action
-    needs a confirmation_token + issued_at + user_confirmation_text (the
-    user's own reply containing confirmation_code(token)) computed by
-    `confirm_token.py render --op unscoped.generic` over the exact request.
-    Doctypes owned by a domain or by a gated operation, and privilege/
-    system doctypes (operations.UNSCOPED_DENY), are refused."""
-    return _operations().call_generic("unscoped.generic", tag, doctype, action, payload=payload,
-                                      name=name, mode=mode, requested_by=requested_by, **kwargs)
-
-
 # qkeee-erp:write-path
 def _do_mutate(cfg: dict, doctype: str, action: str, payload: dict, name: str, requested_by: str,
                 skip_comment: bool = False, skill_label: str = None) -> dict:
     """The actual per-action HTTP dispatch — factored out so
-    mutate_resource() can wrap it uniformly with the two-phase Attempted/
+    the operation pipeline can wrap it uniformly with the two-phase Attempted/
     Success/Failure logging above without duplicating this logic per
     action.
 
     `skip_comment` suppresses the default `record_comment()` call per
-    action below — see mutate_resource()'s docstring. `skill_label`
-    (threaded from mutate_resource(), defaulting to SKILL_LABEL there)
+    action below. `skill_label`
+    (from the operation, defaulting to SKILL_LABEL)
     is the "[...]" prefix on that default Comment."""
     label = skill_label or SKILL_LABEL
     if action == "create":
@@ -1990,7 +1943,7 @@ def _cli():
     through scripts/execute_write.py, which imports every domain module
     (so allowlists and token gates are registered), applies schema
     mapping, and warns on missing audit context. The former `mutate`
-    subcommand reached mutate_resource(domain=None) with no allowlist and
+    subcommand wrote with no allowlist and
     no token, and `gated-mutate` duplicated execute_write.py's domain-less
     path without its checks - both removed (write-path hardening, W04/D4)."""
     p = argparse.ArgumentParser(description="qkeee-erp-associate core connector CLI")

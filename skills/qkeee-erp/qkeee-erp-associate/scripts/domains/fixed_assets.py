@@ -46,7 +46,8 @@ ALLOWED_WRITE_DOCTYPES = (
 )
 
 core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
-operations.generic_operation(DOMAIN_NAME)
+operations.generic_operation(DOMAIN_NAME, example_args={
+    "doctype": "Asset", "action": "submit", "name": "ACC-ASS-2026-00001"})
 
 _DEPRECIATION = "/api/method/erpnext.assets.doctype.asset.depreciation.make_depreciation_entry"
 _SCRAP = "/api/method/erpnext.assets.doctype.asset.depreciation.scrap_asset"
@@ -55,13 +56,6 @@ _MAP_SALES_INVOICE = "/api/method/erpnext.assets.doctype.asset.asset.make_sales_
 
 _READ_CTX = ("session_id", "domain_code", "channel", "channel_metadata",
              "prompt_summary", "latest_prompt")
-
-
-def mutate(tag: str, doctype: str, action: str, **kwargs) -> dict:
-    """Compatibility shim: operation "fixed_assets.generic"."""
-    return operations.call_generic(f"{DOMAIN_NAME}.generic", tag, doctype, action, **kwargs)
-
-
 def _get(ctx, doctype, name):
     return core_client.get_resource(ctx.tag, doctype, name, strip_noise=False,
                                     requested_by=ctx.requested_by, **ctx.audit_kwargs()).get("data") or {}
@@ -122,6 +116,7 @@ operations.register_operation(operations.Operation(
     summary="post every due, unbooked depreciation row on one Asset Depreciation Schedule",
     prepare=_depr_prepare, render_defaults=_depr_render, allowlist_domain=None,
     preconditions=(_depr_schedule_matches_asset,), on_failure=_depr_partial_outcome,
+    example_args={"depr_schedule_name": "ACC-ADS-2026-00001", "date": "2026-10-31"},
     args_help={"depr_schedule_name": "Asset Depreciation Schedule name",
                "date": "post rows due on/before this date (default today)",
                "asset": "filled by render", "pending_rows": "filled by render",
@@ -164,6 +159,8 @@ operations.register_operation(operations.Operation(
     key="fixed_assets.scrap", domain=DOMAIN_NAME,
     summary="scrap an asset: depreciation up to scrap_date, then the scrap Journal Entry",
     prepare=_scrap_prepare, render_defaults=_scrap_render, allowlist_domain=None,
+    example_args={"asset": "ACC-ASS-2026-00001", "scrap_date": "2026-10-06",
+                  "reason": "damaged beyond repair"},
     args_help={"asset": "Asset name", "scrap_date": "YYYY-MM-DD, required (never defaulted)",
                "reason": "stated reason", "book_value": "filled by render (finance_books[0])"},
 ))
@@ -171,6 +168,7 @@ operations.register_operation(operations.Operation(
     key="fixed_assets.restore", domain=DOMAIN_NAME,
     summary="restore a scrapped asset: reverses disposal depreciation and CANCELS the scrap JE",
     prepare=_restore_prepare, allowlist_domain=None,
+    example_args={"asset": "ACC-ASS-2026-00001", "reason": "scrapped by mistake"},
     args_help={"asset": "Asset name", "reason": "stated reason"},
 ))
 
@@ -242,6 +240,8 @@ operations.register_operation(operations.Operation(
     summary="create a DRAFT Sales Invoice disposing of an asset (submit it via accounts.generic)",
     prepare=_sell_prepare, render_defaults=_sell_render, allowlist_domain="accounts",
     preconditions=(_invoice_sells_this_asset,),
+    example_args={"asset": "ACC-ASS-2026-00001", "item_code": "LAPTOP", "company": "DEMO LLP",
+                  "sell_qty": 1, "reason": "sold to employee", "sale_proceeds": 15000},
     args_help={"asset": "Asset name", "item_code": "the asset's item", "company": "company",
                "sell_qty": "quantity sold (ERPNext v16 requires it)", "serial_no": "optional",
                "reason": "stated reason", "sale_proceeds": "shown to the user",

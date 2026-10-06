@@ -3,7 +3,7 @@
 convention in scripts/core/test_client.py): `cd scripts/domains && python -m
 pytest -q`.
 
-core.client.mutate_resource(domain=...) refuses a write whose doctype isn't
+the domain's generic operation refuses a write whose doctype isn't
 in that domain's registered ALLOWED_WRITE_DOCTYPES, per the write-allowlist
 gate (see client.py's module docstring). Each domain module below registers
 its own tuple at import time via register_domain_allowlist(); these tests
@@ -32,6 +32,7 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 from core import client as core_client  # noqa: E402
+from core import operations  # noqa: E402
 import testsupport  # noqa: E402
 
 _OFFLINE = testsupport.offline_schema()
@@ -93,11 +94,7 @@ class DisallowedDoctypeIsRefusedTests(unittest.TestCase):
             with self.subTest(domain=module.DOMAIN_NAME):
                 with patch.object(core_client, "_do_mutate") as mocked_do_mutate:
                     with self.assertRaises(core_client.DoctypeNotAllowedError):
-                        module.mutate(
-                            "test", _DISALLOWED_DOCTYPE, "create",
-                            payload={"x": "y"}, mode="read-write",
-                            requested_by="tester@example.com",
-                        )
+                        operations.call_generic(f'{module.DOMAIN_NAME}.generic', 'test', _DISALLOWED_DOCTYPE, 'create', payload={'x': 'y'}, mode='read-write', requested_by='tester@example.com')
                     mocked_do_mutate.assert_not_called()
 
 
@@ -122,15 +119,10 @@ class AllowedDoctypeClearsTheGateTests(unittest.TestCase):
                         # the token step, so reaching ConfirmationRequiredError
                         # means the allowlist was cleared.
                         with self.assertRaises(core_client.ConfirmationRequiredError):
-                            module.mutate("test", allowed_doctype, "create", payload={"x": "y"},
-                                          mode="read-write", requested_by="tester@example.com")
+                            operations.call_generic(f'{module.DOMAIN_NAME}.generic', 'test', allowed_doctype, 'create', payload={'x': 'y'}, mode='read-write', requested_by='tester@example.com')
                         mocked_do_mutate.assert_not_called()
                         continue
-                    module.mutate(
-                        "test", allowed_doctype, "create",
-                        payload={"x": "y"}, mode="read-write",
-                        requested_by="tester@example.com",
-                    )
+                    operations.call_generic(f'{module.DOMAIN_NAME}.generic', 'test', allowed_doctype, 'create', payload={'x': 'y'}, mode='read-write', requested_by='tester@example.com')
                     mocked_do_mutate.assert_called_once()
 
 
@@ -149,11 +141,7 @@ class MisIsAlwaysReadOnlyTests(unittest.TestCase):
                 with patch.object(core_client, "_validate_prod_requester") as mocked_rbac, \
                      patch.object(core_client, "_do_mutate") as mocked_do_mutate:
                     with self.assertRaises(core_client.DoctypeNotAllowedError):
-                        mis.mutate(
-                            "test", doctype, "create",
-                            payload={"x": "y"}, mode="read-write",
-                            requested_by="tester@example.com",
-                        )
+                        operations.call_generic(f'{mis.DOMAIN_NAME}.generic', 'test', doctype, 'create', payload={'x': 'y'}, mode='read-write', requested_by='tester@example.com')
                     mocked_rbac.assert_not_called()
                     mocked_do_mutate.assert_not_called()
 
@@ -161,16 +149,12 @@ class MisIsAlwaysReadOnlyTests(unittest.TestCase):
 class UnregisteredDomainFailsClosedTests(unittest.TestCase):
     """A domain name with no registered allowlist (typo, or module never
     imported in this process) is refused, not treated as unrestricted —
-    per client.py's mutate_resource() docstring."""
+    per core/operations.py _check_allowlist()."""
 
     def test_unknown_domain_name_is_refused(self):
         with patch.object(core_client, "_do_mutate") as mocked_do_mutate:
             with self.assertRaises(core_client.DoctypeNotAllowedError):
-                core_client.mutate_resource(
-                    "test", "Sales Order", "create", domain="not-a-real-domain",
-                    payload={"x": "y"}, mode="read-write",
-                    requested_by="tester@example.com",
-                )
+                operations.call_generic('not-a-real-domain.generic', 'test', 'Sales Order', 'create', payload={'x': 'y'}, mode='read-write', requested_by='tester@example.com')
             mocked_do_mutate.assert_not_called()
 
 
