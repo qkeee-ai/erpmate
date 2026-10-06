@@ -139,9 +139,12 @@ need no token. `--list-ops` shows each operation's rule.
 |---|---|
 | 0 | success |
 | 1 | ERPNext rejected it |
-| 2 | usage error |
+| 2 | usage error, including malformed `--args` (nothing was sent) |
 | 3 | refused by a gate, nothing was sent |
 | 4 | outcome unknown or partial — re-read the record before any retry |
+
+`core/client.py` reads use the same codes: 3 when a gate (requester, RBAC,
+missing doctype) refuses the read, 1 for any other error.
 
 **Deletes on an instance provisioned before 2026-10-06** fail with
 `LinkExistsError` ("linked with Qkeee Bot Audit Log") until an admin

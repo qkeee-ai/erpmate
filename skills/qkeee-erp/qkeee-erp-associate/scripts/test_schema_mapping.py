@@ -148,6 +148,17 @@ class GetDoctypeSchemaCacheTests(unittest.TestCase):
         schema_mapping._SCHEMA_CACHE.clear()
 
     @patch.object(schema_mapping.discover, "doctype_meta")
+    def test_meta_without_custom_fields_counts_as_unavailable(self, mock_meta):
+        # W39: a base-DocType fallback hides Custom Fields; mapping against
+        # it would drop e.g. gstin as "unmatched". Treat it as no schema
+        # (payload passes through unmapped) instead.
+        mock_meta.return_value = {"fields": _ITEM_FIELDS, "custom_fields_merged": False,
+                                  "custom_fields_error": "ERPNext API error (403)"}
+        fields, err = schema_mapping.get_doctype_schema("DEMO_ERP", "Item", requested_by="u@org.com")
+        self.assertIsNone(fields)
+        self.assertIn("custom fields", err)
+
+    @patch.object(schema_mapping.discover, "doctype_meta")
     def test_successful_fetch_is_cached_across_calls(self, mock_meta):
         mock_meta.return_value = {"fields": _ITEM_FIELDS}
         fields1, err1 = schema_mapping.get_doctype_schema("DEMO_ERP", "Item", requested_by="u@org.com")

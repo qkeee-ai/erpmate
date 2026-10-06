@@ -12,7 +12,7 @@ signatures were verified on 2026-10-06.
 | `fixed_assets.depreciation_run` | `make_depreciation_entry`: posts a Journal Entry for every due, unbooked row of one schedule | `depr_schedule_name`, optional `date`; render fills `asset`, `pending_rows`, `total_depreciation` |
 | `fixed_assets.scrap` | `scrap_asset`: depreciation up to `scrap_date`, then the scrap JE | `asset`, `scrap_date` (required, never defaulted), `reason`; render fills `book_value` |
 | `fixed_assets.restore` | `restore_asset`: reverses disposal depreciation and CANCELS the scrap JE (a GL change) | `asset`, `reason` |
-| `fixed_assets.sell` | creates a DRAFT Sales Invoice for the asset (`make_sales_invoice` only maps one, it persists nothing; v16 needs `sell_qty`) | `asset`, `item_code`, `company`, `sell_qty`, `reason`, optional `sale_proceeds`/`serial_no`; render fills `invoice` |
+| `fixed_assets.sell` | creates a DRAFT Sales Invoice for the asset (`make_sales_invoice` only maps one, it persists nothing; v16 needs `sell_qty`) | `asset`, `item_code`, `company`, `sell_qty`, `customer`, `sale_proceeds`, `reason`, optional `serial_no`; render fills `invoice`; the op sets `customer` and the asset row's rate (`sale_proceeds / qty`), which the mapper leaves blank/0 |
 
 All four non-generic operations always need the confirmation: render,
 show the user the rendered request (it includes the live facts above)
@@ -26,8 +26,10 @@ the other rows. The error then lists which rows now carry a Journal
 Entry, and execute_write exits with code 4. Review those rows with the
 user before any retry.
 
-**Sale.** `fixed_assets.sell` creates the invoice as a draft. Edit the
-rendered `invoice` (e.g. the selling rate), re-render, confirm. Submitting
+**Sale.** `fixed_assets.sell` creates the invoice as a draft. The selling
+price is `sale_proceeds` (applied as the asset row's rate) and the buyer is
+`customer` — change those args and re-render, not the rendered `invoice`'s
+rate, which the op overwrites. Submitting
 it is a separate `accounts.generic` submit — gain/loss is realized only
 then.
 

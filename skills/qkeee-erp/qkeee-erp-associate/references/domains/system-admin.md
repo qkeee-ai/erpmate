@@ -21,7 +21,7 @@ the user the rendered request and code, execute with their reply
 | `system_admin.set_user_roles` | replace a User's role list; render shows before/after; refused if roles changed since render | `name`, `roles` (complete new list), `reason` |
 | `system_admin.disable_user` | User update, exactly `{"enabled": 0}` | `name`, `reason` |
 | `system_admin.delete` | delete a User/Role/Custom Field/Property Setter/Webhook/Workflow | `doctype`, `name`, `reason` |
-| `system_admin.create_webhook` | Webhook create; `request_url` must be https on a public host | `payload`, `reason` |
+| `system_admin.create_webhook` | Webhook create; `request_url` must be https on a public host | `name`, `payload`, `reason` |
 | `system_admin.toggle_workflow` | Workflow update, exactly `{"is_active": 0|1}` | `name`, `is_active`, `reason` |
 | `system_admin.permission_add`, `system_admin.permission_update`, `system_admin.permission_remove`, `system_admin.permission_reset` | Role Permission Manager changes; `_update`'s render shows the current value | `doctype`, `role`, `permlevel`, `ptype`/`value` (update), `reason` |
 | `system_admin.generic` | Role create/update, Custom Field/Property Setter create/update — confirmed like every other operation here | `doctype`, `action`, `payload`, `name` |

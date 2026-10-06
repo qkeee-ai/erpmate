@@ -553,6 +553,17 @@ class SystemAdminRuleTests(unittest.TestCase):
                     operations.check_public_https_url(url)
         operations.check_public_https_url("https://hooks.example.com/x")
 
+    def test_create_webhook_requires_a_name(self):
+        """Frappe v16 Webhook is prompt-named: a create without `name` fails
+        live with "Please set the document name" (DEMO_ERP 2026-10-06)."""
+        op = operations.get_operation("system_admin.create_webhook")
+        args = _example("system_admin.create_webhook")
+        req = op.prepare(args, testsupport.ctx())
+        self.assertEqual(req.body["name"], args["name"])
+        args.pop("name")
+        with self.assertRaises(core_client.ConnectorError):
+            op.prepare(args, testsupport.ctx())
+
     def test_create_user_refuses_unknown_role(self):
         args, ctx, _ = testsupport.render("system_admin.create_user",
                                           {"email": "n@x.com", "first_name": "N", "roles": ["Nope"]})
@@ -721,6 +732,27 @@ class FixedAssetRuleTests(unittest.TestCase):
         with connector():
             with self.assertRaises(core_client.ConnectorError):
                 operations.run_operation("fixed_assets.sell", bad, ctx)
+
+    def test_sell_sets_customer_and_applies_sale_proceeds(self):
+        """ERPNext's mapper leaves `customer` blank and the asset row at
+        rate 0: live, every sell failed (MandatoryError: customer), and the
+        confirmed `sale_proceeds` never reached the invoice (DEMO_ERP
+        2026-10-06)."""
+        op = operations.get_operation("fixed_assets.sell")
+        example = _example("fixed_assets.sell")
+        args = dict(example, sell_qty=2, sale_proceeds=30000,
+                    invoice={"doctype": "Sales Invoice", "items": [
+                        {"item_code": "LAPTOP", "asset": example["asset"], "is_fixed_asset": 1,
+                         "qty": 2, "rate": 0}]})
+        req = op.prepare(args, testsupport.ctx())
+        self.assertEqual(req.body["customer"], example["customer"])
+        self.assertEqual(req.body["items"][0]["rate"], 15000)
+        for missing in ("customer", "sale_proceeds"):
+            with self.subTest(missing=missing):
+                bad = dict(args)
+                bad.pop(missing)
+                with self.assertRaises(core_client.ConnectorError):
+                    op.prepare(bad, testsupport.ctx())
 
     def test_map_sales_invoice_is_a_gated_read_and_strips_server_keys(self):
         mapped = {"doctype": "Sales Invoice", "name": "new-sales-invoice-1", "__islocal": 1,

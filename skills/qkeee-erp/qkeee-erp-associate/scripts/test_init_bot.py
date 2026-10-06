@@ -148,13 +148,46 @@ class AuditFieldMigrationTests(unittest.TestCase):
         op.prepare({"doctype_name": self.AUDIT, "fields": good}, ctx)  # accepted
         for label, fields in (
                 ("other type", self._live("Long Text")["fields"]),
-                ("extra field", good + [{"fieldname": "evil", "fieldtype": "Code"}]),
                 ("missing field", good[1:])):
             with self.subTest(case=label):
                 with self.assertRaises(init_bot.core_client.DoctypeNotAllowedError):
                     op.prepare({"doctype_name": self.AUDIT, "fields": fields}, ctx)
         with self.assertRaises(init_bot.core_client.DoctypeNotAllowedError):
             op.prepare({"doctype_name": "User", "fields": good}, ctx)
+
+    def _run_gates(self, fields, live):
+        from core import operations
+        ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
+        op = operations.get_operation("provisioning.migrate_fields")
+        args = {"doctype_name": self.AUDIT, "fields": fields}
+        req = op.prepare(args, ctx)
+        with patch.object(init_bot, "_live_doctype", return_value=live):
+            for check in op.preconditions:
+                check(req, args, ctx)
+
+    def test_migration_keeps_a_live_only_legacy_field_unchanged(self):
+        """Found live on DEMO_ERP 2026-10-06: the provisioned audit doctype
+        carries a Frappe-added `amended_from` Link that doctype_defs.py
+        doesn't define. migrate_fields() sends every live row back, so the
+        guard must accept a live-only row sent unchanged — otherwise the
+        migration can never run on such an instance."""
+        legacy = {"fieldname": "amended_from", "fieldtype": "Link", "options": self.AUDIT,
+                  "name": "row-legacy"}
+        live = self._live("Dynamic Link")
+        live["fields"].append(dict(legacy))
+        with patch.object(init_bot, "_live_doctype", return_value=live), \
+                patch.object(init_bot.operations, "run_operation") as run_op:
+            init_bot.migrate_fields("qa", "admin@org.com", "confirmed")
+        _key, args, _ctx = run_op.call_args.args
+        self._run_gates(args["fields"], live)  # accepted
+        for label, fields in (
+                ("retyped legacy", [dict(f, fieldtype="Code") if f["fieldname"] == "amended_from"
+                                    else f for f in args["fields"]]),
+                ("new extra field", args["fields"] + [{"fieldname": "evil", "fieldtype": "Code"}]),
+                ("dropped legacy", [f for f in args["fields"] if f["fieldname"] != "amended_from"])):
+            with self.subTest(case=label):
+                with self.assertRaises(init_bot.core_client.GateRefusal):
+                    self._run_gates(fields, live)
 
 
 if __name__ == "__main__":

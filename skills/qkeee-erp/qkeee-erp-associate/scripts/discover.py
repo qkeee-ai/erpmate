@@ -56,7 +56,13 @@ from core.client import (
     get_env_config,
     get_resource,
     query_resource,
+    read_rpc,
 )
+
+# Frappe's merged meta — the base DocType plus Custom Fields and Property
+# Setters, exactly what the desk form uses. The bare DocType record
+# (`/api/resource/DocType/<name>`) has neither (W39).
+_MERGED_META = "/api/method/frappe.desk.form.load.getdoctype"
 
 # Fields kept from a DocType meta doc — everything else (permissions,
 # print settings, form layout hints, etc.) is noise for the "what does
@@ -138,9 +144,13 @@ def doctype_meta(tag: str, doctype: str, *, requested_by: str = None, session_id
     page, which describe the general shape but not this org's
     customizations (custom fields, altered mandatory flags, etc.).
 
-    Uses get_resource() — a single-resource GET on the DocType record
-    itself (`/api/resource/DocType/<name>`), which returns its `fields`
-    child table inline. Deliberately NOT a query against the standalone
+    Reads Frappe's merged meta (`frappe.desk.form.load.getdoctype`): the
+    DocType plus its Custom Fields and Property Setters — e.g. India
+    Compliance's `gstin`/`pan`/mandatory `gst_category`. If that RPC fails
+    (other than "doesn't exist"), falls back to a single-resource GET on
+    the DocType record itself (`/api/resource/DocType/<name>`), which
+    returns its base `fields` child table inline but NO custom fields —
+    `custom_fields_merged: false` then says so. Deliberately NOT a query against the standalone
     `DocField` doctype: DocField is a child-table doctype (`istable=1`)
     and Frappe grants no role standalone List permission on a table-only
     doctype — that call 403s regardless of how privileged the caller is,
@@ -153,12 +163,24 @@ def doctype_meta(tag: str, doctype: str, *, requested_by: str = None, session_id
     to fix, not treat it as "doctype doesn't exist" or silently fall back
     to guessing field names.
     """
-    result = get_resource(tag, "DocType", doctype,
-                           session_id=session_id, domain_code=domain_code,
-                           requested_by=requested_by, channel=channel,
-                           channel_metadata=channel_metadata,
-                           prompt_summary=prompt_summary, latest_prompt=latest_prompt)
-    doc = result.get("data") or {}
+    read_ctx = dict(session_id=session_id, domain_code=domain_code, requested_by=requested_by,
+                    channel=channel, channel_metadata=channel_metadata,
+                    prompt_summary=prompt_summary, latest_prompt=latest_prompt)
+    merged_error = None
+    try:
+        merged = read_rpc(tag, "GET", _MERGED_META, params={"doctype": doctype},
+                          gate_doctype="DocType", log_doctype="DocType", log_name=doctype,
+                          **read_ctx)
+        doc = next((d for d in merged.get("docs") or [] if d.get("name") == doctype), None)
+        if doc is None:
+            raise ConnectorError(f"getdoctype returned no meta for {doctype!r}")
+    except ConnectorError as e:
+        if "(404)" in str(e) or "DoesNotExistError" in str(e):
+            raise
+        # Fallback: the bare DocType record — Custom Fields / Property
+        # Setters NOT included; flagged so callers can say so.
+        merged_error = str(e)
+        doc = get_resource(tag, "DocType", doctype, **read_ctx).get("data") or {}
     fields = [
         {k: f.get(k) for k in _META_FIELD_KEYS if k in f}
         for f in doc.get("fields", [])
@@ -168,9 +190,12 @@ def doctype_meta(tag: str, doctype: str, *, requested_by: str = None, session_id
         "module": doc.get("module"),
         "custom": bool(doc.get("custom")),
         "istable": bool(doc.get("istable")),
-        "issubmittable": bool(doc.get("issubmittable")),
+        # DocType field is `is_submittable` (W40); key name kept for callers
+        "issubmittable": bool(doc.get("is_submittable") or doc.get("issubmittable")),
         "description": doc.get("description"),
         "fields": fields,
+        "custom_fields_merged": merged_error is None,
+        "custom_fields_error": merged_error,
     }
 
 

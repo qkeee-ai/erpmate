@@ -55,7 +55,11 @@ tools.
       submittable/custom flags. Confirms whether it's core, a companion
       app, or genuinely custom.
    b. `discover.py meta "<DocType>"` — live field list, mandatory flags,
-      Link targets. Never propose a shape without this.
+      Link targets, from Frappe's merged meta (Custom Fields and Property
+      Setters included — e.g. India Compliance's `gstin`/`gst_category`).
+      If the output says `custom_fields_merged: false`, custom fields are
+      missing from it: say so, and don't conclude a field doesn't exist.
+      Never propose a shape without this.
    c. For a companion Frappe-ecosystem app: fetch its GitHub README/docs
       (most live under the `frappe` GitHub org) for what it's for, its key
       doctypes, and typical workflows — cross-check against the live

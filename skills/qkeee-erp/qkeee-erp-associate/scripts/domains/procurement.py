@@ -126,19 +126,36 @@ def check_kyc(req, args, ctx) -> None:
             "discover.py meta \"Address\" for this instance, including the tax ID) or — only "
             "when the user has explicitly confirmed proceeding without it — "
             "kyc_waiver_confirmed=True. See references/domains/procurement.md.")
-    tax_fields = _tax_id_fields(ctx.tag)
-    if not any(kyc["address"].get(f) for f in tax_fields) and not waiver:
-        raise IncompleteSupplierKYCError(
-            f"Refusing to create Supplier: the KYC address carries no tax ID (none of "
-            f"{list(tax_fields)} is set). Capture it, or get the user's explicit waiver.")
     import schema_mapping
+
+    def live_fields(sub_doctype):
+        fields, _err = schema_mapping.get_doctype_schema(ctx.tag, sub_doctype,
+                                                         requested_by=ctx.requested_by,
+                                                         **ctx.audit_kwargs())
+        return fields
+
+    tax_fields = _tax_id_fields(ctx.tag)
+    address_meta = live_fields("Address")
+    address_has_tax_field = address_meta is None or any(
+        f.get("fieldname") in tax_fields for f in address_meta)
+    if address_has_tax_field:
+        if not any(kyc["address"].get(f) for f in tax_fields) and not waiver:
+            raise IncompleteSupplierKYCError(
+                f"Refusing to create Supplier: the KYC address carries no tax ID (none of "
+                f"{list(tax_fields)} is set). Capture it, or get the user's explicit waiver.")
+    elif not (req.body or {}).get("tax_id") and not waiver:
+        # Core ERPNext without India Compliance: Address has no tax-ID field
+        # (a gstin/pan sent there is dropped by schema mapping), so the
+        # Supplier's own core `tax_id` field carries it instead.
+        raise IncompleteSupplierKYCError(
+            f"Refusing to create Supplier: this instance's Address has no tax-ID field (none of "
+            f"{list(tax_fields)}), so the tax ID goes on the Supplier's own `tax_id` field — "
+            f"set payload.tax_id, or get the user's explicit waiver.")
     for key, sub_doctype in (("address", "Address"), ("contact", "Contact")):
         payload = kyc.get(key)
         if not payload:
             continue
-        fields, _err = schema_mapping.get_doctype_schema(ctx.tag, sub_doctype,
-                                                         requested_by=ctx.requested_by,
-                                                         **ctx.audit_kwargs())
+        fields = address_meta if sub_doctype == "Address" else live_fields(sub_doctype)
         if fields is None:
             continue  # meta unavailable: the server-side check + rollback still apply
         missing = [f["fieldname"] for f in fields

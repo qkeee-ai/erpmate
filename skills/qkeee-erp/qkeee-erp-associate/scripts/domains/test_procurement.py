@@ -170,6 +170,47 @@ class KycTaxIdAndPrevalidationTests(unittest.TestCase):
                 self._create({"address": {"gstin": "27AAECG2483J1ZE"}})
             do_mutate.assert_not_called()
 
+    # Live Address meta of a core ERPNext instance (no India Compliance):
+    # no tax-ID field at all (DEMO_ERP, 2026-10-06).
+    _CORE_ADDRESS_META = [{"fieldname": f, "fieldtype": "Data", "reqd": 0}
+                          for f in ("address_title", "address_line1", "city", "country")]
+
+    def _create_on_core_instance(self, supplier_payload, kyc, side_effect):
+        patches = _patched_connector()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch.object(operations, "_schema_map", side_effect=lambda ctx, dt, p, notes, **kw: dict(p)), \
+             patch("schema_mapping.get_doctype_schema", return_value=(self._CORE_ADDRESS_META, None)), \
+             patch.object(core_client, "_do_mutate", side_effect=side_effect) as do_mutate:
+            try:
+                return operations.call_generic(
+                    f'{procurement.DOMAIN_NAME}.generic', 'test', 'Supplier', 'create',
+                    payload=supplier_payload, mode='read-write', requested_by='tester@example.com',
+                    extra_args={'kyc': kyc}), do_mutate
+            except procurement.IncompleteSupplierKYCError as e:
+                return e, do_mutate
+
+    def test_core_instance_without_address_tax_field_takes_supplier_tax_id(self):
+        """Without India Compliance, Address has no tax-ID field, so the
+        rule "tax ID on the Address" could never be met and every KYC
+        Supplier create was refused (DEMO_ERP 2026-10-06). There, the
+        Supplier's own core `tax_id` field carries it."""
+        result, do_mutate = self._create_on_core_instance(
+            {"supplier_name": "Acme", "supplier_type": "Company", "tax_id": "27AAPFU0939F1ZV"},
+            {"address": {"address_line1": "1 Main St", "city": "Pune", "country": "India"}},
+            [{"data": {"name": "Acme"}}, {"data": {"name": "ADDR-1"}}])
+        self.assertEqual(do_mutate.call_count, 2)
+        self.assertEqual(result["_kyc"]["address"]["data"]["name"], "ADDR-1")
+
+    def test_core_instance_refuses_without_supplier_tax_id_and_says_where(self):
+        err, do_mutate = self._create_on_core_instance(
+            {"supplier_name": "Acme", "supplier_type": "Company"},
+            {"address": {"address_line1": "1 Main St", "gstin": "27AAPFU0939F1ZV"}},
+            [{"data": {"name": "Acme"}}])
+        self.assertIsInstance(err, procurement.IncompleteSupplierKYCError)
+        self.assertIn("tax_id", str(err))
+        self.assertIn("Supplier", str(err))
+        do_mutate.assert_not_called()
+
     def test_waiver_allows_address_without_tax_id(self):
         patches = _patched_connector(created_name="Acme")
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
@@ -182,6 +223,7 @@ class KycTaxIdAndPrevalidationTests(unittest.TestCase):
 
     def test_missing_mandatory_address_field_is_refused_before_any_write(self):
         meta = [{"fieldname": "city", "fieldtype": "Data", "reqd": 1},
+                {"fieldname": "gstin", "fieldtype": "Data", "reqd": 0},
                 {"fieldname": "address_line1", "fieldtype": "Data", "reqd": 1},
                 {"fieldname": "links", "fieldtype": "Table", "reqd": 1},
                 {"fieldname": "country", "fieldtype": "Link", "reqd": 1, "default": "India"}]

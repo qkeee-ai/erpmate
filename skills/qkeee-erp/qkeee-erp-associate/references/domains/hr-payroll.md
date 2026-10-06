@@ -66,9 +66,17 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
 4. **Leave Application submission needs two live-discovered
    preconditions**, not just declared-mandatory fields: `status` must be
    `Approved` or `Rejected` before submit (a fresh application defaults to
-   `Open`), and a resolvable Holiday List must exist (on the Employee or
-   the Company) — check this with a real query before ever promising
+   `Open`), and a resolvable Holiday List must exist — on HRMS 16 that is
+   a submitted **Holiday List Assignment** for the Employee or Company
+   (`Employee.holiday_list` alone is not enough; live-confirmed DEMO_ERP
+   2026-10-06) — check this with a real query before ever promising
    submission will work, don't rely on remembering it as a mental note.
+   HR Settings can also make `leave_approver` mandatory at create time.
+   Leave Allocation and Holiday List Assignment are outside this domain's
+   allowlist; they go through `unscoped.generic` (fully confirmed). In
+   standard HRMS only System Manager may delete an Employee Onboarding or
+   Employee Separation — an HR Manager requester is refused by the RBAC
+   gate, correctly.
    **Save-draft-then-review-then-submit:** `create` lands it `Open`/
    `docstatus 0`; re-fetch, set `Approved`/`Rejected` via `update` if
    needed, re-review, only then `submit` as its own distinct step. **Done

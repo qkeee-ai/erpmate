@@ -274,7 +274,13 @@ def get_doctype_schema(tag: str, doctype: str, *, requested_by: str, **discover_
     if cache_key not in _SCHEMA_CACHE:
         try:
             meta = discover.doctype_meta(tag, doctype, requested_by=requested_by, **discover_kwargs)
-            _SCHEMA_CACHE[cache_key] = meta.get("fields", [])
+            if meta.get("custom_fields_merged", True):
+                _SCHEMA_CACHE[cache_key] = meta.get("fields", [])
+            else:
+                # Base-DocType fallback: Custom Fields are invisible, so
+                # "unmatched" can't be trusted (W39) — no schema at all.
+                _SCHEMA_CACHE[cache_key] = (
+                    "__error__", f"live meta without custom fields ({meta.get('custom_fields_error')})")
         except ConnectorError as e:
             _SCHEMA_CACHE[cache_key] = ("__error__", str(e))
     cached = _SCHEMA_CACHE[cache_key]

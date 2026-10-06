@@ -290,6 +290,18 @@ class UnvalidatedProdRequesterError(GateRefusal):
     frappe.client.has_permission check."""
 
 
+class InvalidArgumentsError(ConnectorError):
+    """An operation's arguments are malformed (missing, unknown, wrong
+    type). Raised by the pipeline when prepare() — which does no I/O —
+    rejects them, so nothing was sent. The CLIs map it to exit 2 (usage)."""
+
+
+class DoctypeNotFoundError(GateRefusal):
+    """The target DocType does not exist on this instance (its app isn't
+    installed) — refused before anything is sent, and reported as a
+    missing capability rather than as a requester permission gap."""
+
+
 class TransportTimeoutError(ConnectorError):
     """Raised when ERPNext did not answer in time (connect or read
     timeout). For a write the outcome is UNKNOWN: the request may have
@@ -625,10 +637,27 @@ _PERM_FIELD_KEYS = {"role", "permlevel", "read", "write", "create",
                      "submit", "cancel", "delete", "if_owner"}
 
 
+_MERGED_META_PATH = "/api/method/frappe.desk.form.load.getdoctype"
+
+
+def _fetch_merged_meta(tag: str, doctype: str) -> dict:
+    """Frappe's merged meta for `doctype` (base + Custom Fields + Property
+    Setters, and the EFFECTIVE permission rows: Custom DocPerm replaces
+    DocPerm once a doctype has any). Internal: no gate, no read log — used
+    from inside the requester gate itself (W39)."""
+    result = _request(get_env_config(tag), "GET", _MERGED_META_PATH, params={"doctype": doctype})
+    doc = next((d for d in result.get("docs") or [] if d.get("name") == doctype), None)
+    if doc is None:
+        raise ConnectorError(f"getdoctype returned no meta for {doctype!r}")
+    return doc
+
+
 def _fetch_doctype_role_permissions(tag: str, doctype: str):
-    """Live DocPerm rows (permlevel 0 only — see _requester_has_role_
-    permission()'s docstring for why) for `doctype`, fetched directly via
-    get_resource() rather than through discover.py: discover.py already
+    """Effective permission rows (permlevel 0 only — see _requester_has_role_
+    permission()'s docstring for why) for `doctype`, from merged meta
+    (_fetch_merged_meta(): Custom DocPerm when present, else DocPerm) — a
+    failure is inconclusive, never a fallback to possibly-stale standard
+    rows. Fetched here rather than through discover.py: discover.py already
     imports FROM this module, so this module importing discover.py back
     would be circular. Returns `(rows_or_None, error_message_or_None)`,
     cached per (tag, doctype) including a cached failure — same shape and
@@ -636,8 +665,7 @@ def _fetch_doctype_role_permissions(tag: str, doctype: str):
     cache_key = (tag, doctype)
     if cache_key not in _DOCTYPE_PERMISSIONS_CACHE:
         try:
-            result = get_resource(tag, "DocType", doctype, requested_by="", internal=True)
-            doc = result.get("data") or {}
+            doc = _fetch_merged_meta(tag, doctype)
             rows = [
                 {k: p.get(k) for k in _PERM_FIELD_KEYS if k in p}
                 for p in doc.get("permissions", [])
@@ -857,6 +885,17 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
         # one that could otherwise proceed on the allowlist alone —
         # availability loss, in exchange for never proceeding without
         # positive, locally-confirmed evidence.
+        # Peek at the local check's cached DocPerm fetch (no new I/O): a 404
+        # there means the doctype itself is missing, not a permission gap.
+        cached = _DOCTYPE_PERMISSIONS_CACHE.get((tag, doctype))
+        fetch_error = cached[1] if isinstance(cached, tuple) and cached[0] == "__error__" else ""
+        if "(404)" in fetch_error or "DoesNotExistError" in fetch_error:
+            _log(False, {"path": "local_role_docperm_fallback", "reason": "doctype_not_found"})
+            raise DoctypeNotFoundError(
+                f"Refusing this call on tag '{tag}': DocType '{doctype}' does not exist on this "
+                f"instance — the app that provides it is probably not installed (check "
+                f"`discover.py modules`). Nothing was sent. This is not a permission problem; "
+                f"tell the user this capability isn't available on this ERPNext.")
         _log(False, {"path": "local_role_docperm_fallback", "reason": "inconclusive"})
         raise UnvalidatedProdRequesterError(
             f"Refusing this call on tag '{tag}': requester '{requested_by}''s '{perm_type}' "
@@ -2051,6 +2090,9 @@ def _cli():
                                              channel=args.channel, channel_metadata=channel_metadata,
                                              prompt_summary=args.prompt_summary,
                                              latest_prompt=args.latest_prompt), indent=2))
+    except GateRefusal as e:  # same exit contract as execute_write.py: 3 = refused, nothing sent
+        print(f"ERROR: refused, nothing was sent: {e}", file=sys.stderr)
+        sys.exit(3)
     except ConnectorError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

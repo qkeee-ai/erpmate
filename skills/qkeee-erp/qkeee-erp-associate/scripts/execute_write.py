@@ -33,7 +33,7 @@ attributed. For ungated draft writes they are still warned about loudly.
 
 ## Exit codes
 
-0 success · 1 ERPNext/other error · 2 usage error · 3 refused by a gate
+0 success · 1 ERPNext/other error · 2 usage error (incl. malformed --args) · 3 refused by a gate
 (nothing was sent) · 4 outcome unknown or partial (timeout, partial post)
 — re-read the record before any retry.
 """
@@ -63,6 +63,7 @@ from core import operations
 from core.client import (
     ConnectorError,
     GateRefusal,
+    InvalidArgumentsError,
     PartialOutcomeError,
     TransportTimeoutError,
     resolve_requested_by,
@@ -260,6 +261,9 @@ def main(argv=None) -> int:
     except GateRefusal as e:
         print(f"ERROR: refused, nothing was sent: {e}", file=sys.stderr)
         return EXIT_REFUSED
+    except InvalidArgumentsError as e:
+        print(f"ERROR: invalid operation arguments, nothing was sent: {e}", file=sys.stderr)
+        return EXIT_USAGE
     except (TransportTimeoutError, PartialOutcomeError) as e:
         print(f"ERROR: outcome unknown or partial: {e}", file=sys.stderr)
         return EXIT_UNKNOWN_OUTCOME

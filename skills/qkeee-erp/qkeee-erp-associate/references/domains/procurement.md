@@ -48,7 +48,12 @@ checking a supplier's performance.
   needs an Address record, created and linked the normal way. Confirm the
   live field name for this instance via `discover.py meta "Address"`
   (`gstin`, `tax_id`, `pan`, or an instance-specific custom field — never
-  assumed) before building the `kyc.address` payload below.
+  assumed) before building the `kyc.address` payload below. **Exception:
+  core ERPNext without India Compliance** — its Address has no tax-ID
+  field at all (a `gstin` sent there is dropped by schema mapping). When
+  the live Address meta has none of those fields, the tax ID goes on the
+  Supplier's own core `tax_id` field (`payload.tax_id`) instead, and the
+  KYC gate checks it there (live-confirmed on DEMO_ERP, 2026-10-06).
 - **Draft-only is the hard default for Purchase Order submission absent
   confirmed submission authority — not just "when unsure."** Where no
   Workflow is configured for Purchase Order, role membership (Purchase

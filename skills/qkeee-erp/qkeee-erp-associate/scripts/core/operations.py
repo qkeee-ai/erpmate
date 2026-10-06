@@ -511,10 +511,22 @@ def _send(op: Operation, req: PreparedRequest, ctx: WriteContext, *, user_approv
 # The pipeline
 # ---------------------------------------------------------------------------
 
+def _prepare(op: Operation, args: dict, ctx: WriteContext) -> PreparedRequest:
+    """prepare() does no I/O, so a non-gate error from it is always a
+    malformed argument set: surface it as InvalidArgumentsError (CLI exit
+    2, nothing sent) rather than as an ERPNext error."""
+    try:
+        return op.prepare(args, ctx)
+    except (_c.GateRefusal, _c.InvalidArgumentsError):
+        raise
+    except _c.ConnectorError as e:
+        raise _c.InvalidArgumentsError(f"{op.key}: {e}") from e
+
+
 def run_operation(op_key: str, args: dict, ctx: WriteContext) -> dict:
     op = get_operation(op_key)                                    # 1
     args = dict(args or {})
-    req = op.prepare(args, ctx)                                   # 2
+    req = _prepare(op, args, ctx)                                 # 2
     _check_mode_and_requester(req, ctx)                           # 3, 4
     _check_allowlist(op, req)                                     # 5
     _check_ownership(op, req)                                     # 6
@@ -545,7 +557,7 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
     args = dict(args or {})
     if op.render_defaults:
         args = op.render_defaults(args, ctx)
-    req = op.prepare(args, ctx)
+    req = _prepare(op, args, ctx)
     # Refuse early: no point rendering a request the gates will refuse.
     _check_allowlist(op, req)
     _check_ownership(op, req)

@@ -96,7 +96,8 @@ def _cli():
         sys.path.insert(0, scripts_dir)
     import execute_write  # noqa: F401 — imports every domain module (registers operations)
     from core import operations
-    from core.client import ConnectorError, _parse_json_arg, resolve_requested_by
+    from core.client import (ConnectorError, InvalidArgumentsError, _parse_json_arg,
+                             resolve_requested_by)
 
     p = argparse.ArgumentParser(description="Render a write operation for user confirmation.")
     sub = p.add_subparsers(dest="command", required=True)
@@ -123,6 +124,9 @@ def _cli():
             prompt_summary=a.prompt_summary, latest_prompt=a.latest_prompt,
         )
         out = operations.prepare_only(a.op, op_args, ctx)
+    except InvalidArgumentsError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
     except ConnectorError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(3)

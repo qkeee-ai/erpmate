@@ -112,17 +112,20 @@ def _definition(doctype_name: str) -> dict:
 
 
 def _provision_migrate_prepare(args, ctx):
-    """Field-type migration of an existing provisioned doctype. The body's
-    fields must name exactly the shipped definition's fields with exactly
-    the shipped types, so this can only converge the live doctype on
-    doctype_defs.py — never add a field, drop one, or set any other type."""
+    """Field-type migration of an existing provisioned doctype. The body
+    must carry every shipped field with exactly the shipped type, so this
+    can only converge the live doctype on doctype_defs.py. Fields the
+    definition doesn't name (e.g. a Frappe-added `amended_from` on an
+    instance provisioned by an older version) may ride along, but only
+    unchanged — _check_live_only_fields_unchanged() enforces that against
+    the live doctype. Never adds a field, drops one, or sets another type."""
     name = args.get("doctype_name")
     if set(args) != {"doctype_name", "fields"} or name not in MIGRATABLE_FIELDS:
         raise core_client.DoctypeNotAllowedError(
             f"provisioning.migrate_fields only migrates {sorted(MIGRATABLE_FIELDS)}.")
     want = {f["fieldname"]: f["fieldtype"] for f in _definition(name)["fields"]}
     got = {f.get("fieldname"): f.get("fieldtype") for f in args["fields"]}
-    if got != want:
+    if {k: got.get(k) for k in want} != want:
         raise core_client.DoctypeNotAllowedError(
             f"provisioning.migrate_fields: the fields sent for {name!r} must match "
             f"doctype_defs.py exactly (names and types).")
@@ -130,14 +133,36 @@ def _provision_migrate_prepare(args, ctx):
                                       name=name, body={"fields": args["fields"]})
 
 
-for _key, _prep, _summary in (
-        ("provisioning.create_role", _provision_role_prepare, f"create the {ROLE_NAME} Role"),
-        ("provisioning.create_doctype", _provision_doctype_prepare, "create the audit DocType"),
+def _check_live_only_fields_unchanged(req, args, ctx):
+    """Precondition for provisioning.migrate_fields: the fields sent must be
+    exactly the live doctype's fields (none added, none dropped), and every
+    field doctype_defs.py doesn't define must keep its live type/options."""
+    name = args["doctype_name"]
+    shipped = {f["fieldname"] for f in _definition(name)["fields"]}
+    live = {f.get("fieldname"): f for f in _live_doctype(ctx.tag, name).get("fields", [])}
+    sent = {f.get("fieldname"): f for f in args["fields"]}
+    if set(sent) != set(live) | shipped:
+        raise core_client.PreconditionFailedError(
+            f"provisioning.migrate_fields: fields sent for {name!r} add or drop a field "
+            f"(sent {sorted(set(sent) ^ (set(live) | shipped))} differ from live+definition).")
+    for fieldname in set(sent) - shipped:
+        s, l = sent[fieldname], live[fieldname]
+        if (s.get("fieldtype"), s.get("options")) != (l.get("fieldtype"), l.get("options")):
+            raise core_client.PreconditionFailedError(
+                f"provisioning.migrate_fields: live-only field {fieldname!r} on {name!r} must be "
+                f"sent unchanged.")
+
+
+for _key, _prep, _summary, _pre in (
+        ("provisioning.create_role", _provision_role_prepare, f"create the {ROLE_NAME} Role", ()),
+        ("provisioning.create_doctype", _provision_doctype_prepare, "create the audit DocType", ()),
         ("provisioning.migrate_fields", _provision_migrate_prepare,
-         "converge a provisioned doctype's field types on doctype_defs.py")):
+         "converge a provisioned doctype's field types on doctype_defs.py",
+         (_check_live_only_fields_unchanged,))):
     operations.register_operation(operations.Operation(
         key=_key, domain=None, summary=_summary, prepare=_prep,
         token_policy=operations.POLICY_NONE, credential="admin", allowlist_domain=None,
+        preconditions=_pre,
         cli=False, audit=False))  # log_role_provisioning() is this flow's one audit record
 
 

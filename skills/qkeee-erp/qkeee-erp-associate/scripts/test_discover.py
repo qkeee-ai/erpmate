@@ -26,6 +26,14 @@ class DoctypeMetaUsesDocTypeGetResourceTests(unittest.TestCase):
     DocType — the single-resource GET whose docstring in core/client.py
     says it's "the only way to get child-table rows.\""""
 
+    def setUp(self):
+        # These cover the base-DocType fallback; the merged-meta RPC is
+        # covered by MergedMetaTests.
+        p = patch.object(discover, "read_rpc",
+                         side_effect=discover.ConnectorError("ERPNext API error (403) on GET getdoctype"))
+        p.start()
+        self.addCleanup(p.stop)
+
     @patch.object(discover, "get_resource")
     def test_meta_calls_get_resource_against_doctype_not_docfield(self, mock_get):
         mock_get.return_value = {"data": {
@@ -71,6 +79,14 @@ class DoctypeMetaUsesDocTypeGetResourceTests(unittest.TestCase):
 class ResolveDoctypeAppLookupTests(unittest.TestCase):
     """`app: null` must mean two different things distinguishably — see
     resolve_doctype()'s own docstring."""
+
+    def setUp(self):
+        # These cover the base-DocType fallback; the merged-meta RPC is
+        # covered by MergedMetaTests.
+        p = patch.object(discover, "read_rpc",
+                         side_effect=discover.ConnectorError("ERPNext API error (403) on GET getdoctype"))
+        p.start()
+        self.addCleanup(p.stop)
 
     @patch.object(discover, "get_resource")
     def test_no_module_means_no_lookup_attempted(self, mock_get):
@@ -152,3 +168,57 @@ class ListModulesLimitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MergedMetaTests(unittest.TestCase):
+    """W39 (DEMO_ERP 2026-10-06, India Compliance installed): the base
+    DocType record carries no Custom Fields or Property Setters, so the
+    IC fields (gstin, pan, mandatory gst_category) were invisible and
+    schema mapping dropped them. doctype_meta() reads Frappe's merged meta
+    (frappe.desk.form.load.getdoctype) instead."""
+
+    MERGED = {"docs": [{"name": "Address", "module": "Contacts", "custom": 0, "istable": 0,
+                        "issubmittable": 0, "description": None,
+                        "fields": [{"fieldname": "address_line1", "fieldtype": "Data", "reqd": 1},
+                                   {"fieldname": "gstin", "fieldtype": "Data", "reqd": 0},
+                                   {"fieldname": "gst_category", "fieldtype": "Select", "reqd": 1}]},
+                       {"name": "Dynamic Link", "istable": 1, "fields": []}]}
+
+    def test_merged_meta_includes_custom_fields(self):
+        with patch.object(discover, "read_rpc", return_value=self.MERGED) as rr,                 patch.object(discover, "get_resource") as base:
+            meta = discover.doctype_meta("DEMO_ERP", "Address", requested_by="u@org.com")
+        self.assertIn("getdoctype", rr.call_args.args[2])
+        self.assertEqual(rr.call_args.kwargs["params"], {"doctype": "Address"})
+        base.assert_not_called()
+        self.assertTrue(meta["custom_fields_merged"])
+        self.assertEqual({f["fieldname"]: f["reqd"] for f in meta["fields"]},
+                         {"address_line1": 1, "gstin": 0, "gst_category": 1})
+        self.assertEqual(meta["module"], "Contacts")
+
+    def test_rpc_failure_falls_back_to_base_doctype_and_says_so(self):
+        with patch.object(discover, "read_rpc",
+                          side_effect=discover.ConnectorError("ERPNext API error (403)")),                 patch.object(discover, "get_resource", return_value={"data": {
+                    "name": "Address", "module": "Contacts", "fields": []}}):
+            meta = discover.doctype_meta("DEMO_ERP", "Address", requested_by="u@org.com")
+        self.assertFalse(meta["custom_fields_merged"])
+        self.assertIn("403", meta["custom_fields_error"])
+
+    def test_missing_doctype_is_not_masked_by_the_fallback(self):
+        with patch.object(discover, "read_rpc",
+                          side_effect=discover.ConnectorError("ERPNext API error (404) on GET")),                 patch.object(discover, "get_resource") as base:
+            with self.assertRaises(discover.ConnectorError):
+                discover.doctype_meta("DEMO_ERP", "Nope", requested_by="u@org.com")
+        base.assert_not_called()
+
+
+class SubmittableFlagTests(unittest.TestCase):
+    """W40: Frappe's DocType field is `is_submittable`; the meta used to
+    read a non-existent `issubmittable`, so every doctype (Purchase Order
+    included) was reported non-submittable (DEMO_ERP 2026-10-06)."""
+
+    def test_reads_is_submittable(self):
+        merged = {"docs": [{"name": "Purchase Order", "module": "Buying", "is_submittable": 1,
+                            "istable": 0, "fields": []}]}
+        with patch.object(discover, "read_rpc", return_value=merged):
+            meta = discover.doctype_meta("DEMO_ERP", "Purchase Order", requested_by="u@org.com")
+        self.assertTrue(meta["issubmittable"])

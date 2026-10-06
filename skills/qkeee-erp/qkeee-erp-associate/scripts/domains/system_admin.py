@@ -208,11 +208,14 @@ _admin_op(key="system_admin.delete",
 # ---------------------------------------------------------------- config
 
 def _webhook_prepare(args, ctx):
-    require_args(args, ["payload", "reason"])
+    # `name` is required: Webhook is prompt-named on Frappe v16, so a create
+    # without one fails live with "Please set the document name".
+    require_args(args, ["name", "payload", "reason"])
     if not isinstance(args["payload"], dict):
         raise core_client.ConnectorError("payload must be a JSON object.")
     return PreparedRequest(transport="resource", doctype="Webhook", action="create",
-                           body=dict(args["payload"]), bound={"reason": args["reason"]})
+                           body=dict(args["payload"], name=args["name"]),
+                           bound={"reason": args["reason"]})
 
 
 _admin_op(key="system_admin.create_webhook",
@@ -220,10 +223,12 @@ _admin_op(key="system_admin.create_webhook",
           prepare=_webhook_prepare, owns=frozenset({("Webhook", "create")}),
           preconditions=(lambda req, args, ctx: operations.check_public_https_url(
               (req.body or {}).get("request_url")),),
-          example_args={"payload": {"webhook_doctype": "Supplier", "webhook_docevent": "after_insert",
+          example_args={"name": "Supplier sync to procurement portal",
+                        "payload": {"webhook_doctype": "Supplier", "webhook_docevent": "after_insert",
                                     "request_url": "https://hooks.example.com/erp/supplier"},
                         "reason": "sync suppliers to procurement portal"},
-          args_help={"payload": "Webhook fields incl. request_url (https, public host)",
+          args_help={"name": "Webhook name (Frappe v16 prompts for it)",
+                     "payload": "Webhook fields incl. request_url (https, public host)",
                      "reason": ""})
 
 

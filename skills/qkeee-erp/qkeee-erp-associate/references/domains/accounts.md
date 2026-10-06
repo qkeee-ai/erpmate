@@ -42,6 +42,14 @@ review, TDS/GST/e-invoicing/e-way-bill questions.
   capability works on a given instance. GST/e-invoicing/e-way-bill remain
   **unverified end-to-end** absent a live India-Compliance-enabled
   instance — say so on first real use against a new instance.
+- **A cancelled document that posted to the ledger usually can't be
+  deleted.** Frappe v16 keeps the cancelled GL Entry (and Stock Ledger
+  Entry) rows, so a delete fails with `LinkExistsError` ("linked with GL
+  Entry") unless Accounts Settings `delete_linked_ledger_entries` is on.
+  Live-confirmed on DEMO_ERP 2026-10-06 for Journal Entry and Stock Entry.
+  The failure is clean (exit 1, nothing deleted, Failure audit row). Treat
+  cancel as the end state; don't retry, and don't suggest turning the
+  setting on without an accounts owner's say-so.
 
 ## Procedure
 

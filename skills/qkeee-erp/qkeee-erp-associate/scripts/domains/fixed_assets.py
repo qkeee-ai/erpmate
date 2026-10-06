@@ -215,12 +215,26 @@ def _sell_render(args, ctx):
 
 
 def _sell_prepare(args, ctx):
-    require_args(args, ["asset", "item_code", "company", "sell_qty", "invoice", "reason"],
-                 ["serial_no", "sale_proceeds"])
+    require_args(args, ["asset", "item_code", "company", "sell_qty", "customer", "invoice",
+                        "reason"], ["serial_no", "sale_proceeds"])
+    proceeds = args.get("sale_proceeds")
+    if isinstance(proceeds, bool) or not isinstance(proceeds, (int, float)) or proceeds < 0:
+        raise core_client.ConnectorError("sale_proceeds is required: the sale amount (>= 0).")
     invoice = dict(args["invoice"])
     if invoice.get("docstatus") not in (None, 0):
         raise core_client.PreconditionFailedError("fixed_assets.sell only creates a DRAFT invoice.")
     invoice.pop("docstatus", None)
+    # make_sales_invoice leaves customer blank and the asset row at rate 0
+    # (live, ERPNext v16): set both from what the user confirms, so the
+    # draft carries the confirmed buyer and proceeds.
+    invoice["customer"] = args["customer"]
+    items = []
+    for row in invoice.get("items") or []:
+        row = dict(row)
+        if row.get("asset") == args["asset"] and row.get("is_fixed_asset"):
+            row["rate"] = round(args["sale_proceeds"] / float(row.get("qty") or args["sell_qty"]), 2)
+        items.append(row)
+    invoice["items"] = items
     return PreparedRequest(
         transport="resource", doctype="Sales Invoice", action="create", body=invoice,
         bound={"asset": args["asset"], "reason": args["reason"],
@@ -241,9 +255,12 @@ operations.register_operation(operations.Operation(
     prepare=_sell_prepare, render_defaults=_sell_render, allowlist_domain="accounts",
     preconditions=(_invoice_sells_this_asset,),
     example_args={"asset": "ACC-ASS-2026-00001", "item_code": "LAPTOP", "company": "DEMO LLP",
-                  "sell_qty": 1, "reason": "sold to employee", "sale_proceeds": 15000},
+                  "sell_qty": 1, "customer": "Acme Traders", "reason": "sold to employee",
+                  "sale_proceeds": 15000},
     args_help={"asset": "Asset name", "item_code": "the asset's item", "company": "company",
                "sell_qty": "quantity sold (ERPNext v16 requires it)", "serial_no": "optional",
-               "reason": "stated reason", "sale_proceeds": "shown to the user",
+               "customer": "buyer (Customer name) — the mapper leaves it blank",
+               "reason": "stated reason",
+               "sale_proceeds": "required: total sale amount, applied as the asset row's rate",
                "invoice": "filled by render from make_sales_invoice; edit rates, then re-render"},
 ))

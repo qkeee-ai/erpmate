@@ -156,6 +156,27 @@ class ArgumentTests(unittest.TestCase):
         self.assertIn("--args must be valid JSON", err)
 
 
+class MalformedOperationArgsTests(unittest.TestCase):
+    """prepare() does no I/O, so any argument error it raises means nothing
+    was sent: exit 2 (usage), not 1 ("ERPNext rejected it"). Live on
+    DEMO_ERP 2026-10-06 a missing required arg exited 1."""
+
+    def test_missing_required_arg_is_a_usage_error(self):
+        code, _, err = run(BASE + CONTEXT + [
+            "--op", "system_admin.create_webhook",
+            "--args", '{"payload": {"request_url": "https://hooks.example.com/x"}, "reason": "r"}'])
+        self.assertEqual(code, 2)
+        self.assertIn("missing required argument", err)
+
+    def test_render_uses_the_same_code(self):
+        with patch("sys.argv", ["confirm_token.py", "render", "--op", "system_admin.create_webhook",
+                                "--args", '{"reason": "r"}', "--tag", "t",
+                                "--requested-by", testsupport.REQ]),                 contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                confirm_token._cli()
+        self.assertEqual(cm.exception.code, 2)
+
+
 class AuditContextTests(unittest.TestCase):
 
     def setUp(self):

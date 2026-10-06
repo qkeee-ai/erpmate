@@ -38,6 +38,14 @@ prompt:
   bare Bin read, never a guess. For a batch-tracked item, that function
   returns one row PER EXISTING BATCH — resolve and pass through each
   batch's own `batch_no`/`current_qty` individually.
+- **A cancelled document that posted to the ledger usually can't be
+  deleted.** Frappe v16 keeps the cancelled GL Entry (and Stock Ledger
+  Entry) rows, so a delete fails with `LinkExistsError` ("linked with GL
+  Entry") unless Accounts Settings `delete_linked_ledger_entries` is on.
+  Live-confirmed on DEMO_ERP 2026-10-06 for Journal Entry and Stock Entry.
+  The failure is clean (exit 1, nothing deleted, Failure audit row). Treat
+  cancel as the end state; don't retry, and don't suggest turning the
+  setting on without an accounts owner's say-so.
 
 ## Procedure
 

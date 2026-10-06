@@ -160,6 +160,25 @@ class PersonaDoctypeRemovedTests(unittest.TestCase):
         self.assertIn("register-persona", mock_stderr.getvalue())
 
 
+class ReadCliExitCodeTests(unittest.TestCase):
+    """The read CLI uses execute_write.py's exit contract: 3 = refused by a
+    gate (nothing sent), 1 = any other error. Live (DEMO_ERP 2026-10-06) a
+    read RBAC refusal exited 1, indistinguishable from an ERPNext error."""
+
+    def _run(self, exc):
+        with patch("sys.argv", ["client.py", "--tag", "t", "--requested-by", "a@b.c",
+                                "query", "Purchase Order"]),                 patch.object(ec, "query_resource", side_effect=exc),                 patch("sys.stderr", new_callable=__import__("io").StringIO):
+            with self.assertRaises(SystemExit) as cm:
+                ec._cli()
+        return cm.exception.code
+
+    def test_gate_refusal_exits_3(self):
+        self.assertEqual(self._run(ec.UnvalidatedProdRequesterError("no")), 3)
+
+    def test_other_connector_error_exits_1(self):
+        self.assertEqual(self._run(ec.ConnectorError("boom")), 1)
+
+
 class AuditLogDomainCodeTests(unittest.TestCase):
     """Qkeee Bot Audit Log's `domain_code` field — a denormalized string
     naming the active qkeee-erp-associate domain reference (e.g.
@@ -983,6 +1002,33 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
     @patch.object(ec, "check_user_permission")
     @patch.object(ec, "resource_exists", return_value=True)
     @patch.object(ec, "_audit_insert", return_value=None)
+    def test_missing_doctype_is_reported_as_missing_not_as_a_permission_gap(
+            self, mocked_audit, mocked_exists, mocked_perm, mocked_verdict, mocked_trust):
+        # Found live on DEMO_ERP 2026-10-06 (no HRMS installed): a write to
+        # Leave Application was refused as "requester permission could not
+        # be verified ... provision a bot account", sending the user after
+        # roles for an app that isn't installed.
+        key = ("tagj2", "Leave Application")
+        ec._DOCTYPE_PERMISSIONS_CACHE[key] = (
+            "__error__", "ERPNext API error (404) on GET /api/resource/DocType/Leave%20Application")
+        self.addCleanup(ec._DOCTYPE_PERMISSIONS_CACHE.pop, key, None)
+        with self.assertRaises(ec.DoctypeNotFoundError) as cm, \
+                patch.dict("os.environ", {"QKEEE_ERP_TAGJ2_BASE_URL": "https://example.com",
+                                          "QKEEE_ERP_TAGJ2_API_KEY": "k",
+                                          "QKEEE_ERP_TAGJ2_API_SECRET": "s"}):
+            ec._validate_prod_requester("tagj2", "priya@org.com", "Leave Application", "create")
+        self.assertIsInstance(cm.exception, ec.GateRefusal)
+        self.assertIn("does not exist on this instance", str(cm.exception))
+        mocked_perm.assert_not_called()
+
+    @patch.object(ec, "verify_rbac_precheck_reliable",
+                   return_value={"reliable": False, "bot_user": "Administrator",
+                                  "bot_roles": [], "privileged_identity": True,
+                                  "precheck_discriminates": True})
+    @patch.object(ec, "_requester_has_role_permission", return_value=None)
+    @patch.object(ec, "check_user_permission")
+    @patch.object(ec, "resource_exists", return_value=True)
+    @patch.object(ec, "_audit_insert", return_value=None)
     def test_write_refuses_write_when_precheck_unreliable(
             self, mocked_audit_insert, mocked_exists, mocked_perm, mocked_role_verdict, mocked_trust):
         # _audit_insert mocked (F11's gate-decision row now fires on this
@@ -1090,18 +1136,18 @@ class RequesterRoleFallbackTests(unittest.TestCase):
         ec._DOCTYPE_PERMISSIONS_CACHE.clear()
         self.addCleanup(ec._DOCTYPE_PERMISSIONS_CACHE.clear)
 
-    @patch.object(ec, "get_resource")
+    @patch.object(ec, "_fetch_merged_meta")
     def test_fetch_permissions_filters_to_permlevel_zero(self, mocked_get):
-        mocked_get.return_value = {"data": {"permissions": [
+        mocked_get.return_value = {"name": "Sales Invoice", "permissions": [
             {"role": "Accounts User", "read": 1, "write": 1, "permlevel": 0},
             {"role": "Accounts Manager", "write": 1, "permlevel": 1},  # field-level, excluded
-        ]}}
+        ]}
         rows, err = ec._fetch_doctype_role_permissions("tag-n", "Sales Invoice")
         self.assertIsNone(err)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["role"], "Accounts User")
 
-    @patch.object(ec, "get_resource", side_effect=ec.ConnectorError("ERPNext API error (403)"))
+    @patch.object(ec, "_fetch_merged_meta", side_effect=ec.ConnectorError("ERPNext API error (403)"))
     def test_fetch_permissions_failure_is_cached_not_retried(self, mocked_get):
         rows1, err1 = ec._fetch_doctype_role_permissions("tag-o", "Sales Invoice")
         rows2, err2 = ec._fetch_doctype_role_permissions("tag-o", "Sales Invoice")
@@ -1109,6 +1155,22 @@ class RequesterRoleFallbackTests(unittest.TestCase):
         self.assertIn("403", err1)
         self.assertIsNone(rows2)
         mocked_get.assert_called_once()
+
+    @patch.object(ec, "get_resource")
+    @patch.object(ec, "_request")
+    def test_fetch_permissions_reads_merged_meta_so_custom_docperm_wins(self, mocked_req, mocked_base):
+        # W39: once a doctype has Custom DocPerm rows (any Role Permission
+        # Manager edit), Frappe ignores its standard DocPerm. The base
+        # DocType record still shows the standard rows, so a revoked role
+        # could pass the local check. Merged meta carries the effective rows.
+        mocked_req.return_value = {"docs": [{"name": "Purchase Order", "permissions": [
+            {"role": "Purchase Manager", "write": 1, "permlevel": 0, "doctype": "Custom DocPerm"}]}]}
+        with patch.object(ec, "get_env_config", return_value={"tag": "tag-cd"}):
+            rows, err = ec._fetch_doctype_role_permissions("tag-cd", "Purchase Order")
+        self.assertIsNone(err)
+        self.assertEqual([r["role"] for r in rows], ["Purchase Manager"])
+        self.assertIn("getdoctype", mocked_req.call_args.args[2])
+        mocked_base.assert_not_called()
 
     @patch.object(ec, "_fetch_doctype_role_permissions",
                    return_value=([{"role": "Sales User", "write": 1, "permlevel": 0}], None))
