@@ -67,6 +67,11 @@ services:
       # the same path and the volume line above can reference it.
       - HERMES_CWD=${HERMES_CWD:-/opt/cwd}
       - TERMINAL_CWD=${HERMES_CWD:-/opt/cwd}
+      # 0 = skip the boot-time component-version drift check. JEV_REF/LCM_REF
+      # float by default, so a rebuild can move jev's or LCM's behaviour with no
+      # error; 0156-component-versions records each resolved SHA on the volume
+      # and warns loudly when one changed since the last boot.
+      - HERMES_VERSION_CHECK=${HERMES_VERSION_CHECK:-1}
       - HERMES_DASHBOARD=${HERMES_DASHBOARD:-1}
       # Dashboard auth. The s6 dashboard service binds 0.0.0.0, and a
       # non-loopback bind ALWAYS requires a registered auth provider — without

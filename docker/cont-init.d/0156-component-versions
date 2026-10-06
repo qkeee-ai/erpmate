@@ -1,0 +1,111 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Report the baked component versions, and shout when one CHANGED since the last
+# boot of this volume.
+#
+# JEV_REF and LCM_REF default to `main`, so `docker compose up --build` can swap
+# either component's behaviour with no diff in this repo. That has bitten twice:
+#
+#   - jev 0.21.0 -> 0.22.1 stopped installing its 11 jev-* skill folders (the
+#     capability moved into plugin tools). They disappeared from
+#     `hermes skills list` with no error from any hook.
+#   - the same bump added `skills`, `notice`, `screen`, `gate`, `decide_tools`
+#     and `vision` toggles. 019-jev-init only knew about `routing`, so jev-driven
+#     skill selection stayed off until someone typed `/jev skills on` by hand.
+#
+# Both were silent. Printing a version line every boot would not have helped —
+# nobody reads an unchanging line. So this records what was seen last time and
+# only raises its voice on a DIFFERENCE, which is the event worth noticing.
+#
+# Reads the `.build-ref` files the Dockerfile writes before deleting .git (there
+# is no git metadata in the image at runtime). State lives on the volume at
+# $HERMES_HOME/.component-versions, so a fresh volume reports "first boot" and
+# never a false alarm.
+#
+#   HERMES_VERSION_CHECK=0   skip this hook
+# Non-fatal.
+
+[ "${HERMES_VERSION_CHECK:-1}" = "0" ] && { echo "[versions] disabled via HERMES_VERSION_CHECK=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+STATE="$HERMES_HOME/.component-versions"
+NEW="$STATE.new"
+
+: > "$NEW" 2>/dev/null || { echo "[versions] WARNING: cannot write $NEW; skipping" >&2; exit 0; }
+
+# $1 = component name, $2 = path to its .build-ref
+record() {
+    if [ -r "$2" ]; then
+        # "<requested-ref> <resolved-sha>"
+        printf '%s %s\n' "$1" "$(tr -d '\n' < "$2")" >> "$NEW"
+    else
+        printf '%s unknown unknown\n' "$1" >> "$NEW"
+    fi
+}
+
+record jev /opt/jev-skills/.build-ref
+record lcm /opt/hermes-lcm/.build-ref
+
+# The base image moves independently of this repo (FROM ...:latest), so its
+# version belongs in the same comparison.
+# Collapsed to a single token because the state file is whitespace-delimited;
+# a leading "hermes" is dropped so the line does not read "hermes-agent hermes-x".
+base="$(HOME=/opt/data s6-setuidgid hermes hermes --version 2>/dev/null \
+    | tr -d '\n' | tr ' ' '-' | sed 's/^[Hh]ermes[- ]*//')"
+printf 'hermes-agent %s %s\n' "${base:-unknown}" "-" >> "$NEW"
+
+# Describe one "<ref> <sha>" pair for a human: short sha, omitted when absent.
+describe() {
+    if [ "$2" = "-" ] || [ -z "$2" ]; then printf '%s' "$1"
+    else printf '%s %s' "$1" "$(printf '%s' "$2" | cut -c1-12)"; fi
+}
+
+KEEP="$STATE.keep"
+: > "$KEEP" 2>/dev/null || KEEP=""
+
+while read -r name ref sha; do
+    line="$name $ref $sha"
+    now="$(describe "$ref" "$sha")"
+    prev=""
+    [ -r "$STATE" ] && prev="$(awk -v n="$name" '$1 == n { $1 = ""; sub(/^ /, ""); print; exit }' "$STATE")"
+
+    if [ "$ref" = unknown ]; then
+        # No .build-ref in the image — built before version stamping, or the file
+        # was lost. We genuinely do not know, so do NOT report a change (that
+        # would be a false alarm on every boot) and keep the last known value
+        # rather than overwriting it with "unknown".
+        if [ -n "$prev" ]; then
+            echo "[versions] $name: no version stamp in this image; keeping last known $(describe ${prev%% *} ${prev#* })"
+            line="$name $prev"
+        else
+            echo "[versions] $name: no version stamp in this image and none recorded"
+        fi
+    elif [ ! -r "$STATE" ]; then
+        echo "[versions] $name $now — first boot on this volume"
+    elif [ -z "$prev" ]; then
+        echo "[versions] $name $now — newly tracked"
+    elif [ "$prev" = "$ref $sha" ]; then
+        echo "[versions] $name $now unchanged"
+    else
+        echo "[versions] ====================================================================" >&2
+        echo "[versions] $name CHANGED since the last boot of this volume:" >&2
+        echo "[versions]   was: $(describe ${prev%% *} ${prev#* })" >&2
+        echo "[versions]   now: $now" >&2
+        echo "[versions] A floating ref (JEV_REF / LCM_REF default to 'main') can move" >&2
+        echo "[versions] capabilities without any error: jev 0.21->0.22 silently removed 11" >&2
+        echo "[versions] skills and added five toggles 019-jev-init did not set. Re-check" >&2
+        echo "[versions] that profile after this boot:" >&2
+        echo "[versions]   <alias> skills list" >&2
+        echo "[versions]   jev doctor      (routing/skills toggles, price_order)" >&2
+        echo "[versions] Pin the ref in the Dockerfile to stop this moving on its own." >&2
+        echo "[versions] ====================================================================" >&2
+    fi
+    [ -n "$KEEP" ] && printf '%s\n' "$line" >> "$KEEP"
+done < "$NEW"
+
+if [ -n "$KEEP" ] && [ -s "$KEEP" ]; then
+    mv "$KEEP" "$STATE" 2>/dev/null || rm -f "$KEEP"
+fi
+rm -f "$NEW"
+chown hermes:hermes "$STATE" 2>/dev/null || true
+exit 0

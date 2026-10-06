@@ -1,11 +1,26 @@
 FROM nousresearch/hermes-agent:latest
 
-# Pin to a tag or commit SHA for reproducible builds:
-#   docker compose build --build-arg JEV_REF=<sha> --build-arg LCM_REF=<sha>
+# Both components track a MOVING ref by default, so a rebuild can change agent
+# behaviour with no diff on our side. That has already happened twice: jev
+# 0.21.0 -> 0.22.1 moved 11 jev-* skills into plugin tools (they vanished from
+# `hermes skills list` with no error anywhere), and the same bump added five
+# toggles beyond `routing` that 019-jev-init did not know to set. Neither showed
+# up as a failure — just silently different behaviour.
+#
+# Mitigation here is detection, not pinning: 0156-component-versions records the
+# resolved SHA of each checkout on the volume and shouts when it changes between
+# boots. To pin instead (reproducible builds, no surprise upgrades), set a tag or
+# SHA — either on the command line:
+#   docker compose build --build-arg JEV_REF=v0.22.1 --build-arg LCM_REF=<tag>
+# or by uncommenting the pinned defaults below. Check what exists first:
+#   git ls-remote --tags https://github.com/kerpopule/hermes-jev-skills
+#   git ls-remote --tags https://github.com/stephenschoettler/hermes-lcm
 ARG JEV_REPO=https://github.com/kerpopule/hermes-jev-skills
 ARG JEV_REF=main
+# ARG JEV_REF=v0.22.1
 ARG LCM_REPO=https://github.com/stephenschoettler/hermes-lcm
 ARG LCM_REF=main
+# ARG LCM_REF=<tag-or-sha>
 
 USER root
 
@@ -13,12 +28,20 @@ USER root
 # /opt/data is a VOLUME, so anything written there at build time is hidden by
 # the volume overlay at runtime. The installers symlink into their checkouts,
 # so the checkouts must live at stable paths outside the volume.
+#
+# `.build-ref` captures the requested ref and the SHA it resolved to BEFORE
+# .git is deleted — without it there is no version metadata left at runtime, so
+# a floating ref would be undetectable. Read by 0156-component-versions.
 RUN git clone "${JEV_REPO}" /opt/jev-skills \
     && git -C /opt/jev-skills checkout "${JEV_REF}" \
+    && printf '%s %s\n' "${JEV_REF}" "$(git -C /opt/jev-skills rev-parse HEAD)" \
+        > /opt/jev-skills/.build-ref \
     && rm -rf /opt/jev-skills/.git \
     && chmod -R a+rX,go-w /opt/jev-skills \
     && git clone "${LCM_REPO}" /opt/hermes-lcm \
     && git -C /opt/hermes-lcm checkout "${LCM_REF}" \
+    && printf '%s %s\n' "${LCM_REF}" "$(git -C /opt/hermes-lcm rev-parse HEAD)" \
+        > /opt/hermes-lcm/.build-ref \
     && rm -rf /opt/hermes-lcm/.git \
     && chmod -R a+rX,go-w /opt/hermes-lcm
 
@@ -29,6 +52,10 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #                         TERMINAL_CWD is actually enterable by the gateway
 #                         (a root-owned fresh bind silently relocates the
 #                         agent to the nearest usable ancestor)
+#   0156-component-versions  report the baked jev / LCM / base-image versions
+#                         and shout when one changed since the last boot —
+#                         JEV_REF and LCM_REF float, so a rebuild can move
+#                         capabilities with no error anywhere
 #   016-profile-install   install the erpnext-hermes profile distribution
 #   017-jev-skills        jev installer; links into every profile, so it must
 #                         run after the profile exists
@@ -54,9 +81,9 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 COPY docker/defaults/ /opt/defaults/
 RUN chmod -R a+rX,go-w /opt/defaults
 COPY docker/cont-init.d/ /etc/cont-init.d/
-# Globbed in three parts: `01[6-9]-*` does not match the 4-digit 0155/019x
+# Globbed in three parts: `01[6-9]-*` does not match the 4-digit 015x/019x
 # names (the `-` has nothing to match against their 4th character).
-RUN set -eu; for f in /etc/cont-init.d/0155-* /etc/cont-init.d/01[6-9]-* \
+RUN set -eu; for f in /etc/cont-init.d/015[56]-* /etc/cont-init.d/01[6-9]-* \
         /etc/cont-init.d/019[5-7]-*; do \
         sed -i 's/\r$//' "$f" && chmod 0755 "$f"; \
     done
