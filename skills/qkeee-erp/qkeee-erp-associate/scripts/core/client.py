@@ -451,6 +451,23 @@ def _session_sender_email() -> str:
     return value if "@" in value else ""
 
 
+_SESSION_IDENTITY_ENVS = (
+    "HERMES_SESSION_PLATFORM", "HERMES_SESSION_USER_ID",
+    "HERMES_SESSION_USER_ID_ALT", "HERMES_SESSION_USER_NAME",
+)
+
+
+def session_identity() -> dict:
+    """Diagnostic snapshot of the gateway identity env vars this process
+    sees, plus the sender email resolve_requested_by() would bind to.
+    No network call. On Google Chat, USER_ID is the sender email when the
+    event carried one, else the stable `users/{id}`; USER_ID_ALT is
+    `users/{id}`."""
+    snapshot = {name: os.environ.get(name) for name in _SESSION_IDENTITY_ENVS}
+    snapshot["resolved_sender_email"] = _session_sender_email() or None
+    return snapshot
+
+
 def resolve_requested_by(cli_value: str) -> str:
     """CLI-level requested_by resolution, called from `_cli()`,
     execute_write.py and confirm_token.py.
@@ -2061,7 +2078,7 @@ def _parse_json_arg(flag: str, raw: str, expected_type: type):
 
 def _cli():
     """Manual/debug CLI for the core connector: read-only subcommands only
-    (health, list-envs, query, get, report, roles).
+    (health, list-envs, whoami, query, get, report, roles).
 
     There is deliberately no write subcommand here. Every write goes
     through scripts/execute_write.py, which imports every domain module
@@ -2089,6 +2106,7 @@ def _cli():
 
     sub.add_parser("health")
     sub.add_parser("list-envs")
+    sub.add_parser("whoami", help="Print the gateway session identity this process sees (no network call)")
 
     q = sub.add_parser("query")
     q.add_argument("doctype")
@@ -2138,6 +2156,8 @@ def _cli():
             print(json.dumps(health_check(args.tag), indent=2))
         elif args.command == "list-envs":
             print(json.dumps({"configured_tags": list_configured_tags()}, indent=2))
+        elif args.command == "whoami":
+            print(json.dumps(session_identity(), indent=2))
         elif args.command == "query":
             filters = _parse_json_arg("--filters", args.filters, list)
             fields = _parse_json_arg("--fields", args.fields, list)
