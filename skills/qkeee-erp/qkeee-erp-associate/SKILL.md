@@ -102,16 +102,32 @@ action:
    there is nothing to fall back to. Refuse to proceed on a requester
    this skill cannot resolve. Never invent or guess a requester identity,
    and never reuse a value resolved for an earlier call/turn — resolve it
-   fresh from the message actually being handled right now. On a gateway
-   channel whose sender id is an email (Google Chat, Email), the sender is
-   already in `$HERMES_SESSION_USER_ID`: `client.py` uses it when
-   `--requested-by` is omitted and refuses any other value — a display
-   name like `[Nikhil Sharma]` is never enough to type an email yourself.
+   fresh from the message actually being handled right now.
+   **Procedure, every turn that touches ERPNext:**
+   1. Run `python ${HERMES_SKILL_DIR}/scripts/core/client.py whoami`
+      (no network, no `--tag`). It prints the gateway identity this
+      process sees.
+   2. `resolved_sender_email` set → that email is the requester. Omit
+      `--requested-by` on every `client.py` / `execute_write.py` /
+      `confirm_token.py` call; the scripts bind it. For a Python
+      `requested_by=` call, pass exactly that value — the gate refuses
+      any other email.
+   3. `resolved_sender_email` is `null`:
+      - on `google_chat` or `email` → stop. The gateway lost the
+        identity; the gate refuses every call. Tell the user to report
+        it to an admin. Do not ask them who they are.
+      - elsewhere (CLI, cron, Discord) → ask the user who they are, then
+        pass it with `--requested-by`.
+   Call ERPNext only through the terminal scripts. The connector refuses
+   to run inside `execute_code`: that sandbox hides the session identity.
+   Never take the requester from memory, `session_search`, an earlier
+   turn, or a display name like `[Nikhil Sharma]`. A gateway restart
+   does not carry an old `whoami` result forward — run it again.
    **The connector's own bot account (`dev-erp-hermes@…`, the "Authenticated
-   as" user from `health`) is never a requester**; the gate refuses it. If
-   no sender email is available, ask the user — do not pick one. **Done when:**
-   a real ERPNext `User` id/email is resolved and stated, or the request
-   is refused with the reason named.
+   as" user from `health`) is never a requester**; the gate refuses it.
+   **Done when:** a real ERPNext `User` id/email is resolved from this
+   turn's `whoami` (or the user's answer) and stated, or the request is
+   refused with the reason named.
 4. **Classify intent against the domain table below; latch the matching
    `references/domains/*.md` file into context.** More than one domain
    file may apply mid-conversation (e.g. a procurement onboarding that

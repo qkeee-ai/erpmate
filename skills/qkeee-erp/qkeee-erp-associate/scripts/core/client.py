@@ -305,6 +305,13 @@ class UnvalidatedProdRequesterError(GateRefusal):
     frappe.client.has_permission check."""
 
 
+class SandboxedCallerError(GateRefusal):
+    """Raised when the connector runs inside Hermes' execute_code sandbox.
+    That sandbox strips every HERMES_SESSION_* var, so the requester cannot
+    be bound to the gateway sender there; ERPNext calls go through the
+    terminal scripts instead."""
+
+
 class InvalidArgumentsError(ConnectorError):
     """An operation's arguments are malformed (missing, unknown, wrong
     type). Raised by the pipeline when prepare() — which does no I/O —
@@ -449,6 +456,29 @@ def _session_sender_email() -> str:
     there is none (CLI, cron, a non-email platform id)."""
     value = (os.environ.get(_SESSION_SENDER_ENV) or "").strip()
     return value if "@" in value else ""
+
+
+# Platforms whose sender id is always an email. A session on one of these
+# with no sender email means identity plumbing broke; the gate refuses
+# rather than accept a requester typed by the agent or the user.
+_EMAIL_SENDER_PLATFORMS = frozenset({"google_chat", "email"})
+_SESSION_PLATFORM_ENV = "HERMES_SESSION_PLATFORM"
+# Set by Hermes only inside the execute_code sandbox child
+# (tools/code_execution_env.py), which also strips HERMES_SESSION_*.
+_EXECUTE_CODE_SANDBOX_ENV = "HERMES_RPC_SOCKET"
+
+
+def _refuse_if_execute_code_sandbox() -> None:
+    """Fail closed before any ERPNext request from the execute_code sandbox:
+    there the session sender is invisible, so resolve_requested_by() and the
+    gate's session binding would silently pass any requested_by through."""
+    if os.environ.get(_EXECUTE_CODE_SANDBOX_ENV):
+        raise SandboxedCallerError(
+            "Refusing: the ERPNext connector cannot run inside execute_code. That "
+            "sandbox hides the gateway session identity, so the requester cannot be "
+            "bound. Nothing was sent. Run the skill scripts from the terminal instead "
+            "(python ${HERMES_SKILL_DIR}/scripts/core/client.py ... / execute_write.py ...)."
+        )
 
 
 _SESSION_IDENTITY_ENVS = (
@@ -859,6 +889,12 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
       — it holds every permission the connector does — so a call
       attributed to the bot is refused as "no real requester", same as an
       absent one.
+    - In a gateway session with a sender email (`HERMES_SESSION_USER_ID`),
+      `requested_by` must equal that email (case-insensitive) — the same
+      binding resolve_requested_by() applies on the CLI path, enforced here
+      too so library callers get it. On a platform whose sender id is
+      always an email (`_EMAIL_SENDER_PLATFORMS`), a session WITHOUT a
+      sender email is refused outright.
     - Whenever `requested_by` is present it is validated as a real
       ERPNext User (resource_exists check), then checked for `perm_type`
       on `doctype`/`docname` — via ERPNext's own `has_permission` RPC
@@ -902,6 +938,27 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
             f"sender's own work email, the email channel's From address, etc.) as a "
             f"real ERPNext User first, then pass it explicitly via --requested-by / "
             f"requested_by= on this call."
+        )
+    # Session binding at the gate itself, not only in the CLI wrappers:
+    # a direct `requested_by=` caller (code_execution, domain modules)
+    # cannot carry a stale or substituted email past the live sender.
+    sender = _session_sender_email()
+    platform = (os.environ.get(_SESSION_PLATFORM_ENV) or "").strip().lower()
+    if not sender and platform in _EMAIL_SENDER_PLATFORMS:
+        _log(False, {"reason": "email_platform_without_session_sender", "platform": platform})
+        raise UnvalidatedProdRequesterError(
+            f"Refusing this call against '{doctype}' on tag '{tag}': this is a "
+            f"'{platform}' session, but the gateway gave no sender email "
+            f"({_SESSION_SENDER_ENV}). On this platform the requester comes only "
+            f"from the gateway, never from the conversation. Nothing was sent. "
+            f"Report it to an admin: the gateway's identity plumbing is broken."
+        )
+    if sender and requested_by.strip().lower() != sender.lower():
+        _log(False, {"reason": "requester_not_session_sender"})
+        raise UnvalidatedProdRequesterError(
+            f"Refusing this call against '{doctype}' on tag '{tag}': requester "
+            f"'{requested_by}' is not this session's authenticated sender "
+            f"'{sender}' (gateway {_SESSION_SENDER_ENV}). " + _NEVER_SUBSTITUTE_REQUESTER
         )
     if not resource_exists(tag, "User", requested_by):
         _log(False, {"reason": "requester_not_a_known_user"})
@@ -1159,6 +1216,7 @@ def get_env_config(tag: str = "default", credential: str = "bot") -> dict:
 
 
 def _request(cfg: dict, method: str, path: str, params: dict = None, payload: dict = None) -> dict:
+    _refuse_if_execute_code_sandbox()
     url = cfg["base_url"] + path
     if params:
         url += "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})

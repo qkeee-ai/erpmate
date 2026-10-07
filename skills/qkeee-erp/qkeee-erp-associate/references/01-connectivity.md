@@ -66,10 +66,16 @@ whatever the platform actually hands over for "who sent this." Resolve it
 fresh on every single call (never cache or reuse a value from an earlier
 call in the same conversation), confirm it as a real ERPNext `User` (already
 enforced in code — `_validate_prod_requester()` in `core/client.py` refuses
-a call outright without a validated requester, on every tag), and pass it
-explicitly via `--requested-by` / `requested_by=`. Never invent, guess, or
-fall back to any standing default to get past this — there is no default to
-fall back to.
+a call outright without a validated requester, on every tag). On a gateway
+session with a sender email (Google Chat, Email), `client.py whoami` shows
+it as `resolved_sender_email`: omit `--requested-by` and the scripts bind
+it; a `requested_by=` library call must pass that same value, or the gate
+refuses it. On `google_chat`/`email` with no sender email the gate refuses
+outright. On other platforms with no sender email, pass the user-confirmed
+identity via `--requested-by` / `requested_by=`. The connector refuses to
+run inside `execute_code` (no session identity there). See `SKILL.md` step 3 for the per-turn
+procedure. Never invent, guess, or fall back to any standing default to get
+past this — there is no default to fall back to.
 
 ## Env resolution — why `qkeee-erp.env`, not native frontmatter passthrough
 

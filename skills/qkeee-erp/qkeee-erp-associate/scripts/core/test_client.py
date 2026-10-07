@@ -759,6 +759,104 @@ class SessionBoundRequesterTests(unittest.TestCase):
                 self.assertEqual(ec.resolve_requested_by(None), "")
 
 
+class GateSessionBindingTests(unittest.TestCase):
+    """_validate_prod_requester() binds to the gateway sender too, so a
+    library caller passing requested_by= directly cannot use a stale or
+    substituted email (the CLI path already had this via
+    resolve_requested_by())."""
+
+    def _with_sender(self, value):
+        return patch.dict("os.environ", {ec._SESSION_SENDER_ENV: value})
+
+    @patch.object(ec, "_log_gate_decision")
+    @patch.object(ec, "resource_exists", return_value=True)
+    def test_other_email_is_refused_and_logged(self, mocked_exists, mocked_log):
+        with self._with_sender("nikhil@org.com"):
+            with self.assertRaises(ec.UnvalidatedProdRequesterError) as ctx:
+                ec._validate_prod_requester("default", "priya@org.com", "Sales Order", "read")
+        self.assertIn("nikhil@org.com", str(ctx.exception))
+        mocked_exists.assert_not_called()
+        self.assertEqual(mocked_log.call_args.kwargs["detail"], {"reason": "requester_not_session_sender"})
+
+    @patch.object(ec, "_log_gate_decision")
+    @patch.object(ec, "check_user_permission", return_value=True)
+    @patch.object(ec, "resource_exists", return_value=True)
+    @patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True, "bot_user": ""})
+    def test_session_sender_passes_case_insensitively(self, _trust, _exists, mocked_perm, _log):
+        with self._with_sender("Nikhil@Org.com"):
+            ec._validate_prod_requester("default", "nikhil@org.com", "Sales Order", "read")  # no raise
+        mocked_perm.assert_called_once()
+
+    @patch.object(ec, "_log_gate_decision")
+    @patch.object(ec, "check_user_permission", return_value=True)
+    @patch.object(ec, "resource_exists", return_value=True)
+    @patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True, "bot_user": ""})
+    def test_non_email_session_id_does_not_bind(self, _trust, _exists, mocked_perm, _log):
+        with self._with_sender("users/1234"):
+            ec._validate_prod_requester("default", "priya@org.com", "Sales Order", "read")  # no raise
+        mocked_perm.assert_called_once()
+
+
+class EmailPlatformRequiresSenderTests(unittest.TestCase):
+    """On Google Chat / Email a session with no sender email means identity
+    plumbing broke; the gate refuses instead of accepting a typed requester."""
+
+    @patch.object(ec, "_log_gate_decision")
+    @patch.object(ec, "resource_exists", return_value=True)
+    def test_google_chat_without_sender_email_is_refused(self, mocked_exists, mocked_log):
+        env = {"HERMES_SESSION_PLATFORM": "google_chat", ec._SESSION_SENDER_ENV: "users/1234"}
+        with patch.dict("os.environ", env):
+            with self.assertRaises(ec.UnvalidatedProdRequesterError) as ctx:
+                ec._validate_prod_requester("default", "priya@org.com", "Sales Order", "read")
+        self.assertIn("no sender email", str(ctx.exception))
+        mocked_exists.assert_not_called()
+        self.assertEqual(mocked_log.call_args.kwargs["detail"]["reason"],
+                         "email_platform_without_session_sender")
+
+    @patch.object(ec, "_log_gate_decision")
+    @patch.object(ec, "check_user_permission", return_value=True)
+    @patch.object(ec, "resource_exists", return_value=True)
+    @patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True, "bot_user": ""})
+    def test_non_email_platform_without_sender_still_passes(self, _trust, _exists, mocked_perm, _log):
+        env = {"HERMES_SESSION_PLATFORM": "discord", ec._SESSION_SENDER_ENV: "123456789012345678"}
+        with patch.dict("os.environ", env):
+            ec._validate_prod_requester("default", "priya@org.com", "Sales Order", "read")  # no raise
+        mocked_perm.assert_called_once()
+
+
+class ExecuteCodeSandboxRefusalTests(unittest.TestCase):
+    """execute_code strips HERMES_SESSION_*, so the connector refuses to
+    send anything from inside it."""
+
+    def test_request_refused_before_any_network_call(self):
+        cfg = {"base_url": "https://erp.example", "api_key": "k", "api_secret": "s"}
+        with patch.dict("os.environ", {ec._EXECUTE_CODE_SANDBOX_ENV: "/tmp/rpc.sock"}), \
+                patch.object(ec.urllib.request, "urlopen") as mocked_open:
+            with self.assertRaises(ec.SandboxedCallerError):
+                ec._request(cfg, "GET", "/api/resource/Sales Order")
+        mocked_open.assert_not_called()
+
+    def test_refusal_is_a_gate_refusal(self):
+        # CLIs map GateRefusal to exit code 3: "refused, nothing was sent".
+        self.assertTrue(issubclass(ec.SandboxedCallerError, ec.GateRefusal))
+
+
+class SessionIdentityTests(unittest.TestCase):
+    """`client.py whoami`: env snapshot only, no network."""
+
+    def test_google_chat_email_sender(self):
+        env = {"HERMES_SESSION_PLATFORM": "google_chat", "HERMES_SESSION_USER_ID": "nikhil@org.com",
+               "HERMES_SESSION_USER_ID_ALT": "users/1234", "HERMES_SESSION_USER_NAME": "Nikhil"}
+        with patch.dict("os.environ", env):
+            snap = ec.session_identity()
+        self.assertEqual(snap["resolved_sender_email"], "nikhil@org.com")
+        self.assertEqual(snap["HERMES_SESSION_USER_ID_ALT"], "users/1234")
+
+    def test_no_email_resolves_to_none(self):
+        with patch.dict("os.environ", {"HERMES_SESSION_USER_ID": "users/1234"}):
+            self.assertIsNone(ec.session_identity()["resolved_sender_email"])
+
+
 class BotIdentityRequesterGuardTests(unittest.TestCase):
     """Regression (dev-erp, 2026-10-07): requested_by=<the bot itself>
     passed the gate because the bot was validated against its own
