@@ -24,6 +24,7 @@ An ERPNext specialist that acts like a functional consultant, not a click-execut
 | `mcp.json` | MCP server connections (currently no servers configured; ERPNext access goes through `qkeee-erp-associate`'s REST connector scripts) |
 | `skills/qkeee-erp/` | The `qkeee-erp-associate` skill — mounts read-only into the live profile via `skills.external_dirs`, edited here only |
 | `cron/` | Scheduled jobs (e.g. recurring MIS reports); currently empty |
+| `adminops/` | Operator maintenance tools, baked into the image at `/opt/adminops/` (not run at boot). See [adminops/README.md](adminops/README.md) |
 | `profile.md` | Purpose / Owns / Should-Not-Own / safety policy / operating protocol for this agent — user-owned, not replaced on `profile update` |
 
 **Skill** (`skills/qkeee-erp/qkeee-erp-associate/`) — one skill, thin `SKILL.md` router, domain procedures loaded on demand:
@@ -197,6 +198,8 @@ Pools ship in [`docker/defaults/jev/routing.json`](./docker/defaults/jev/routing
 [`hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm) is baked in at `/opt/hermes-lcm` (pin with `--build-arg LCM_REF=<sha>`) and enabled per profile by `018-hermes-lcm`, which links it into `<profile>/plugins/` and sets `context.engine: lcm`. It is enabled with `--no-allow-tool-override`, so it cannot replace built-in tools. `HERMES_LCM_ENABLE=0` skips it.
 
 LCM supersedes manual context tuning for long-running sessions — but `compression.threshold: 0.30` in `config.yaml` still matters as the backstop, and it only works if the auxiliary lane is alive (see **Cost controls** below).
+
+`LCM_ENABLE_SLASH_COMMAND=1` (compose default) registers `/lcm` (`/lcm doctor`, `/lcm doctor repair apply`, `/lcm backup`); the plugin hides it otherwise. If `lcm.db` gets page-level corruption that `/lcm doctor repair apply` cannot fix (`database disk image is malformed` on every compaction), follow [adminops/lcm-db-recover.md](adminops/lcm-db-recover.md).
 
 ### Skill lockdown
 

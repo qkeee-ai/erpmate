@@ -87,3 +87,8 @@ RUN set -eu; for f in /etc/cont-init.d/015[56]-* /etc/cont-init.d/01[6-9]-* \
         /etc/cont-init.d/019[5-7]-*; do \
         sed -i 's/\r$//' "$f" && chmod 0755 "$f"; \
     done
+# Operator maintenance tools (see adminops/README.md). Baked in so they are
+# available inside the container without a copy step; not run at boot.
+COPY adminops/ /opt/adminops/
+RUN set -eu; find /opt/adminops -type f -exec sed -i 's/\r$//' {} +; \
+    chmod -R a+rX,go-w /opt/adminops; chmod 0755 /opt/adminops/*.py
