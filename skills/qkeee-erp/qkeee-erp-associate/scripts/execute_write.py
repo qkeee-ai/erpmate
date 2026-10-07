@@ -248,8 +248,14 @@ def main(argv=None) -> int:
     else:
         _preflight_context_check(a)
 
+    try:
+        requested_by = resolve_requested_by(a.requested_by)
+    except GateRefusal as e:  # --requested-by is not this session's authenticated sender
+        print(f"ERROR: refused, nothing was sent: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+
     ctx = operations.WriteContext(
-        tag=a.tag, mode=a.mode, requested_by=resolve_requested_by(a.requested_by),
+        tag=a.tag, mode=a.mode, requested_by=requested_by,
         session_id=a.session_id, domain_code=a.domain_code, channel=a.channel,
         channel_metadata=channel_metadata, prompt_summary=a.prompt_summary,
         latest_prompt=a.latest_prompt, confirmation_token=a.confirmation_token,

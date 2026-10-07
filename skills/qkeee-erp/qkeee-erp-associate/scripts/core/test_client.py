@@ -625,7 +625,7 @@ class ValidateProdRequesterTests(unittest.TestCase):
 
     def test_noop_on_exempt_doctype_even_without_requester(self):
         with patch.object(ec, "resource_exists") as mocked_exists:
-            ec._validate_prod_requester("prod", None, "User", "read")
+            ec._validate_prod_requester("prod", None, "DocType", "read")
         mocked_exists.assert_not_called()
 
     def test_refuses_missing_requester(self):
@@ -701,14 +701,22 @@ class UniversalRequesterValidationTests(unittest.TestCase):
 
     def test_noop_on_exempt_doctype_on_non_prod_too(self):
         with patch.object(ec, "resource_exists") as mocked_exists:
-            ec._validate_prod_requester("qa", "priya@org.com", "User", "read")
+            ec._validate_prod_requester("qa", "priya@org.com", "DocType", "read")
         mocked_exists.assert_not_called()
 
 
 class ResolveRequestedByTests(unittest.TestCase):
-    """Thin pass-through now — no tag default exists anywhere to fall
-    back to. See GetEnvConfigNoRequesterDefaultTests for the config side
-    of this removal."""
+    """Pass-through when there is no gateway sender — no tag default
+    exists anywhere to fall back to. See GetEnvConfigNoRequesterDefaultTests
+    for the config side of this removal, and SessionBoundRequesterTests for
+    the gateway-session case."""
+
+    def setUp(self):
+        env = patch.dict("os.environ")
+        env.start()
+        self.addCleanup(env.stop)
+        import os
+        os.environ.pop(ec._SESSION_SENDER_ENV, None)
 
     def test_cli_value_passes_through(self):
         self.assertEqual(ec.resolve_requested_by("priya@org.com"), "priya@org.com")
@@ -716,6 +724,75 @@ class ResolveRequestedByTests(unittest.TestCase):
     def test_absent_value_resolves_to_empty_string(self):
         self.assertEqual(ec.resolve_requested_by(None), "")
         self.assertEqual(ec.resolve_requested_by(""), "")
+
+
+class SessionBoundRequesterTests(unittest.TestCase):
+    """Regression (dev-erp, 2026-10-07): on Google Chat the agent only saw
+    the sender's display name and passed the bot's own account as
+    requested_by. The gateway's authenticated sender email now binds the
+    requester."""
+
+    def _with_sender(self, value):
+        return patch.dict("os.environ", {ec._SESSION_SENDER_ENV: value})
+
+    def test_absent_cli_value_resolves_to_session_sender(self):
+        with self._with_sender("nikhil@org.com"):
+            self.assertEqual(ec.resolve_requested_by(None), "nikhil@org.com")
+            self.assertEqual(ec.resolve_requested_by(""), "nikhil@org.com")
+
+    def test_matching_cli_value_is_accepted_case_insensitively(self):
+        with self._with_sender("Nikhil@Org.com"):
+            self.assertEqual(ec.resolve_requested_by("nikhil@org.com"), "nikhil@org.com")
+
+    def test_cli_value_naming_someone_else_is_refused(self):
+        with self._with_sender("nikhil@org.com"):
+            with self.assertRaises(ec.UnvalidatedProdRequesterError) as ctx:
+                ec.resolve_requested_by("bot@org.com")
+        self.assertIn("nikhil@org.com", str(ctx.exception))
+        self.assertIn(ec._NEVER_SUBSTITUTE_REQUESTER, str(ctx.exception))
+
+    def test_non_email_platform_id_is_ignored(self):
+        # Discord/Telegram ids and Google Chat users/{id} are not ERPNext users.
+        for sender in ("123456789012345678", "users/1234"):
+            with self.subTest(sender=sender), self._with_sender(sender):
+                self.assertEqual(ec.resolve_requested_by("priya@org.com"), "priya@org.com")
+                self.assertEqual(ec.resolve_requested_by(None), "")
+
+
+class BotIdentityRequesterGuardTests(unittest.TestCase):
+    """Regression (dev-erp, 2026-10-07): requested_by=<the bot itself>
+    passed the gate because the bot was validated against its own
+    permissions."""
+
+    @patch.object(ec, "_log_gate_decision")
+    @patch.object(ec, "check_user_permission", return_value=True)
+    @patch.object(ec, "resource_exists", return_value=True)
+    @patch.object(ec, "verify_rbac_precheck_reliable",
+                  return_value={"reliable": True, "bot_user": "dev-erp-hermes@qkeee.in"})
+    def test_bot_account_as_requester_is_refused_and_logged(self, _trust, _exists, mocked_perm, mocked_log):
+        with self.assertRaises(ec.UnvalidatedProdRequesterError) as ctx:
+            ec._validate_prod_requester("default", "DEV-ERP-HERMES@qkeee.in", "Sales Order", "read")
+        self.assertIn("own bot account", str(ctx.exception))
+        mocked_perm.assert_not_called()
+        self.assertEqual(mocked_log.call_args.kwargs["detail"], {"reason": "requester_is_bot_identity"})
+        self.assertFalse(mocked_log.call_args.kwargs["allowed"])
+
+    @patch.object(ec, "_log_gate_decision")
+    @patch.object(ec, "check_user_permission", return_value=True)
+    @patch.object(ec, "resource_exists", return_value=True)
+    @patch.object(ec, "verify_rbac_precheck_reliable",
+                  return_value={"reliable": True, "bot_user": "dev-erp-hermes@qkeee.in"})
+    def test_human_requester_still_passes(self, _trust, _exists, mocked_perm, _log):
+        ec._validate_prod_requester("default", "nikhil@qkeee.in", "Sales Order", "read")  # no raise
+        mocked_perm.assert_called_once()
+
+    @patch.object(ec, "_log_gate_decision")
+    @patch.object(ec, "check_user_permission", return_value=True)
+    @patch.object(ec, "resource_exists", return_value=True)
+    @patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True, "bot_user": ""})
+    def test_unresolved_bot_identity_skips_guard(self, _trust, _exists, mocked_perm, _log):
+        ec._validate_prod_requester("default", "nikhil@qkeee.in", "Sales Order", "read")  # no raise
+        mocked_perm.assert_called_once()
 
 
 class RedactPiiTests(unittest.TestCase):
@@ -1365,7 +1442,7 @@ class ProdGateWiringTests(unittest.TestCase):
     def test_get_resource_gates_with_read_and_docname(self, mocked_request, mocked_cfg, mocked_gate):
         ec.get_resource("prod", "Sales Order", "SO-0001", requested_by="priya@org.com")
         mocked_gate.assert_called_once_with("prod", "priya@org.com", "Sales Order", "read", docname="SO-0001",
-                                             session_id=None, domain_code=None,
+                                             internal=False, session_id=None, domain_code=None,
                                              channel=None, channel_metadata=None,
                                              prompt_summary=None, latest_prompt=None)
 
@@ -1637,7 +1714,7 @@ class GateDecisionLoggingTests(unittest.TestCase):
     @patch.object(ec, "_audit_insert")
     def test_exempt_doctype_is_never_logged(self, mocked_insert):
         with patch.object(ec, "resource_exists") as mocked_exists:
-            ec._validate_prod_requester("gatelog", None, "User", "read")
+            ec._validate_prod_requester("gatelog", None, "DocType", "read")
         mocked_exists.assert_not_called()
         mocked_insert.assert_not_called()
 

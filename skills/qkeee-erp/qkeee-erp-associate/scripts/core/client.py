@@ -184,10 +184,25 @@ _LOG_READ_RECURSION_EXEMPT_DOCTYPES = {AUDIT_LOG_DOCTYPE, "Comment"}
 # business-permission check doesn't fit and isn't needed. AUDIT_LOG_DOCTYPE/
 # Comment are this connector's own bookkeeping, same rationale as
 # AUDIT_EXEMPT_DOCTYPES.
+#
+# User/Role moved out 2026-10-07: exempting them on EVERY read meant a
+# business read of the User list ("fetch all active users") skipped the
+# gate entirely — no requester check, no permission check — and leaked the
+# user directory on dev-erp. The recursion reason above only ever applies
+# to the gate's own plumbing, which always passes internal=True
+# (resource_exists(), _fetch_doctype_role_permissions()), so User/Role are
+# now exempt only on those internal calls — see
+# INTERNAL_READ_GATE_EXEMPT_DOCTYPES below. DocType stays fully exempt:
+# discover.py reads it as schema grounding on behalf of business
+# requesters, and DocType read is System-Manager-only in stock ERPNext.
 PROD_GATE_EXEMPT_DOCTYPES = {
-    "User", "DocType", "Role",
+    "DocType",
     AUDIT_LOG_DOCTYPE, "Comment",
 }
+
+# Exempt from the READ gate only when the call is the connector's own
+# internal plumbing (internal=True) — never on a business-intent read.
+INTERNAL_READ_GATE_EXEMPT_DOCTYPES = {"User", "Role"}
 
 # WRITES get a much narrower exemption (write-path hardening, W02).
 # PROD_GATE_EXEMPT_DOCTYPES above exists for READ recursion (validating a
@@ -421,20 +436,61 @@ def _tag_env_var(tag: str, suffix: str) -> str:
     return f"QKEEE_ERP_{sanitized}_{suffix}"
 
 
-def resolve_requested_by(cli_value: str) -> str:
-    """CLI-level requested_by resolution, called from `_cli()`.
+# The Hermes gateway binds the inbound sender per session and bridges it
+# into every terminal child's env (tools/environments/local.py,
+# _inject_session_context_env — per-session ContextVar, cross-session leak
+# guarded). On Google Chat it is the sender's email; on platforms whose id
+# is not an email (Discord/Telegram numeric ids) it is ignored here.
+_SESSION_SENDER_ENV = "HERMES_SESSION_USER_ID"
 
-    Thin pass-through, deliberately: `cli_value` (--requested-by on THIS
-    call) is the only source. There is no tag-level or config default to
-    fall back to — every prior fallback (QKEEE_ERP_<TAG>_REQUESTED_BY,
-    any metadata.hermes.config key) has been removed. The caller (the
-    Hermes agent driving this CLI) must resolve the real requester fresh
-    from the inbound channel identity before calling — see the module
-    docstring's "Requester identity comes from the channel, never from
-    config". An absent value here is returned as "" and caught downstream
-    by `_validate_prod_requester()` / the operation pipeline, which fail
-    closed rather than silently proceeding unattributed."""
-    return cli_value or ""
+
+def _session_sender_email() -> str:
+    """The gateway-authenticated sender email for this session, or "" when
+    there is none (CLI, cron, a non-email platform id)."""
+    value = (os.environ.get(_SESSION_SENDER_ENV) or "").strip()
+    return value if "@" in value else ""
+
+
+def resolve_requested_by(cli_value: str) -> str:
+    """CLI-level requested_by resolution, called from `_cli()`,
+    execute_write.py and confirm_token.py.
+
+    There is no tag-level or config default to fall back to — every prior
+    fallback (QKEEE_ERP_<TAG>_REQUESTED_BY, any metadata.hermes.config key)
+    has been removed. The two sources are the channel's own authenticated
+    sender and --requested-by on THIS call:
+
+    - Gateway session with a sender email (`HERMES_SESSION_USER_ID`): that
+      email IS the requester. An absent --requested-by resolves to it; a
+      --requested-by that names anyone else is refused
+      (UnvalidatedProdRequesterError). The agent never picks the
+      requester itself — on dev-erp it once passed the bot's own account,
+      and the gate then validated the bot against itself.
+    - No sender email (CLI, cron, non-email platform): `cli_value` passes
+      through unchanged. An absent value is returned as "" and caught
+      downstream by `_validate_prod_requester()` / the operation pipeline,
+      which fail closed rather than silently proceeding unattributed.
+
+    Limitation: the env var is set by the gateway, but the agent writes
+    the shell command, so an inline `HERMES_SESSION_USER_ID=… python …`
+    override is possible. This removes the accidental wrong-identity case
+    and makes a deliberate one visible in the command; it is not a
+    cryptographic binding. The bot-identity guard in
+    `_validate_prod_requester()` holds either way."""
+    value = (cli_value or "").strip()
+    sender = _session_sender_email()
+    if not sender:
+        return value
+    if not value:
+        return sender
+    if value.lower() != sender.lower():
+        raise UnvalidatedProdRequesterError(
+            f"Refusing requester '{value}': this session's authenticated sender is "
+            f"'{sender}' (gateway {_SESSION_SENDER_ENV}). requested_by must be the "
+            f"channel's own sender — omit --requested-by to use it. "
+            + _NEVER_SUBSTITUTE_REQUESTER
+        )
+    return value
 
 
 # SSN-shaped (###-##-####) and Luhn-valid 13-19 digit runs (spaces/dashes
@@ -738,7 +794,8 @@ def _requester_has_role_permission(tag: str, doctype: str, perm_type: str, reque
 
 
 def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_type: str,
-                              docname: str = None, *, for_write: bool = False, domain: str = None,
+                              docname: str = None, *, for_write: bool = False, internal: bool = False,
+                              domain: str = None,
                               advisory_token_verified: bool = False,
                               session_id: str = None, domain_code: str = None,
                               channel: str = None, channel_metadata: dict = None,
@@ -770,13 +827,21 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     No-op for any doctype in PROD_GATE_EXEMPT_DOCTYPES on a read, or in the
     much narrower WRITE_GATE_EXEMPT_DOCTYPES when `for_write=True` (always
     passed by the operation pipeline) - see that set's comment for why User/
-    Role/DocType writes are gated even though their reads are not.
+    Role/DocType writes are gated even though their reads are not. User/Role
+    reads are exempt only when `internal=True` (the gate's own plumbing —
+    see INTERNAL_READ_GATE_EXEMPT_DOCTYPES); a business read of either is
+    gated like any other doctype.
     Otherwise:
 
     - Presence of `requested_by` is mandatory on EVERY tag, no exceptions.
       There is no env-var or config default to fall back to (see the
       module docstring); a caller must resolve the live inbound channel
       identity and pass it explicitly on every call.
+    - `requested_by` must never be this connector's OWN bot account
+      (`_bot_identity()`). Validating the bot against itself always passes
+      — it holds every permission the connector does — so a call
+      attributed to the bot is refused as "no real requester", same as an
+      absent one.
     - Whenever `requested_by` is present it is validated as a real
       ERPNext User (resource_exists check), then checked for `perm_type`
       on `doctype`/`docname` — via ERPNext's own `has_permission` RPC
@@ -793,7 +858,12 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     run_query_report()/the operation pipeline — every read and write. Every
     raise, and the final allow, is also logged to Qkeee Bot Audit Log as
     one gate-decision row — a denial otherwise leaves zero trace."""
-    exempt = WRITE_GATE_EXEMPT_DOCTYPES if for_write else PROD_GATE_EXEMPT_DOCTYPES
+    if for_write:
+        exempt = WRITE_GATE_EXEMPT_DOCTYPES
+    elif internal:
+        exempt = PROD_GATE_EXEMPT_DOCTYPES | INTERNAL_READ_GATE_EXEMPT_DOCTYPES
+    else:
+        exempt = PROD_GATE_EXEMPT_DOCTYPES
     if doctype in exempt:
         return
 
@@ -825,6 +895,21 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
             f"before retrying."
         )
     trust = verify_rbac_precheck_reliable(tag)
+    # Self-attribution guard, using the bot identity the trust check above
+    # already resolved (cached, no extra round trip). A lookup failure
+    # leaves bot_user empty and skips this — that case is already treated
+    # as privileged/untrusted, so the requester still has to pass the local
+    # role/DocPerm check below on its own.
+    bot_user = (trust.get("bot_user") or "").strip().lower()
+    if bot_user and requested_by.strip().lower() == bot_user:
+        _log(False, {"reason": "requester_is_bot_identity"})
+        raise UnvalidatedProdRequesterError(
+            f"Refusing this call against '{doctype}' on tag '{tag}': requester "
+            f"'{requested_by}' is this connector's own bot account. The bot is never a "
+            f"requester — checking its permissions against itself proves nothing. Pass "
+            f"the human sender's own ERPNext user (the chat/email channel's authenticated "
+            f"sender). " + _NEVER_SUBSTITUTE_REQUESTER
+        )
     if not trust["reliable"]:
         if tag not in _PRECHECK_WARNED_TAGS:
             _PRECHECK_WARNED_TAGS.add(tag)
@@ -1234,7 +1319,7 @@ def get_resource(tag: str, doctype: str, name: str, strip_noise: bool = True,
     _fetch_doctype_role_permissions(), the only two callers that ever set
     it.
     """
-    _validate_prod_requester(tag, requested_by, doctype, "read", docname=name,
+    _validate_prod_requester(tag, requested_by, doctype, "read", docname=name, internal=internal,
                               session_id=session_id, domain_code=domain_code,
                               channel=channel, channel_metadata=channel_metadata,
                               prompt_summary=prompt_summary, latest_prompt=latest_prompt)
@@ -1280,10 +1365,10 @@ def read_rpc(tag: str, method: str, path: str, *, gate_doctype: str, requested_b
 
 
 def resource_exists(tag: str, doctype: str, name: str, credential: str = "bot") -> bool:
-    """404-tolerant existence check. Never logged (internal=True,
-    regardless of doctype), never gated (PROD_GATE_EXEMPT_DOCTYPES covers
-    "User"/"DocType"/"Role", the only doctypes this is ever called
-    against)."""
+    """404-tolerant existence check. Never logged and never gated
+    (internal=True — INTERNAL_READ_GATE_EXEMPT_DOCTYPES/PROD_GATE_EXEMPT_
+    DOCTYPES cover "User"/"DocType"/"Role", the only doctypes this is ever
+    called against)."""
     try:
         if credential == "bot":
             get_resource(tag, doctype, name, strip_noise=False, internal=True)
@@ -2031,9 +2116,13 @@ def _cli():
         args.session_id = _session_or_fallback(None)
 
     # requested_by is mandatory on every read/write, on every tag — no
-    # env-var or config default exists to fall back to, so this is a
-    # pure pass-through of --requested-by. See resolve_requested_by().
-    effective_requested_by = resolve_requested_by(args.requested_by)
+    # env-var or config default exists to fall back to. Bound to the
+    # gateway session's sender when there is one. See resolve_requested_by().
+    try:
+        effective_requested_by = resolve_requested_by(args.requested_by)
+    except GateRefusal as e:
+        print(f"ERROR: refused, nothing was sent: {e}", file=sys.stderr)
+        sys.exit(3)
 
     if args.command in ("query", "get", "report") and not effective_requested_by:
         p.error(

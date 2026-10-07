@@ -102,7 +102,14 @@ action:
    there is nothing to fall back to. Refuse to proceed on a requester
    this skill cannot resolve. Never invent or guess a requester identity,
    and never reuse a value resolved for an earlier call/turn — resolve it
-   fresh from the message actually being handled right now. **Done when:**
+   fresh from the message actually being handled right now. On a gateway
+   channel whose sender id is an email (Google Chat, Email), the sender is
+   already in `$HERMES_SESSION_USER_ID`: `client.py` uses it when
+   `--requested-by` is omitted and refuses any other value — a display
+   name like `[Nikhil Sharma]` is never enough to type an email yourself.
+   **The connector's own bot account (`dev-erp-hermes@…`, the "Authenticated
+   as" user from `health`) is never a requester**; the gate refuses it. If
+   no sender email is available, ask the user — do not pick one. **Done when:**
    a real ERPNext `User` id/email is resolved and stated, or the request
    is refused with the reason named.
 4. **Classify intent against the domain table below; latch the matching

@@ -851,10 +851,23 @@ class WriteGateExemptionTests(unittest.TestCase):
                     core_client._validate_prod_requester("test", "not-a-user@x", doctype, "create",
                                                           for_write=True)
 
-    def test_reads_of_user_stay_exempt_for_recursion(self):
-        with patch.object(core_client, "resource_exists") as exists:
-            core_client._validate_prod_requester("test", "anyone", "User", "read")
-            exists.assert_not_called()
+    def test_internal_reads_of_user_stay_exempt_for_recursion(self):
+        # Only the gate's own plumbing (internal=True) skips the gate for
+        # User/Role — that is what breaks the resource_exists() recursion.
+        for doctype in ("User", "Role"):
+            with self.subTest(doctype=doctype), patch.object(core_client, "resource_exists") as exists:
+                core_client._validate_prod_requester("test", "anyone", doctype, "read", internal=True)
+                exists.assert_not_called()
+
+    def test_business_reads_of_user_and_role_are_gated(self):
+        # Regression (dev-erp, 2026-10-07): a plain User-list read skipped
+        # the gate entirely and leaked the user directory.
+        for doctype in ("User", "Role"):
+            with self.subTest(doctype=doctype),                     patch.object(core_client, "resource_exists", return_value=False):
+                with self.assertRaises(core_client.UnvalidatedProdRequesterError):
+                    core_client._validate_prod_requester("test", "not-a-user@x", doctype, "read")
+                with self.assertRaises(core_client.UnvalidatedProdRequesterError):
+                    core_client._validate_prod_requester("test", None, doctype, "read")
 
     def test_bookkeeping_writes_stay_exempt(self):
         for doctype in (core_client.AUDIT_LOG_DOCTYPE, "Comment"):

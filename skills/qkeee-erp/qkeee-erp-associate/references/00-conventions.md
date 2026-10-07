@@ -190,7 +190,15 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   `check_user_permission()` validate against whatever identity is passed
   in; they cannot detect a plausible-looking but fabricated one — which
   is exactly why the identity must come from the channel field, never
-  from anyone's say-so mid-conversation.
+  from anyone's say-so mid-conversation. Two code-enforced backstops
+  (2026-10-07, after the agent passed its own bot account on dev-erp and
+  the gate validated the bot against itself): `resolve_requested_by()`
+  binds the requester to the gateway's `HERMES_SESSION_USER_ID` when it is
+  an email (fills it in when `--requested-by` is omitted, refuses a
+  mismatch), and `_validate_prod_requester()` refuses `requested_by` equal
+  to the connector's own bot account. `User`/`Role` reads are no longer
+  gate-exempt for business reads — only the gate's own `internal=True`
+  plumbing skips the gate for them.
 - **Run the same requester-permission check on every environment, every
   fetch or write.** Resolve the requester as a real ERPNext `User`, then
   confirm via ERPNext's own `frappe.client.has_permission` that they
