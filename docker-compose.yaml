@@ -137,6 +137,9 @@ services:
       - JEV_INIT_ENABLE=${JEV_INIT_ENABLE:-1}   # 0 = skip jev init
       # 0 = skip enabling hermes-lcm (context.engine=lcm) at boot:
       - HERMES_LCM_ENABLE=${HERMES_LCM_ENABLE:-1}
+      # 1 = register the /lcm slash command (/lcm doctor, /lcm doctor repair
+      # apply, /lcm backup). The plugin hides it unless this is set:
+      - LCM_ENABLE_SLASH_COMMAND=${LCM_ENABLE_SLASH_COMMAND:-1}
       # First boot only: mark the custom profile desired_state=running and
       # default desired_state=stopped, so 02-reconcile-profiles starts the
       # custom one instead of default. Runs once; later boots / a manual
