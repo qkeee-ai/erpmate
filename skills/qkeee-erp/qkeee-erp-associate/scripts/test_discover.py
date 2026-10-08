@@ -17,6 +17,8 @@ import unittest
 from unittest.mock import patch
 
 import discover
+from core import client as _client
+
 
 
 class DoctypeMetaUsesDocTypeGetResourceTests(unittest.TestCase):
@@ -131,7 +133,7 @@ class ListInstalledAppsFallbackTests(unittest.TestCase):
     @patch.object(discover, "_log_read")
     @patch.object(discover, "_request")
     @patch.object(discover, "get_env_config", return_value={"tag": "DEMO_ERP"})
-    @patch.object(discover, "_validate_prod_requester")
+    @patch.object(discover, "validate_environment_metadata_requester")
     def test_blocked_rpc_returns_fallback_hint_not_raise(self, mock_validate, mock_cfg,
                                                           mock_request, mock_log):
         mock_request.side_effect = discover.ConnectorError(
@@ -142,14 +144,104 @@ class ListInstalledAppsFallbackTests(unittest.TestCase):
         self.assertIn("modules", result["fallback"])
         mock_log.assert_called_once()
 
-    @patch.object(discover, "_log_read")
-    @patch.object(discover, "_request")
-    @patch.object(discover, "get_env_config", return_value={"tag": "DEMO_ERP"})
-    @patch.object(discover, "_validate_prod_requester")
-    def test_apps_call_is_gated_before_request(self, mock_validate, mock_cfg, mock_request, mock_log):
-        mock_request.return_value = {"message": {"frappe": "15.0.0"}}
-        discover.list_installed_apps("DEMO_ERP", requested_by="user@org.com")
-        mock_validate.assert_called_once_with("DEMO_ERP", "user@org.com", "Module Def", "read")
+
+class EnvironmentMetadataExemptTests(unittest.TestCase):
+    """Issue 02 / ADR 0001: Environment Metadata (DocType, Module Def,
+    get_versions) is exempt from the requester's per-doctype permission
+    check. The requester must still be present and bound to the session,
+    and every read still writes one audit row under that requester."""
+
+    REQ = "hr.user@org.com"
+
+    def setUp(self):
+        env = patch.dict("os.environ")
+        env.start()
+        self.addCleanup(env.stop)
+        import os
+        for var in (_client._SESSION_SENDER_ENV, _client._SESSION_PLATFORM_ENV):
+            os.environ.pop(var, None)
+        # Any permission lookup at all is a failure: the requester holds no
+        # Module Def read, and the gate must not ask.
+        for name in ("resource_exists", "check_user_permission", "verify_rbac_precheck_reliable",
+                     "_requester_has_role_permission"):
+            p = patch.object(_client, name,
+                             side_effect=AssertionError(f"{name} must not run for metadata"))
+            p.start()
+            self.addCleanup(p.stop)
+        for name, value in (("get_env_config", {"tag": "DEMO_ERP"}),):
+            p = patch.object(_client, name, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.gate_log = patch.object(_client, "_log_gate_decision").start()
+        self.addCleanup(patch.stopall)
+
+    def test_modules_succeeds_without_module_def_permission_and_logs_one_row(self):
+        with patch.object(_client, "_request",
+                          return_value={"data": [{"name": "HR", "app_name": "hrms"}]}), \
+                patch.object(_client, "_log_read") as log_read:
+            result = discover.list_modules("DEMO_ERP", requested_by=self.REQ)
+        self.assertEqual(result["apps_seen_via_modules"], ["hrms"])
+        log_read.assert_called_once()
+        self.assertEqual(log_read.call_args.args[1], "Module Def")
+        self.assertEqual(log_read.call_args.args[3], self.REQ)
+        self.gate_log.assert_not_called()
+
+    def test_apps_succeeds_without_module_def_permission_and_logs_one_row(self):
+        with patch.object(discover, "_request", return_value={"message": {"frappe": "16.0.0"}}), \
+                patch.object(discover, "get_env_config", return_value={"tag": "DEMO_ERP"}), \
+                patch.object(discover, "_log_read") as log_read:
+            result = discover.list_installed_apps("DEMO_ERP", requested_by=self.REQ)
+        self.assertEqual(result["apps"], {"frappe": "16.0.0"})
+        log_read.assert_called_once()
+        self.assertEqual(log_read.call_args.args[3], self.REQ)
+
+    def test_resolve_reads_module_def_without_requester_permission(self):
+        def fake_request(cfg, method, path, params=None, payload=None):
+            if "getdoctype" in path:
+                return {"docs": [{"name": "Employee", "module": "Setup", "fields": []}]}
+            return {"data": {"name": "Setup", "app_name": "erpnext"}}
+        with patch.object(_client, "_request", side_effect=fake_request), \
+                patch.object(_client, "_log_read") as log_read:
+            result = discover.resolve_doctype("DEMO_ERP", "Employee", requested_by=self.REQ)
+        self.assertEqual(result["app"], "erpnext")
+        self.assertIsNone(result["app_lookup_error"])
+        self.assertEqual([c.args[1] for c in log_read.call_args_list], ["DocType", "Module Def"])
+        self.assertTrue(all(c.args[3] == self.REQ for c in log_read.call_args_list))
+
+    def test_missing_requester_is_still_refused(self):
+        with patch.object(_client, "_request") as req:
+            for call in (lambda: discover.list_modules("DEMO_ERP", requested_by=None),
+                         lambda: discover.list_installed_apps("DEMO_ERP", requested_by=""),
+                         lambda: discover.doctype_meta("DEMO_ERP", "Employee", requested_by=None)):
+                with self.subTest(call=call):
+                    with self.assertRaises(_client.UnvalidatedProdRequesterError):
+                        call()
+        req.assert_not_called()
+
+    def test_requester_must_match_session_sender(self):
+        import os
+        os.environ[_client._SESSION_SENDER_ENV] = "someone.else@org.com"
+        with patch.object(_client, "_request") as req:
+            with self.assertRaises(_client.UnvalidatedProdRequesterError):
+                discover.list_modules("DEMO_ERP", requested_by=self.REQ)
+            with self.assertRaises(_client.UnvalidatedProdRequesterError):
+                discover.list_installed_apps("DEMO_ERP", requested_by=self.REQ)
+        req.assert_not_called()
+
+    def test_module_def_write_is_still_gated(self):
+        self.assertNotIn("Module Def", _client.WRITE_GATE_EXEMPT_DOCTYPES)
+        with patch.object(_client, "resource_exists", return_value=False):
+            with self.assertRaises(_client.UnvalidatedProdRequesterError):
+                _client._validate_prod_requester(
+                    "DEMO_ERP", self.REQ, "Module Def", "write", for_write=True)
+
+    def test_exemption_is_the_closed_adr_0001_list(self):
+        self.assertEqual(_client.ENVIRONMENT_METADATA_DOCTYPES, {"DocType", "Module Def"})
+        self.assertEqual(_client.ENVIRONMENT_METADATA_RPCS,
+                         {"frappe.utils.change_log.get_versions"})
+        with self.assertRaises(ValueError):
+            _client.validate_environment_metadata_requester(
+                "DEMO_ERP", self.REQ, "frappe.client.get_list")
 
 
 class ListModulesLimitTests(unittest.TestCase):

@@ -192,13 +192,19 @@ _LOG_READ_RECURSION_EXEMPT_DOCTYPES = {AUDIT_LOG_DOCTYPE, "Comment"}
 # to the gate's own plumbing, which always passes internal=True
 # (resource_exists(), _fetch_doctype_role_permissions()), so User/Role are
 # now exempt only on those internal calls — see
-# INTERNAL_READ_GATE_EXEMPT_DOCTYPES below. DocType stays fully exempt:
-# discover.py reads it as schema grounding on behalf of business
-# requesters, and DocType read is System-Manager-only in stock ERPNext.
-PROD_GATE_EXEMPT_DOCTYPES = {
-    "DocType",
-    AUDIT_LOG_DOCTYPE, "Comment",
-}
+# INTERNAL_READ_GATE_EXEMPT_DOCTYPES below.
+#
+# Environment Metadata (agents/docs/adr/0001-environment-metadata-exempt-
+# from-requester-gate.md) is exempt from the requester's per-doctype
+# permission check: a requester's Module Def or DocType permission says
+# nothing about whether they may create an Employee, and both are
+# System-Manager-only in stock ERPNext. A business read of it still needs
+# a present requester bound to the session sender, and still writes its
+# audit row under that requester. CLOSED LIST: DocType, Module Def, and the
+# get_versions RPC (ENVIRONMENT_METADATA_RPCS). Adding to it needs a new ADR.
+ENVIRONMENT_METADATA_DOCTYPES = frozenset({"DocType", "Module Def"})
+ENVIRONMENT_METADATA_RPCS = frozenset({"frappe.utils.change_log.get_versions"})
+PROD_GATE_EXEMPT_DOCTYPES = set(ENVIRONMENT_METADATA_DOCTYPES) | {AUDIT_LOG_DOCTYPE, "Comment"}
 
 # Exempt from the READ gate only when the call is the connector's own
 # internal plumbing (internal=True) — never on a business-intent read.
@@ -840,6 +846,68 @@ def _requester_has_role_permission(tag: str, doctype: str, perm_type: str, reque
     return False
 
 
+def _require_bound_requester(tag: str, requested_by: str, subject: str, log) -> None:
+    """The requester-presence and session-binding half of the gate. Runs
+    for every gated call AND for Environment Metadata reads, which skip
+    only the permission half. `log(allowed, detail)` records a refusal."""
+    if not requested_by:
+        log(False, {"reason": "no_requester_given"})
+        raise UnvalidatedProdRequesterError(
+            f"Refusing this call against '{subject}' on tag '{tag}': no requester was "
+            f"given. A validated, explicit requester is mandatory on every call, on "
+            f"every environment — there is no env-var or config default to fall back "
+            f"to. Resolve the inbound channel identity (the Google Chat/Teams/Slack "
+            f"sender's own work email, the email channel's From address, etc.) as a "
+            f"real ERPNext User first, then pass it explicitly via --requested-by / "
+            f"requested_by= on this call."
+        )
+    # Session binding at the gate itself, not only in the CLI wrappers:
+    # a direct `requested_by=` caller (code_execution, domain modules)
+    # cannot carry a stale or substituted email past the live sender.
+    sender = _session_sender_email()
+    platform = (os.environ.get(_SESSION_PLATFORM_ENV) or "").strip().lower()
+    if not sender and platform in _EMAIL_SENDER_PLATFORMS:
+        log(False, {"reason": "email_platform_without_session_sender", "platform": platform})
+        raise UnvalidatedProdRequesterError(
+            f"Refusing this call against '{subject}' on tag '{tag}': this is a "
+            f"'{platform}' session, but the gateway gave no sender email "
+            f"({_SESSION_SENDER_ENV}). On this platform the requester comes only "
+            f"from the gateway, never from the conversation. Nothing was sent. "
+            f"Report it to an admin: the gateway's identity plumbing is broken."
+        )
+    if sender and requested_by.strip().lower() != sender.lower():
+        log(False, {"reason": "requester_not_session_sender"})
+        raise UnvalidatedProdRequesterError(
+            f"Refusing this call against '{subject}' on tag '{tag}': requester "
+            f"'{requested_by}' is not this session's authenticated sender "
+            f"'{sender}' (gateway {_SESSION_SENDER_ENV}). " + _NEVER_SUBSTITUTE_REQUESTER
+        )
+
+
+def validate_environment_metadata_requester(tag: str, requested_by: str, rpc: str, *,
+                                            session_id: str = None, domain_code: str = None,
+                                            channel: str = None, channel_metadata: dict = None,
+                                            prompt_summary: str = None,
+                                            latest_prompt: str = None) -> None:
+    """Gate for an Environment Metadata RPC (ENVIRONMENT_METADATA_RPCS,
+    ADR 0001): requester present and session-bound, no permission check.
+    The caller still writes the read's audit row via _log_read(). Refusals
+    are logged against Module Def, the doctype the read is audited under."""
+    if rpc not in ENVIRONMENT_METADATA_RPCS:
+        raise ValueError(f"{rpc!r} is not Environment Metadata (ADR 0001 closed list: "
+                         f"{sorted(ENVIRONMENT_METADATA_RPCS)}).")
+
+    def _log(allowed: bool, detail: dict) -> None:
+        _log_gate_decision(
+            tag, perm_type="read", doctype="Module Def", docname=None, requested_by=requested_by,
+            allowed=allowed, detail=dict(detail, rpc=rpc), session_id=session_id,
+            domain_code=domain_code, channel=channel, channel_metadata=channel_metadata,
+            prompt_summary=prompt_summary, latest_prompt=latest_prompt,
+        )
+
+    _require_bound_requester(tag, requested_by, rpc, _log)
+
+
 def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_type: str,
                               docname: str = None, *, for_write: bool = False, internal: bool = False,
                               domain: str = None,
@@ -874,7 +942,10 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     No-op for any doctype in PROD_GATE_EXEMPT_DOCTYPES on a read, or in the
     much narrower WRITE_GATE_EXEMPT_DOCTYPES when `for_write=True` (always
     passed by the operation pipeline) - see that set's comment for why User/
-    Role/DocType writes are gated even though their reads are not. User/Role
+    Role/DocType writes are gated even though their reads are not. Exception:
+    a non-internal read of Environment Metadata (ENVIRONMENT_METADATA_DOCTYPES,
+    ADR 0001) still runs the presence and session-binding checks below and
+    skips only the permission check. User/Role
     reads are exempt only when `internal=True` (the gate's own plumbing —
     see INTERNAL_READ_GATE_EXEMPT_DOCTYPES); a business read of either is
     gated like any other doctype.
@@ -917,8 +988,6 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
         exempt = PROD_GATE_EXEMPT_DOCTYPES | INTERNAL_READ_GATE_EXEMPT_DOCTYPES
     else:
         exempt = PROD_GATE_EXEMPT_DOCTYPES
-    if doctype in exempt:
-        return
 
     def _log(allowed: bool, detail: dict) -> None:
         _log_gate_decision(
@@ -928,38 +997,14 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
             prompt_summary=prompt_summary, latest_prompt=latest_prompt,
         )
 
-    if not requested_by:
-        _log(False, {"reason": "no_requester_given"})
-        raise UnvalidatedProdRequesterError(
-            f"Refusing this call against '{doctype}' on tag '{tag}': no requester was "
-            f"given. A validated, explicit requester is mandatory on every call, on "
-            f"every environment — there is no env-var or config default to fall back "
-            f"to. Resolve the inbound channel identity (the Google Chat/Teams/Slack "
-            f"sender's own work email, the email channel's From address, etc.) as a "
-            f"real ERPNext User first, then pass it explicitly via --requested-by / "
-            f"requested_by= on this call."
-        )
-    # Session binding at the gate itself, not only in the CLI wrappers:
-    # a direct `requested_by=` caller (code_execution, domain modules)
-    # cannot carry a stale or substituted email past the live sender.
-    sender = _session_sender_email()
-    platform = (os.environ.get(_SESSION_PLATFORM_ENV) or "").strip().lower()
-    if not sender and platform in _EMAIL_SENDER_PLATFORMS:
-        _log(False, {"reason": "email_platform_without_session_sender", "platform": platform})
-        raise UnvalidatedProdRequesterError(
-            f"Refusing this call against '{doctype}' on tag '{tag}': this is a "
-            f"'{platform}' session, but the gateway gave no sender email "
-            f"({_SESSION_SENDER_ENV}). On this platform the requester comes only "
-            f"from the gateway, never from the conversation. Nothing was sent. "
-            f"Report it to an admin: the gateway's identity plumbing is broken."
-        )
-    if sender and requested_by.strip().lower() != sender.lower():
-        _log(False, {"reason": "requester_not_session_sender"})
-        raise UnvalidatedProdRequesterError(
-            f"Refusing this call against '{doctype}' on tag '{tag}': requester "
-            f"'{requested_by}' is not this session's authenticated sender "
-            f"'{sender}' (gateway {_SESSION_SENDER_ENV}). " + _NEVER_SUBSTITUTE_REQUESTER
-        )
+    if doctype in exempt:
+        # Environment Metadata (ADR 0001): skip only the permission check.
+        # A business read still needs a present, session-bound requester.
+        if doctype in ENVIRONMENT_METADATA_DOCTYPES and not internal:
+            _require_bound_requester(tag, requested_by, doctype, _log)
+        return
+
+    _require_bound_requester(tag, requested_by, doctype, _log)
     if not resource_exists(tag, "User", requested_by):
         _log(False, {"reason": "requester_not_a_known_user"})
         raise UnvalidatedProdRequesterError(

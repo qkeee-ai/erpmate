@@ -11,10 +11,9 @@ same unconditional `Qkeee Bot Audit Log` row every other read in this
 skill gets.
 
 `apps` (`frappe.utils.change_log.get_versions`) has no DocType behind
-it — same situation `core.client.run_query_report()` is in for a Report
-run. It's a direct `_request()` call, routed through
-`_validate_prod_requester()` and a manual `_log_read()` call first,
-mirroring `run_query_report()`'s own pattern.
+it. It's a direct `_request()` call, after
+`validate_environment_metadata_requester()` and with a manual
+`_log_read()` call, mirroring `run_query_report()`'s own pattern.
 
 `modules` uses an explicit `limit=1000` instead of Frappe's
 `limit_page_length: 0` ("no limit" sentinel): `query_resource()` doesn't
@@ -23,13 +22,15 @@ expose that sentinel — it always fetches `limit + 1` and reports
 `has_more` is still surfaced so a caller isn't silently handed a
 truncated list.
 
-Requires System Manager–level read access to `DocType` on the target
-instance for `meta`/`resolve` — a correctly least-privileged bot account
-can 403 here, and that is a real permission gap to report to the user,
-not a bug in this script (see `doctype_meta()`'s docstring). `modules`/
-`apps` read `Module Def`/a whitelisted RPC instead and are commonly
-available even when `meta`/`resolve` aren't — try them first
-(`02-environment-assessment.md` step 2 already sequences it this way).
+Whose permission each read needs (agents/docs/adr/0001): everything here
+is Environment Metadata — `DocType`, `Module Def` and the `get_versions`
+RPC. The REQUESTER's own permission on them is never checked (it says
+nothing about the business task); the requester must still be given and
+bound to the session sender, and every read is audit-logged under them.
+The BOT account needs read on `DocType` (getdoctype) and `Module Def`;
+`init_bot.py` grants the latter to the `Qkeee Bot` role. A bot without
+it gets a real 403 here — a permission gap to report with the role-gap
+prompt (`client.py health` lists it), not a bug in this script.
 
 Non-negotiable this script exists to serve: never propose a field/doctype
 that isn't confirmed live on the target instance (Non-negotiable 4,
@@ -52,12 +53,14 @@ from core.client import (
     ConnectorError,
     _log_read,
     _request,
-    _validate_prod_requester,
     get_env_config,
     get_resource,
     query_resource,
     read_rpc,
+    validate_environment_metadata_requester,
 )
+
+_GET_VERSIONS = "frappe.utils.change_log.get_versions"
 
 # Frappe's merged meta — the base DocType plus Custom Fields and Property
 # Setters, exactly what the desk form uses. The bare DocType record
@@ -79,13 +82,11 @@ def list_installed_apps(tag: str, *, requested_by: str = None, session_id: str =
                          latest_prompt: str = None) -> dict:
     """Installed-apps + version list — the same data the ERPNext desk's
     Help > About dialog shows. Frappe exposes this via a whitelisted RPC
-    method, not a REST resource, so it can't route through
-    get_resource()/query_resource() directly. Validated against
-    'Module Def' read permission as the closest real doctype-shaped proxy
-    for "can this requester see what's installed" — the same
-    close-enough-proxy pattern core.client.run_query_report() already
-    uses (validates against doctype='Report' for a report run that isn't
-    itself a DocType record).
+    method (any logged-in user may call it), not a REST resource, so it
+    can't route through get_resource()/query_resource() directly.
+    Environment Metadata (ADR 0001): the requester must be present and
+    session-bound, but no permission of theirs is checked — there used to
+    be a 'Module Def' proxy check here, and it failed every HR user.
 
     Not stable across every Frappe/ERPNext version — if this method name
     has moved, or is blocked by the instance's whitelist policy entirely
@@ -94,14 +95,17 @@ def list_installed_apps(tag: str, *, requested_by: str = None, session_id: str =
     read that works even when this RPC is blocked) is the expected next
     step — not a rare fallback.
     """
-    _validate_prod_requester(tag, requested_by, "Module Def", "read")
+    validate_environment_metadata_requester(
+        tag, requested_by, _GET_VERSIONS, session_id=session_id, domain_code=domain_code,
+        channel=channel, channel_metadata=channel_metadata, prompt_summary=prompt_summary,
+        latest_prompt=latest_prompt)
     cfg = get_env_config(tag)
     try:
-        result = _request(cfg, "GET", "/api/method/frappe.utils.change_log.get_versions")
-        payload = {"source": "frappe.utils.change_log.get_versions", "apps": result.get("message", result)}
+        result = _request(cfg, "GET", f"/api/method/{_GET_VERSIONS}")
+        payload = {"source": _GET_VERSIONS, "apps": result.get("message", result)}
     except ConnectorError as e:
         payload = {
-            "source": "frappe.utils.change_log.get_versions", "error": str(e),
+            "source": _GET_VERSIONS, "error": str(e),
             "fallback": "use 'modules' subcommand to enumerate apps indirectly via Module Def, "
                         "or ask the user to paste the Help > About dialog contents",
         }

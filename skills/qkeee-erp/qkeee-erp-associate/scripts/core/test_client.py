@@ -623,10 +623,22 @@ class ValidateProdRequesterTests(unittest.TestCase):
     — on every tag. Never proceeds unverified. See
     UniversalRequesterValidationTests below for the non-PROD-tag cases."""
 
-    def test_noop_on_exempt_doctype_even_without_requester(self):
+    def test_noop_on_bookkeeping_doctype_even_without_requester(self):
         with patch.object(ec, "resource_exists") as mocked_exists:
-            ec._validate_prod_requester("prod", None, "DocType", "read")
+            ec._validate_prod_requester("prod", None, ec.AUDIT_LOG_DOCTYPE, "read")
         mocked_exists.assert_not_called()
+
+    def test_environment_metadata_still_needs_a_requester(self):
+        # ADR 0001: DocType/Module Def skip the permission check, not the
+        # requester check.
+        for doctype in ("DocType", "Module Def"):
+            with self.subTest(doctype=doctype), patch.object(ec, "resource_exists") as mocked_exists:
+                with self.assertRaises(ec.UnvalidatedProdRequesterError):
+                    ec._validate_prod_requester("prod", None, doctype, "read")
+                mocked_exists.assert_not_called()
+
+    def test_environment_metadata_internal_read_needs_no_requester(self):
+        ec._validate_prod_requester("prod", None, "DocType", "read", internal=True)  # no raise
 
     def test_refuses_missing_requester(self):
         with self.assertRaises(ec.UnvalidatedProdRequesterError) as ctx:
@@ -1811,8 +1823,9 @@ class GateDecisionLoggingTests(unittest.TestCase):
 
     @patch.object(ec, "_audit_insert")
     def test_exempt_doctype_is_never_logged(self, mocked_insert):
-        with patch.object(ec, "resource_exists") as mocked_exists:
-            ec._validate_prod_requester("gatelog", None, "DocType", "read")
+        with patch.dict("os.environ", self.ENV, clear=True),                 patch.object(ec, "resource_exists") as mocked_exists:
+            ec._validate_prod_requester("gatelog", "priya@org.com", "DocType", "read")
+            ec._validate_prod_requester("gatelog", None, ec.AUDIT_LOG_DOCTYPE, "read")
         mocked_exists.assert_not_called()
         mocked_insert.assert_not_called()
 
