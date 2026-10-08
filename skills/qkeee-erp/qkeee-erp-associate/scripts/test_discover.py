@@ -303,6 +303,65 @@ class MergedMetaTests(unittest.TestCase):
         base.assert_not_called()
 
 
+class ConditionalAndNamingMetaTests(unittest.TestCase):
+    """Issue 05: a field made mandatory by `mandatory_depends_on` was
+    invisible (only `reqd` was kept), and the naming rule wasn't returned,
+    so a create failed with MandatoryError on a customised instance."""
+
+    MERGED = {"docs": [{
+        "name": "Employee", "module": "Setup", "autoname": "naming_series:",
+        "naming_rule": "By \"Naming Series\" field", "title_field": "employee_name",
+        "fields": [
+            {"fieldname": "naming_series", "fieldtype": "Select", "reqd": 1,
+             "options": "HR-EMP-\nEMP-.YYYY.-"},
+            {"fieldname": "first_name", "fieldtype": "Data", "reqd": 1, "length": 140,
+             "permlevel": 0},
+            {"fieldname": "relieving_date", "fieldtype": "Date", "reqd": 0,
+             "mandatory_depends_on": "eval:doc.status=='Left'",
+             "depends_on": "eval:doc.status!='Active'",
+             "read_only_depends_on": "eval:doc.docstatus==1"},
+            {"fieldname": "department_name", "fieldtype": "Data",
+             "fetch_from": "department.department_name", "permlevel": 1},
+            {"fieldname": "ctc", "fieldtype": "Currency", "non_negative": 1},
+        ]}]}
+
+    def _meta(self, merged=None):
+        with patch.object(discover, "read_rpc", return_value=merged or self.MERGED):
+            return discover.doctype_meta("DEMO_ERP", "Employee", requested_by="u@org.com")
+
+    def test_conditional_mandatory_field_is_listed_with_its_expression(self):
+        meta = self._meta()
+        self.assertEqual(meta["conditional_mandatory"],
+                         [{"fieldname": "relieving_date", "expression": "eval:doc.status=='Left'"}])
+
+    def test_naming_keys_are_returned(self):
+        meta = self._meta()
+        self.assertEqual(meta["autoname"], "naming_series:")
+        self.assertEqual(meta["naming_rule"], "By \"Naming Series\" field")
+        self.assertEqual(meta["title_field"], "employee_name")
+        self.assertEqual(meta["naming_series_options"], ["HR-EMP-", "EMP-.YYYY.-"])
+
+    def test_no_naming_series_field_means_no_options(self):
+        merged = {"docs": [{"name": "Employee", "autoname": "hash", "fields": []}]}
+        meta = self._meta(merged)
+        self.assertIsNone(meta["naming_series_options"])
+        self.assertEqual(meta["conditional_mandatory"], [])
+
+    def test_field_level_conditional_keys_are_kept(self):
+        fields = {f["fieldname"]: f for f in self._meta()["fields"]}
+        self.assertEqual(fields["relieving_date"]["depends_on"], "eval:doc.status!='Active'")
+        self.assertEqual(fields["relieving_date"]["read_only_depends_on"], "eval:doc.docstatus==1")
+        self.assertEqual(fields["department_name"]["fetch_from"], "department.department_name")
+        self.assertEqual(fields["department_name"]["permlevel"], 1)
+        self.assertEqual(fields["first_name"]["length"], 140)
+        self.assertEqual(fields["ctc"]["non_negative"], 1)
+
+    def test_custom_fields_merged_keys_unchanged(self):
+        meta = self._meta()
+        self.assertTrue(meta["custom_fields_merged"])
+        self.assertIsNone(meta["custom_fields_error"])
+
+
 class SubmittableFlagTests(unittest.TestCase):
     """W40: Frappe's DocType field is `is_submittable`; the meta used to
     read a non-existent `issubmittable`, so every doctype (Purchase Order

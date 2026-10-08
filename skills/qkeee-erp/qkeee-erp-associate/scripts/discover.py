@@ -73,6 +73,11 @@ _MERGED_META = "/api/method/frappe.desk.form.load.getdoctype"
 _META_FIELD_KEYS = {
     "fieldname", "label", "fieldtype", "reqd", "options", "read_only",
     "hidden", "default", "unique", "in_list_view",
+    # Conditional rules and limits a create can fail on (issue 05):
+    # `mandatory_depends_on` makes a field mandatory only under a condition
+    # `reqd` doesn't show; `fetch_from` fills a field from a Link.
+    "mandatory_depends_on", "depends_on", "read_only_depends_on", "fetch_from",
+    "permlevel", "length", "non_negative",
 }
 
 
@@ -142,9 +147,12 @@ def doctype_meta(tag: str, doctype: str, *, requested_by: str = None, session_id
                   domain_code: str = None, channel: str = None, channel_metadata: dict = None,
                   prompt_summary: str = None, latest_prompt: str = None) -> dict:
     """Live field schema for one DocType — fieldname/label/fieldtype/reqd
-    (mandatory flag)/options (Link target or Select choices) for every
-    field actually on this instance, plus module/istable/issubmittable/
-    custom flags. Authoritative over any GitHub README or docs.frappe.io
+    (mandatory flag)/options (Link target or Select choices) and the
+    conditional keys (mandatory_depends_on, depends_on, fetch_from, ...)
+    for every field actually on this instance, plus module/istable/
+    issubmittable/custom flags, the naming rule (autoname, naming_rule,
+    title_field, naming_series_options), and `conditional_mandatory`:
+    every field with a mandatory_depends_on expression. Authoritative over any GitHub README or docs.frappe.io
     page, which describe the general shape but not this org's
     customizations (custom fields, altered mandatory flags, etc.).
 
@@ -189,6 +197,7 @@ def doctype_meta(tag: str, doctype: str, *, requested_by: str = None, session_id
         {k: f.get(k) for k in _META_FIELD_KEYS if k in f}
         for f in doc.get("fields", [])
     ]
+    series = next((f for f in fields if f.get("fieldname") == "naming_series"), None)
     return {
         "doctype": doc.get("name"),
         "module": doc.get("module"),
@@ -198,6 +207,18 @@ def doctype_meta(tag: str, doctype: str, *, requested_by: str = None, session_id
         "issubmittable": bool(doc.get("is_submittable") or doc.get("issubmittable")),
         "description": doc.get("description"),
         "fields": fields,
+        # Doc-level naming: an `autoname` of "naming_series:" needs one of
+        # `naming_series_options`; "field:<x>" makes <x> the record name.
+        "autoname": doc.get("autoname"),
+        "naming_rule": doc.get("naming_rule"),
+        "title_field": doc.get("title_field"),
+        "naming_series_options": ([o for o in (series.get("options") or "").splitlines()
+                                   if o.strip()] if series else None),
+        # Listed for the user to confirm, never evaluated here.
+        "conditional_mandatory": [
+            {"fieldname": f["fieldname"], "expression": f["mandatory_depends_on"]}
+            for f in fields if f.get("mandatory_depends_on")
+        ],
         "custom_fields_merged": merged_error is None,
         "custom_fields_error": merged_error,
     }
