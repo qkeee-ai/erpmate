@@ -123,6 +123,17 @@ AUDIT_LOG = {
 ALL_DOCTYPES = [AUDIT_LOG]
 
 
+# Doctypes on which the ROLE_NAME role gets one permlevel-0 row with read
+# ONLY — never write/create/delete. Module Def: Environment Metadata the bot
+# reads itself (agents/docs/adr/0001). Workflow: `discover.py preflight`
+# checks for an active workflow. Rows go on the dedicated role, never on a
+# stock role (agents/docs/adr/0003). init_bot.py adds them through the Role
+# Permission Manager's `add` RPC, which first copies the doctype's standard
+# DocPerm rows into Custom DocPerm (Frappe add_permission() ->
+# setup_custom_perms()), so System Manager keeps its access.
+BOT_READ_GRANTS = ("Module Def", "Workflow")
+
+
 # Fields whose type init_bot.py may change on an ALREADY-provisioned
 # instance, to converge it on the definitions above. Only these — nothing
 # else about a live doctype is ever modified by a re-run.

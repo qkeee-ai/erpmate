@@ -6,10 +6,11 @@ Not a domain module and not part of the associate's normal activation
 sequence — a human/admin runs this deliberately, once per target
 environment (or after a schema change).
 
-This version provisions ONLY the `Qkeee Bot` Role and the `Qkeee Bot Audit
-Log` DocType — there is no `--bot-email`/bot-user provisioning path in
-this skill; bot-user provisioning needs a separate tool until one is
-added here.
+This version provisions ONLY the `Qkeee Bot` Role, the `Qkeee Bot Audit
+Log` DocType, and the role's read-only rows on doctype_defs.BOT_READ_GRANTS
+(Module Def, Workflow) — there is no `--bot-email`/bot-user provisioning
+path in this skill; bot-user provisioning needs a separate tool until one
+is added here.
 
 CODE-ONLY — this script has not been run against any live ERPNext
 instance in this form. The dry-run/confirm-token discipline below
@@ -78,7 +79,7 @@ from core.client import ConnectorError, _qkeee_env_file_path, _audit_insert, _au
 from core.confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECONDS
 import urllib.parse
 
-from doctype_defs import ALL_DOCTYPES, MIGRATABLE_FIELDS, ROLE_NAME, ROLE_PAYLOAD
+from doctype_defs import ALL_DOCTYPES, BOT_READ_GRANTS, MIGRATABLE_FIELDS, ROLE_NAME, ROLE_PAYLOAD
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +167,77 @@ for _key, _prep, _summary, _pre in (
         cli=False, audit=False))  # log_role_provisioning() is this flow's one audit record
 
 
+# Read grants for the bot role (doctype_defs.BOT_READ_GRANTS). "add" creates
+# the row (the RPC ticks read and nothing else); "set_read" ticks read on a
+# row that exists without it. Audited through the pipeline: the audit
+# DocType exists by the time run_real() reaches this step.
+_PM = "/api/method/frappe.core.page.permission_manager.permission_manager."
+_GRANT_STEPS = ("add", "set_read")
+
+
+def _grant_bot_read_prepare(args, ctx):
+    if (set(args) != {"doctype", "step"} or args["doctype"] not in BOT_READ_GRANTS
+            or args["step"] not in _GRANT_STEPS):
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.grant_bot_read only grants {ROLE_NAME!r} read on {BOT_READ_GRANTS} "
+            f"(step one of {_GRANT_STEPS}).")
+    doctype = args["doctype"]
+    if args["step"] == "add":
+        path, body, ptype, audit_action = (_PM + "add", {"parent": doctype, "role": ROLE_NAME,
+                                                         "permlevel": 0}, "create", "Create")
+    else:
+        path, body, ptype, audit_action = (
+            _PM + "update", {"doctype": doctype, "role": ROLE_NAME, "permlevel": 0,
+                             "ptype": "read", "value": 1, "if_owner": 0}, "write", "Update")
+    return operations.PreparedRequest(
+        transport="rpc", doctype="Custom DocPerm", action=f"grant_bot_read_{args['step']}",
+        rpc_path=path, body=body, rbac_ptype=ptype, audit_action=audit_action,
+        audit_doctype="DocType", audit_reference=doctype)
+
+
+operations.register_operation(operations.Operation(
+    key="provisioning.grant_bot_read", domain=None,
+    summary=f"grant the {ROLE_NAME} role read on {', '.join(BOT_READ_GRANTS)}",
+    prepare=_grant_bot_read_prepare, token_policy=operations.POLICY_NONE, credential="admin",
+    allowlist_domain=None, skip_comment=True, cli=False))
+
+
+def _live_permissions(tag: str, doctype: str) -> list:
+    """The Role Permission Manager's view of `doctype`'s effective rows,
+    read with the admin credential (System-Manager-only RPC). Plumbing for
+    the plan, like _live_doctype() — not a business read."""
+    cfg = core_client.get_env_config(tag, credential="admin")
+    return core_client._request(cfg, "GET", _PM + "get_permissions",
+                                params={"doctype": doctype}).get("message") or []
+
+
+def _bot_read_grants_needed(tag: str) -> list:
+    """`"<doctype>: add"` when the role has no permlevel-0 row on it,
+    `"<doctype>: set_read"` when it has one without read. Sorted by
+    BOT_READ_GRANTS order."""
+    needed = []
+    for doctype in BOT_READ_GRANTS:
+        rows = [r for r in _live_permissions(tag, doctype)
+                if r.get("role") == ROLE_NAME and not int(r.get("permlevel") or 0)]
+        if not rows:
+            needed.append(f"{doctype}: add")
+        elif not any(int(r.get("read") or 0) for r in rows):
+            needed.append(f"{doctype}: set_read")
+    return needed
+
+
+def grant_bot_reads(tag: str, requested_by: str, grants: list, approval_note: str) -> list:
+    for grant in grants:
+        doctype, _, step = grant.partition(": ")
+        operations.run_operation("provisioning.grant_bot_read", {"doctype": doctype, "step": step},
+                                 operations.WriteContext(tag=tag, mode="read-write",
+                                                         requested_by=requested_by,
+                                                         user_approved=True,
+                                                         approval_note=approval_note))
+        print(f"Granted {ROLE_NAME} read on '{doctype}' ({step}).")
+    return list(grants)
+
+
 def ensure_qkeee_env_file_skeleton() -> bool:
     """Create qkeee-erp.env with a header comment ONLY (no tag lines, no
     secrets) if it doesn't already exist. Returns True if it was created,
@@ -203,7 +275,7 @@ def ensure_qkeee_env_file_skeleton() -> bool:
 
 def _init_plan_token(tag: str, requested_by: str, role_needed: bool,
                       doctypes_needed: list, issued_at: int = None,
-                      fields_to_migrate: list = ()) -> str:
+                      fields_to_migrate: list = (), bot_read_grants: list = ()) -> str:
     """Token over the init plan: which tag, who's running it, whether the
     Role needs creating, and exactly which doctype names need creating
     (sorted, so ordering never causes a spurious mismatch). issued_at
@@ -219,6 +291,7 @@ def _init_plan_token(tag: str, requested_by: str, role_needed: bool,
         role_needed=bool(role_needed),
         doctypes_needed=sorted(doctypes_needed),
         fields_to_migrate=sorted(fields_to_migrate),
+        bot_read_grants=sorted(bot_read_grants),
         issued_at=int(issued_at),
     )
 
@@ -247,7 +320,8 @@ def compute_plan(tag: str) -> dict:
         fields_to_migrate += [f"{name}.{fn}: {live.get(fn)} -> {want[fn]}"
                               for fn in fieldnames if live.get(fn) != want[fn]]
     return {"role_needed": role_needed, "doctypes_needed": doctypes_needed,
-            "fields_to_migrate": fields_to_migrate}
+            "fields_to_migrate": fields_to_migrate,
+            "bot_read_grants": _bot_read_grants_needed(tag)}
 
 
 def _live_doctype(tag: str, name: str) -> dict:
@@ -380,14 +454,15 @@ def run_dry_run(tag: str, requested_by: str) -> dict:
     _step("Plan")
     plan = compute_plan(tag)
     nothing_needed = (not plan["role_needed"] and not plan["doctypes_needed"]
-                      and not plan["fields_to_migrate"])
+                      and not plan["fields_to_migrate"] and not plan.get("bot_read_grants"))
     if nothing_needed:
-        print("Nothing to do — role and doctype already in place.")
+        print("Nothing to do — role, doctype and read grants already in place.")
         return {"tag": tag, "dry_run": True, **plan, "confirm_token": None, "issued_at": None}
 
     issued_at = int(time.time())
     token = _init_plan_token(tag, requested_by, plan["role_needed"], plan["doctypes_needed"],
-                              issued_at=issued_at, fields_to_migrate=plan["fields_to_migrate"])
+                              issued_at=issued_at, fields_to_migrate=plan["fields_to_migrate"],
+                              bot_read_grants=plan.get("bot_read_grants", []))
 
     if plan["role_needed"]:
         print(f"[dry-run] Would create Role '{ROLE_NAME}'.")
@@ -398,6 +473,10 @@ def run_dry_run(tag: str, requested_by: str) -> dict:
               f"{len(doctype_def['permissions'])} permission rows.")
     for change in plan["fields_to_migrate"]:
         print(f"[dry-run] Would migrate field {change}.")
+    for grant in plan.get("bot_read_grants", []):
+        doctype, _, step = grant.partition(": ")
+        print(f"[dry-run] Would grant Role '{ROLE_NAME}' read on '{doctype}' (permlevel 0, "
+              f"read only; {'new Custom DocPerm row' if step == 'add' else 'tick read on its row'}).")
 
     _step("Confirm token")
     print(f"To run this for real, re-invoke with:\n"
@@ -415,7 +494,9 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
     _step("Plan (recomputed against current target state)")
     plan = compute_plan(tag)
 
-    action_needed = plan["role_needed"] or plan["doctypes_needed"] or plan["fields_to_migrate"]
+    grants = plan.get("bot_read_grants", [])
+    action_needed = (plan["role_needed"] or plan["doctypes_needed"] or plan["fields_to_migrate"]
+                     or grants)
     if action_needed:
         if not confirm_token or issued_at is None:
             raise ConnectorError(
@@ -431,7 +512,8 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
             )
         expected = _init_plan_token(tag, requested_by, plan["role_needed"],
                                      plan["doctypes_needed"], issued_at=issued_at,
-                                     fields_to_migrate=plan["fields_to_migrate"])
+                                     fields_to_migrate=plan["fields_to_migrate"],
+                                     bot_read_grants=grants)
         if expected != confirm_token:
             raise ConnectorError(
                 "--confirm-token does not match the current plan for this target. Either "
@@ -454,6 +536,9 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
     _step("Field migrations")
     migrated = migrate_fields(tag, requested_by, approval_note) if plan["fields_to_migrate"] else []
 
+    _step(f"Read grants for {ROLE_NAME}")
+    granted = grant_bot_reads(tag, requested_by, grants, approval_note) if grants else []
+
     _step("Qkeee Bot Audit Log: recording Role provisioning")
     log_role_provisioning(tag, requested_by, role_created, approval_note)
 
@@ -470,6 +555,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         "doctypes_created": [name for name, created in results.items() if created],
         "doctypes_already_present": [name for name, created in results.items() if not created],
         "fields_migrated": migrated,
+        "bot_read_grants": granted,
         "qkeee_env_file_created": env_created,
     }
     print(json.dumps(summary, indent=2))

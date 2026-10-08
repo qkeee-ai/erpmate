@@ -114,11 +114,11 @@ class AuditFieldMigrationTests(unittest.TestCase):
         self.assertEqual(ref["fieldtype"], "Data")
 
     def test_plan_detects_a_dynamic_link_instance(self):
-        with patch.object(init_bot.core_client, "resource_exists", return_value=True),                 patch.object(init_bot, "_live_doctype", return_value=self._live("Dynamic Link")):
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True),                 patch.object(init_bot, "_live_doctype", return_value=self._live("Dynamic Link")),                 patch.object(init_bot, "_bot_read_grants_needed", return_value=[]):
             plan = init_bot.compute_plan("qa")
         self.assertEqual(plan["fields_to_migrate"],
                          [f"{self.AUDIT}.reference_name: Dynamic Link -> Data"])
-        with patch.object(init_bot.core_client, "resource_exists", return_value=True),                 patch.object(init_bot, "_live_doctype", return_value=self._live("Data")):
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True),                 patch.object(init_bot, "_live_doctype", return_value=self._live("Data")),                 patch.object(init_bot, "_bot_read_grants_needed", return_value=[]):
             self.assertEqual(init_bot.compute_plan("qa")["fields_to_migrate"], [])
 
     def test_plan_token_covers_the_migration(self):
@@ -188,6 +188,107 @@ class AuditFieldMigrationTests(unittest.TestCase):
             with self.subTest(case=label):
                 with self.assertRaises(init_bot.core_client.GateRefusal):
                     self._run_gates(fields, live)
+
+
+class BotReadGrantTests(unittest.TestCase):
+    """Issue 03: the Qkeee Bot role gets read (and only read), permlevel 0,
+    on Module Def and Workflow — Environment Metadata the bot itself reads
+    (ADR 0001) and the active-workflow check in `discover.py preflight`."""
+
+    ROLE = init_bot.ROLE_NAME
+
+    def _plan(self, perms_by_doctype):
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True), \
+                patch.object(init_bot, "_live_doctype",
+                             return_value=AuditFieldMigrationTests()._live("Data")), \
+                patch.object(init_bot, "_live_permissions",
+                             side_effect=lambda tag, dt: perms_by_doctype.get(dt, [])):
+            return init_bot.compute_plan("qa")
+
+    def test_definitions_are_read_only_on_module_def_and_workflow(self):
+        from doctype_defs import BOT_READ_GRANTS
+        self.assertEqual(BOT_READ_GRANTS, ("Module Def", "Workflow"))
+
+    def test_plan_lists_both_rows_when_missing(self):
+        plan = self._plan({"Module Def": [{"role": "System Manager", "permlevel": 0, "read": 1}]})
+        self.assertEqual(plan["bot_read_grants"], ["Module Def: add", "Workflow: add"])
+
+    def test_plan_skips_an_existing_read_row_and_fixes_a_row_without_read(self):
+        plan = self._plan({
+            "Module Def": [{"role": self.ROLE, "permlevel": 0, "read": 1}],
+            "Workflow": [{"role": self.ROLE, "permlevel": 0, "read": 0}],
+        })
+        self.assertEqual(plan["bot_read_grants"], ["Workflow: set_read"])
+
+    def test_plan_ignores_a_higher_permlevel_row(self):
+        plan = self._plan({"Module Def": [{"role": self.ROLE, "permlevel": 1, "read": 1}],
+                           "Workflow": [{"role": self.ROLE, "permlevel": 0, "read": 1}]})
+        self.assertEqual(plan["bot_read_grants"], ["Module Def: add"])
+
+    def test_dry_run_prints_both_rows(self):
+        plan = {"role_needed": False, "doctypes_needed": [], "fields_to_migrate": [],
+                "bot_read_grants": ["Module Def: add", "Workflow: add"]}
+        with patch.object(init_bot.core_client, "health_check", return_value={}), \
+                patch.object(init_bot, "compute_plan", return_value=plan), \
+                patch("builtins.print") as out:
+            result = init_bot.run_dry_run("qa", "admin@org.com")
+        printed = "\n".join(str(c.args[0]) for c in out.call_args_list if c.args)
+        self.assertIn("read on 'Module Def'", printed)
+        self.assertIn("read on 'Workflow'", printed)
+        self.assertIsNotNone(result["confirm_token"])
+
+    def test_plan_token_covers_the_grants(self):
+        a = init_bot._init_plan_token("qa", "a@b.c", False, [], issued_at=1, bot_read_grants=[])
+        b = init_bot._init_plan_token("qa", "a@b.c", False, [], issued_at=1,
+                                      bot_read_grants=["Workflow: add"])
+        self.assertNotEqual(a, b)
+
+    def test_grant_runs_the_permission_manager_add_rpc_with_read_only(self):
+        from core import operations
+        ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
+        req = operations.get_operation("provisioning.grant_bot_read").prepare(
+            {"doctype": "Module Def", "step": "add"}, ctx)
+        self.assertTrue(req.rpc_path.endswith("permission_manager.add"))
+        self.assertEqual(req.body, {"parent": "Module Def", "role": self.ROLE, "permlevel": 0})
+        req = operations.get_operation("provisioning.grant_bot_read").prepare(
+            {"doctype": "Workflow", "step": "set_read"}, ctx)
+        self.assertTrue(req.rpc_path.endswith("permission_manager.update"))
+        self.assertEqual(req.body, {"doctype": "Workflow", "role": self.ROLE, "permlevel": 0,
+                                    "ptype": "read", "value": 1, "if_owner": 0})
+
+    def test_grant_refuses_any_other_doctype_or_step(self):
+        from core import operations
+        ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
+        op = operations.get_operation("provisioning.grant_bot_read")
+        for args in ({"doctype": "Employee", "step": "add"},
+                     {"doctype": "Module Def", "step": "write"},
+                     {"doctype": "Module Def", "step": "add", "ptype": "write"}):
+            with self.subTest(args=args):
+                with self.assertRaises(init_bot.core_client.DoctypeNotAllowedError):
+                    op.prepare(args, ctx)
+        self.assertFalse(op.cli)
+
+    def test_run_real_grants_after_the_doctypes_exist(self):
+        plan = {"role_needed": False, "doctypes_needed": [], "fields_to_migrate": [],
+                "bot_read_grants": ["Module Def: add", "Workflow: set_read"]}
+        issued_at = int(time.time())
+        token = init_bot._init_plan_token("qa", "admin@org.com", False, [], issued_at=issued_at,
+                                          bot_read_grants=plan["bot_read_grants"])
+        calls = []
+        with patch.object(init_bot.core_client, "health_check", return_value={}), \
+                patch.object(init_bot, "compute_plan", return_value=plan), \
+                patch.object(init_bot, "ensure_role", return_value=False), \
+                patch.object(init_bot, "ensure_doctype",
+                             side_effect=lambda *a, **k: calls.append("doctype") or False), \
+                patch.object(init_bot, "log_role_provisioning"), \
+                patch.object(init_bot, "ensure_qkeee_env_file_skeleton", return_value=False), \
+                patch.object(init_bot.operations, "run_operation",
+                             side_effect=lambda key, args, ctx: calls.append((key, args)) or {}):
+            summary = init_bot.run_real("qa", "admin@org.com", token, issued_at)
+        self.assertEqual(calls, ["doctype",
+                                 ("provisioning.grant_bot_read", {"doctype": "Module Def", "step": "add"}),
+                                 ("provisioning.grant_bot_read", {"doctype": "Workflow", "step": "set_read"})])
+        self.assertEqual(summary["bot_read_grants"], plan["bot_read_grants"])
 
 
 if __name__ == "__main__":
