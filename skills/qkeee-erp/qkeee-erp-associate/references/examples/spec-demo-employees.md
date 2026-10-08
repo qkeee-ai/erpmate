@@ -115,20 +115,27 @@ One batch; stops at the first failure:
 python ${HERMES_SKILL_DIR}/scripts/execute_write.py --tag DEMO_ERP --mode read-write \
   --requested-by nikhil.sharma@qkeee.in --session-id <session> --channel "Google Chat" \
   --channel-metadata '{"space": "<space>", "thread": "<thread>"}' \
-  --latest-prompt "<the user's literal request>" --user-approved \
+  --latest-prompt "<the user's literal request>" \
   --batch '[
-    {"op": "hr_payroll.generic", "args": {"doctype": "Employee", "action": "create",
+    {"op": "hr_payroll.generic", "user_approved": true,
+     "approval_note": "CONFIRM DEMO EMPLOYEES",
+     "args": {"doctype": "Employee", "action": "create",
       "payload": {"naming_series": "HR-EMP-", "first_name": "Demo Employee One",
                   "gender": "Male", "date_of_birth": "1990-01-01",
                   "date_of_joining": "2026-10-01", "company": "DEMO LLP",
                   "status": "Inactive"}}},
-    {"op": "hr_payroll.generic", "args": {"doctype": "Employee", "action": "create",
+    {"op": "hr_payroll.generic", "user_approved": true,
+     "approval_note": "CONFIRM DEMO EMPLOYEES",
+     "args": {"doctype": "Employee", "action": "create",
       "payload": {"naming_series": "HR-EMP-", "first_name": "Demo Employee Two",
                   "gender": "Male", "date_of_birth": "1990-01-01",
                   "date_of_joining": "2026-10-01", "company": "DEMO LLP",
                   "status": "Inactive"}}}
   ]'
 ```
+
+`user_approved` is set per step: only for a write whose payload the user
+confirmed. A batch has no batch-level approval flag.
 
 Then, per returned name:
 `python ${HERMES_SKILL_DIR}/scripts/core/client.py --tag DEMO_ERP get Employee <name>`.

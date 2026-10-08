@@ -274,7 +274,8 @@ def main(argv=None) -> int:
     try:
         if a.batch:
             single = [f for f in ("op", "op_args", "domain", "doctype", "action", "confirmation_token",
-                                  "issued_at", "user_confirmation_text") if getattr(a, f)]
+                                  "issued_at", "user_confirmation_text", "user_approved",
+                                  "approval_note") if getattr(a, f)]
             if single:
                 p.error(f"--batch carries each step's op/args/confirmation; it cannot be combined "
                         f"with {['--' + f.replace('_', '-') for f in single]}.")

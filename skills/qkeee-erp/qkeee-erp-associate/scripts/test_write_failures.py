@@ -189,6 +189,27 @@ class BatchStopRuleTests(_PipelineMixin, unittest.TestCase):
         self.assertEqual([r["status"] for r in report["steps"]],
                          ["succeeded", "failed", "not_attempted"])
 
+    def test_approval_is_per_step_never_inherited_from_the_batch(self):
+        """GRC baseline: user_approved only when that write's confirm ran.
+        One batch-level flag must not mark every step approved."""
+        self.mutate_results("A", "B")
+        start = core_client.record_audit_log_start
+        steps = [dict(self.STEPS[0], user_approved=True), self.STEPS[1]]
+        operations.run_batch(steps, testsupport.ctx(user_approved=True, approval_note="batch"))
+        approved = [c.kwargs["user_approved"] for c in start.call_args_list]
+        self.assertEqual(approved, [True, False])
+
+    def test_cli_batch_refuses_a_batch_level_user_approved(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = execute_write.main([
+                    "--tag", "t", "--mode", "read-write", "--requested-by", testsupport.REQ,
+                    "--batch", json.dumps(self.STEPS), "--user-approved"])
+            except SystemExit as e:
+                code = e.code
+        self.assertEqual(code, execute_write.EXIT_USAGE)
+
     def test_cli_batch_cannot_be_combined_with_a_single_op(self):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

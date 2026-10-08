@@ -66,9 +66,11 @@ integrations, checking instance health.
   a Role's rows. This holds whoever asks — a System Manager included — and
   whichever credential would send it. Tell the user to make the change in
   the ERPNext UI as an admin. Service Accounts hold only dedicated `Qkeee `
-  roles: if the bot holds a stock role (e.g. HR User), every gated call is
-  refused (`ServiceAccountRoleError`) until an admin moves its rights to
-  DocPerms on `Qkeee Bot`.
+  roles. If the Bot Account holds a stock role (e.g. HR User), every
+  business read and every write is refused (`ServiceAccountRoleError`)
+  until an admin moves its rights to DocPerms on `Qkeee Bot`.
+  Environment Metadata reads and `health` still run, so the problem can
+  be shown.
 - **Connections must be `https://`.** `get_env_config()` refuses a
   non-`https://` base URL unless `QKEEE_ERP_<TAG>_ALLOW_INSECURE=1` is
   explicitly set — a deliberate opt-out for local/dev, never the default.

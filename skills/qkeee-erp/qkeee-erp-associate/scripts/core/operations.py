@@ -733,8 +733,10 @@ def run_batch(steps: list, ctx: WriteContext) -> dict:
                 ctx.without_confirmation(), confirmation_token=step.get("confirmation_token"),
                 issued_at=step.get("issued_at"),
                 user_confirmation_text=step.get("user_confirmation_text"),
-                user_approved=bool(step.get("user_approved", ctx.user_approved)),
-                approval_note=step.get("approval_note", ctx.approval_note))
+                # Per step only: a batch-level flag would mark every write
+                # approved whether or not its own confirm ran.
+                user_approved=bool(step.get("user_approved")),
+                approval_note=step.get("approval_note"))
             result = run_operation(step["op"], args, step_ctx)
         except _c.ConnectorError as e:
             stopped_at = i

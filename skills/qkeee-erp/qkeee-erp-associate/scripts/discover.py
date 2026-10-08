@@ -222,10 +222,12 @@ def doctype_meta(tag: str, doctype: str, *, requested_by: str = None, session_id
             {"fieldname": f["fieldname"], "expression": f["mandatory_depends_on"]}
             for f in fields if f.get("mandatory_depends_on")
         ],
-        # getdoctype's FormMeta attaches the doctype's ACTIVE workflows as
-        # `__workflow_docs`. None: not known (bare-DocType fallback, or a
-        # Frappe build without the key) — never read as "no workflow".
-        "active_workflows": ([w.get("name") for w in doc["__workflow_docs"] if w.get("name")]
+        # getdoctype's FormMeta attaches the doctype's ACTIVE workflow, plus
+        # its Workflow State docs, as `__workflow_docs`. None: not known
+        # (bare-DocType fallback, or a Frappe build without the key) —
+        # never read as "no workflow".
+        "active_workflows": ([w.get("name") for w in doc["__workflow_docs"]
+                              if w.get("name") and w.get("doctype", "Workflow") == "Workflow"]
                              if isinstance(doc.get("__workflow_docs"), list) else None),
         "custom_fields_merged": merged_error is None,
         "custom_fields_error": merged_error,
@@ -353,10 +355,9 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
     blockers, gaps = [], []
     merged = bool(meta.get("custom_fields_merged"))
     if not merged:
-        blockers.append("custom fields were not merged (meta fell back to the bare DocType: "
-                        f"{meta.get('custom_fields_error')}); custom mandatory fields may be "
-                        "missing. Do not create until the user explicitly overrides, and record "
-                        "the override in the spec.")
+        blockers.append("The custom fields were not merged. Custom mandatory fields may be "
+                        "missing. Do not create until the user overrides. Record the override in "
+                        f"the spec. (Cause: {meta.get('custom_fields_error')})")
 
     def in_payload(fieldname):
         return None if payload is None else payload.get(fieldname) not in (None, "", [])
@@ -379,14 +380,13 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
     workflows = meta.get("active_workflows")
     if workflows is None:
         workflow_active = None
-        blockers.append("could not confirm whether a Workflow is active on this doctype (merged "
-                        "meta carried no workflow data); the record may land in a workflow state "
-                        "the user did not expect — confirm with the user or an admin")
+        blockers.append(f"Preflight could not confirm whether a Workflow is active on "
+                        f"'{doctype}'. Confirm it with the user or an admin.")
     else:
         workflow_active = bool(workflows)
         if workflows:
-            blockers.append(f"active Workflow {', '.join(workflows)!s} on '{doctype}': the create "
-                            f"may land in a workflow state the user did not expect")
+            blockers.append(f"Workflow {', '.join(workflows)} is active on '{doctype}'. The new "
+                            f"record may land in a workflow state the user did not expect.")
 
     owning_app, app_error = _module_app(tag, meta.get("module"), read_ctx)
     try:

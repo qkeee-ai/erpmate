@@ -1126,7 +1126,7 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     if bot_stock:
         _log(False, {"reason": "bot_holds_stock_roles", "roles": bot_stock})
         raise ServiceAccountRoleError(
-            f"Refusing this call on tag '{tag}': this connector's bot account "
+            f"Refusing this call on tag '{tag}': the Bot Account "
             f"{trust.get('bot_user')!r} holds stock role(s) {bot_stock}. Service Accounts hold "
             f"only dedicated roles (agents ADR 0003). Nothing was sent. Tell an admin: move the "
             f"bot's rights to DocPerms on '{BOT_ROLE_NAME}' and remove {bot_stock} from the bot "
@@ -1535,10 +1535,10 @@ def health_check(tag: str = "default") -> dict:
     }
     if trust.get("bot_stock_roles"):
         out["service_account_warning"] = (
-            f"The bot account holds stock role(s) {trust['bot_stock_roles']}. Service Accounts "
-            f"hold only dedicated roles (agents ADR 0003), so every gated read and write on this "
-            f"tag is refused until an admin moves the bot's rights to DocPerms on "
-            f"'{BOT_ROLE_NAME}' and removes those roles, in the ERPNext UI.")
+            f"The Bot Account holds stock role(s) {trust['bot_stock_roles']}. Service Accounts "
+            f"hold only dedicated roles (agents ADR 0003). Every business read and every write "
+            f"on this tag is refused. An admin must move the bot's rights to DocPerms on "
+            f"'{BOT_ROLE_NAME}' and remove those roles, in the ERPNext UI.")
     if not trust["reliable"]:
         out["rbac_precheck_warning"] = (
             f"This tag's RBAC pre-check cannot be trusted: bot identity "

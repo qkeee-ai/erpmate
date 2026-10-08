@@ -376,6 +376,15 @@ class ActiveWorkflowMetaTests(unittest.TestCase):
                            "__workflow_docs": [{"name": "Employee Onboarding WF", "is_active": 1}]})
         self.assertEqual(meta["active_workflows"], ["Employee Onboarding WF"])
 
+    def test_workflow_state_docs_are_not_reported_as_workflows(self):
+        """FormMeta.load_workflows() puts the Workflow AND its Workflow
+        State docs in __workflow_docs."""
+        meta = self._meta({"name": "Employee", "fields": [], "__workflow_docs": [
+            {"doctype": "Workflow", "name": "Employee Onboarding WF", "is_active": 1},
+            {"doctype": "Workflow State", "name": "Approved"},
+            {"doctype": "Workflow State", "name": "Pending"}]})
+        self.assertEqual(meta["active_workflows"], ["Employee Onboarding WF"])
+
     def test_no_workflow_docs_key_means_unknown(self):
         self.assertIsNone(self._meta({"name": "Employee", "fields": []})["active_workflows"])
 
