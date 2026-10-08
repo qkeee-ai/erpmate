@@ -109,6 +109,7 @@ class AllowedDoctypeClearsTheGateTests(unittest.TestCase):
             with self.subTest(domain=module.DOMAIN_NAME):
                 with patch.object(core_client, "get_env_config", return_value={"tag": "test"}), \
                      patch.object(core_client, "_validate_prod_requester"), \
+                     patch.object(core_client, "service_account_identities", return_value=[]), \
                      patch.object(core_client, "record_audit_log_start", return_value="AUDITLOG-TEST"), \
                      patch.object(core_client, "record_audit_log_finish"), \
                      patch.object(core_client, "_do_mutate",

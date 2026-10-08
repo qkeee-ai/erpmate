@@ -86,8 +86,10 @@ def _tamper(args, field):
 
 
 @contextlib.contextmanager
-def connector(send_error=None):
-    """Every network-touching function stubbed. Yields the mocks."""
+def connector(send_error=None, accounts=None):
+    """Every network-touching function stubbed. Yields the mocks.
+    `accounts`: the Service Accounts the self-escalation rule sees
+    (default: a bot and an admin account no example touches)."""
     m = {}
     with contextlib.ExitStack() as stack:
         for p in testsupport.offline_schema():
@@ -98,6 +100,10 @@ def connector(send_error=None):
 
         _p(core_client, "get_env_config", side_effect=lambda tag, credential="bot": dict(CFG, credential=credential))
         _p(core_client, "_validate_prod_requester")
+        _p(core_client, "service_account_identities", return_value=accounts or [
+            {"user": "qkeee-erp-bot@example.com", "roles": {"Qkeee Bot"}},
+            {"user": "qkeee-erp-admin@example.com", "roles": {"System Manager"}}])
+        _p(core_client, "fetch_permission_rows", return_value=[])
         _p(core_client, "record_audit_log_start", return_value="LOG-1")
         _p(core_client, "record_audit_log_finish", return_value=True)
         _p(core_client, "record_comment", return_value=True)
@@ -565,8 +571,9 @@ class SystemAdminRuleTests(unittest.TestCase):
             op.prepare(args, testsupport.ctx())
 
     def test_create_user_refuses_unknown_role(self):
-        args, ctx, _ = testsupport.render("system_admin.create_user",
-                                          {"email": "n@x.com", "first_name": "N", "roles": ["Nope"]})
+        with connector():
+            args, ctx, _ = testsupport.render("system_admin.create_user",
+                                              {"email": "n@x.com", "first_name": "N", "roles": ["Nope"]})
         with connector() as m:
             m["_role_exists"] = None
             with patch.object(system_admin, "_role_exists", return_value=False):

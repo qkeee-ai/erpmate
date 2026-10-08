@@ -57,6 +57,18 @@ integrations, checking instance health.
   read the rendered confirmation and said yes. `issued_at`/token must
   only be used after the user's own reply affirmatively confirms that
   specific rendered action, one turn later at minimum.
+- **Never change a Service Account's own rights (self-escalation, agents
+  ADR 0003).** The pipeline refuses, with `SelfEscalationError` and no
+  confirm-to-proceed path: any write to the Bot or Admin Account's User
+  record (including `system_admin.set_user_roles`, `disable_user`,
+  `delete` on it); any write to a Role a Service Account holds; any
+  `system_admin.permission_add`/`update`/`remove`/`reset` that touches such
+  a Role's rows. This holds whoever asks — a System Manager included — and
+  whichever credential would send it. Tell the user to make the change in
+  the ERPNext UI as an admin. Service Accounts hold only dedicated `Qkeee `
+  roles: if the bot holds a stock role (e.g. HR User), every gated call is
+  refused (`ServiceAccountRoleError`) until an admin moves its rights to
+  DocPerms on `Qkeee Bot`.
 - **Connections must be `https://`.** `get_env_config()` refuses a
   non-`https://` base URL unless `QKEEE_ERP_<TAG>_ALLOW_INSECURE=1` is
   explicitly set — a deliberate opt-out for local/dev, never the default.

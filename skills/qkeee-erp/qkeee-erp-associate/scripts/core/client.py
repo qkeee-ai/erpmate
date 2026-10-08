@@ -442,6 +442,20 @@ class PartialOutcomeError(ConnectorError):
     failing). The message says what is known to have happened."""
 
 
+class SelfEscalationError(GateRefusal):
+    """A write would change a Service Account's own rights: its User record,
+    a Role it holds, or a permission row on such a Role (agents ADR 0003).
+    Always refused, with no confirm-to-proceed path; a human admin makes the
+    change in the ERPNext UI. Also raised, failing closed, when the Service
+    Accounts can't be resolved."""
+
+
+class ServiceAccountRoleError(GateRefusal):
+    """The Bot Account holds a stock role (agents ADR 0003): Service Accounts
+    hold only dedicated `Qkeee ` roles. Every gated call is refused until an
+    admin moves the bot's rights onto `Qkeee Bot`."""
+
+
 class DoctypeNotAllowedError(GateRefusal):
     """Raised when a write operation targets a doctype outside
     that domain's registered ALLOWED_WRITE_DOCTYPES (or the domain itself
@@ -708,6 +722,71 @@ def _bot_identity(tag: str) -> dict:
     return _BOT_IDENTITY_CACHE[tag]
 
 
+# Service Accounts hold only dedicated roles (agents ADR 0003): a role
+# named with this prefix, plus the roles Frappe gives every user itself.
+DEDICATED_ROLE_PREFIX = "Qkeee "
+AUTOMATIC_ROLES = frozenset({"All", "Guest", "Desk User"})
+
+
+def stock_roles(roles) -> list:
+    """The roles in `roles` that are neither dedicated nor automatic."""
+    return sorted(r for r in roles or () if r not in AUTOMATIC_ROLES
+                  and not r.startswith(DEDICATED_ROLE_PREFIX))
+
+
+_ADMIN_IDENTITY_CACHE: dict = {}
+
+
+def _admin_identity(tag: str):
+    """The Admin Account's identity (user + roles) for this tag, read with
+    the admin key pair; None when no admin key pair is configured. Cached
+    like _bot_identity(); a lookup failure is cached as unknown."""
+    if tag not in _ADMIN_IDENTITY_CACHE:
+        try:
+            cfg = get_env_config(tag, credential="admin")
+        except ConnectorError:
+            _ADMIN_IDENTITY_CACHE[tag] = None
+            return None
+        try:
+            user = _request(cfg, "GET", "/api/method/frappe.auth.get_logged_user").get("message") or ""
+            doc = _request(cfg, "GET", f"/api/resource/User/{urllib.parse.quote(user)}").get("data") or {}
+            _ADMIN_IDENTITY_CACHE[tag] = {"user": user,
+                                          "roles": [r.get("role") for r in doc.get("roles", [])
+                                                    if r.get("role")]}
+        except ConnectorError:
+            _ADMIN_IDENTITY_CACHE[tag] = {"user": "", "roles": []}
+    return _ADMIN_IDENTITY_CACHE[tag]
+
+
+def service_account_identities(tag: str) -> list:
+    """[{user, roles:set}] for every Service Account the agent holds keys
+    for: the Bot Account, and the Admin Account when configured. Raises
+    SelfEscalationError (fail closed) when one can't be resolved — the
+    self-escalation rule can't be checked without knowing who they are."""
+    accounts = []
+    for label, identity in (("Bot", _bot_identity(tag)), ("Admin", _admin_identity(tag))):
+        if identity is None:
+            continue
+        user = (identity.get("user") or "").strip()
+        if not user:
+            raise SelfEscalationError(
+                f"Refusing: the {label} Account's identity on tag '{tag}' could not be resolved, so "
+                f"this write can't be checked for self-escalation (agents ADR 0003). Nothing was "
+                f"sent. Check `client.py --tag {tag} health`, or make the change in the ERPNext UI.")
+        accounts.append({"user": user, "roles": set(identity.get("roles") or [])})
+    return accounts
+
+
+def fetch_permission_rows(tag: str, doctype: str) -> list:
+    """Every permission row on `doctype`, as the Role Permission Manager
+    shows them (admin key: the RPC is System-Manager-only). Plumbing for
+    the self-escalation rule — not gated, not logged."""
+    cfg = get_env_config(tag, credential="admin")
+    rows = _request(cfg, "GET", "/api/method/frappe.core.page.permission_manager."
+                    "permission_manager.get_permissions", params={"doctype": doctype}).get("message")
+    return rows if isinstance(rows, list) else []
+
+
 def _probe_rbac_precheck_discriminates(tag: str) -> bool:
     """Live, per-tag probe (cached after first call): asks
     frappe.client.has_permission whether a deliberately bogus,
@@ -752,6 +831,7 @@ def verify_rbac_precheck_reliable(tag: str) -> dict:
         "reliable": (not privileged_identity) and precheck_discriminates,
         "bot_user": bot_user,
         "bot_roles": sorted(bot_roles),
+        "bot_stock_roles": stock_roles(bot_roles),
         "privileged_identity": privileged_identity,
         "precheck_discriminates": precheck_discriminates,
     }
@@ -1038,6 +1118,19 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
             f"before retrying."
         )
     trust = verify_rbac_precheck_reliable(tag)
+    # Service Accounts hold only dedicated roles (agents ADR 0003). A bot
+    # holding a stock role is refused outright, failing closed: otherwise
+    # the self-escalation rule either blocks normal admin edits to that
+    # stock role, or those edits silently widen the bot.
+    bot_stock = trust.get("bot_stock_roles") or []
+    if bot_stock:
+        _log(False, {"reason": "bot_holds_stock_roles", "roles": bot_stock})
+        raise ServiceAccountRoleError(
+            f"Refusing this call on tag '{tag}': this connector's bot account "
+            f"{trust.get('bot_user')!r} holds stock role(s) {bot_stock}. Service Accounts hold "
+            f"only dedicated roles (agents ADR 0003). Nothing was sent. Tell an admin: move the "
+            f"bot's rights to DocPerms on '{BOT_ROLE_NAME}' and remove {bot_stock} from the bot "
+            f"user, in the ERPNext UI. The agent never makes this change itself.")
     # Self-attribution guard, using the bot identity the trust check above
     # already resolved (cached, no extra round trip). A lookup failure
     # leaves bot_user empty and skips this — that case is already treated
@@ -1439,6 +1532,12 @@ def health_check(tag: str = "default") -> dict:
         "capabilities": capabilities,
         "gaps": gaps,
     }
+    if trust.get("bot_stock_roles"):
+        out["service_account_warning"] = (
+            f"The bot account holds stock role(s) {trust['bot_stock_roles']}. Service Accounts "
+            f"hold only dedicated roles (agents ADR 0003), so every gated read and write on this "
+            f"tag is refused until an admin moves the bot's rights to DocPerms on "
+            f"'{BOT_ROLE_NAME}' and removes those roles, in the ERPNext UI.")
     if not trust["reliable"]:
         out["rbac_precheck_warning"] = (
             f"This tag's RBAC pre-check cannot be trusted: bot identity "

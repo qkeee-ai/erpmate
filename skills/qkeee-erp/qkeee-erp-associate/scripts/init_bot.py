@@ -164,7 +164,11 @@ for _key, _prep, _summary, _pre in (
         key=_key, domain=None, summary=_summary, prepare=_prep,
         token_policy=operations.POLICY_NONE, credential="admin", allowlist_domain=None,
         preconditions=_pre,
-        cli=False, audit=False))  # log_role_provisioning() is this flow's one audit record
+        cli=False, audit=False,  # log_role_provisioning() is this flow's one audit record
+        # Creates the bot's own role: exempt from the self-escalation rule
+        # (agents ADR 0003) like grant_bot_read below — admin-run, fixed
+        # definitions only, never reachable from execute_write.py.
+        self_escalation_exempt=True))
 
 
 # Read grants for the bot role (doctype_defs.BOT_READ_GRANTS). "add" creates
@@ -199,7 +203,12 @@ operations.register_operation(operations.Operation(
     key="provisioning.grant_bot_read", domain=None,
     summary=f"grant the {ROLE_NAME} role read on {', '.join(BOT_READ_GRANTS)}",
     prepare=_grant_bot_read_prepare, token_policy=operations.POLICY_NONE, credential="admin",
-    allowlist_domain=None, skip_comment=True, cli=False))
+    allowlist_domain=None, skip_comment=True, cli=False,
+    # These rows ARE on the bot's own role, so the self-escalation rule
+    # (agents ADR 0003) would refuse them. Exempt only this op: run by an
+    # admin from this script, never by execute_write.py, and its prepare()
+    # allows nothing but read on doctype_defs.BOT_READ_GRANTS.
+    self_escalation_exempt=True))
 
 
 def _live_permissions(tag: str, doctype: str) -> list:

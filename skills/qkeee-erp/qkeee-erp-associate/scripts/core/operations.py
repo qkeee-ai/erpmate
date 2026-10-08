@@ -25,6 +25,9 @@ gates, and several tokens weren't bound to what was actually sent.
                  mapping, defaults) — only after the cheap gates passed, and
                  identically at render and execute, so both hash the same
                  bytes
+ 6c. self-escalation  admin-credential ops and UNSCOPED_DENY doctypes may
+                 never change a Service Account's user, roles, or a
+                 permission row on its roles (agents ADR 0003); also at render
  7. precondition operation-specific live checks (concurrency, KYC, ...)
  8. token        per policy: presence, freshness, match against
                  operation_token() over the prepared request, and (policy
@@ -187,6 +190,9 @@ class Operation:
     skip_comment: bool = False
     comment_label: Optional[str] = None
     audit: bool = True                   # False only for init_bot provisioning (logs itself)
+    # True only for init_bot's provisioning.grant_bot_read: admin-run, not a
+    # CLI op, and limited to the fixed read rows in doctype_defs.py.
+    self_escalation_exempt: bool = False
     args_help: dict = field(default_factory=dict)
     # A minimal, valid argument set — printed by `execute_write.py
     # --list-ops` as the operation's worked example, and driven through
@@ -369,6 +375,56 @@ def _check_ownership(op: Operation, req: PreparedRequest) -> None:
                     f"belongs to domain '{domain}' — use '{domain}.generic' so that domain's own "
                     f"rules apply."
                 )
+
+
+_PERMISSION_DOCTYPES = frozenset({"Custom DocPerm", "DocPerm"})
+
+
+def _self_escalation_target(req: PreparedRequest, ctx: WriteContext) -> Optional[str]:
+    """What this request would change about a Service Account, or None."""
+    accounts = _c.service_account_identities(ctx.tag)
+    users = {a["user"].lower() for a in accounts}
+    roles = set().union(*(a["roles"] for a in accounts)) - _c.AUTOMATIC_ROLES
+    body = req.body or {}
+    if req.doctype == "User":
+        target = (req.name or body.get("email") or body.get("name") or "").lower()
+        if target in users:
+            return f"Service Account user {target!r}"
+    if req.doctype == "Role":
+        role = req.name or body.get("role_name") or body.get("name")
+        if role in roles:
+            return f"role {role!r}, which a Service Account holds"
+    if req.doctype == "Has Role":
+        if (body.get("parent") or "").lower() in users or body.get("role") in roles:
+            return "a Service Account's role assignment"
+    if req.doctype in _PERMISSION_DOCTYPES:
+        if body.get("role"):
+            touched = {body["role"]} & roles
+        else:  # a reset: every custom row on the doctype goes
+            touched = {r.get("role") for r in _c.fetch_permission_rows(
+                ctx.tag, body.get("doctype") or body.get("parent"))} & roles
+        if touched:
+            return f"permission rows of role(s) {sorted(touched)}, held by a Service Account"
+    return None
+
+
+def _check_no_self_escalation(op: Operation, req: PreparedRequest, ctx: WriteContext) -> None:
+    """Target rule (agents ADR 0003): may ANYONE, through the agent, make
+    this change? Never, when it widens or alters a Service Account's own
+    rights — separate from the Requester Gate, which asks whether this
+    requester may write. Runs for every admin-credential op and every
+    UNSCOPED_DENY doctype; no confirmation unlocks it."""
+    if op.self_escalation_exempt:
+        return
+    if op.credential != "admin" and req.doctype not in UNSCOPED_DENY:
+        return
+    target = _self_escalation_target(req, ctx)
+    if target:
+        raise _c.SelfEscalationError(
+            f"Refusing {op.key} ({req.action} on '{req.doctype}'): it would change {target}. The "
+            f"agent never changes the rights of an account it runs as, whatever credential sends "
+            f"it and whoever asks (agents ADR 0003, self-escalation). Nothing was sent. A human "
+            f"admin makes this change in the ERPNext UI, in their own session.")
 
 
 def _check_mode_and_requester(req: PreparedRequest, ctx: WriteContext) -> None:
@@ -603,6 +659,7 @@ def run_operation(op_key: str, args: dict, ctx: WriteContext) -> dict:
     _check_ownership(op, req)                                     # 6
     if op.enrich:                                                 # 6b
         op.enrich(req, args, ctx)
+    _check_no_self_escalation(op, req, ctx)                       # 6c
     for check in op.preconditions:                                # 7
         check(req, args, ctx)
     verified = _verify_token(op, op.policy_for(req), req, ctx)    # 8
@@ -634,6 +691,7 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
     _check_ownership(op, req)
     if op.enrich:
         op.enrich(req, args, ctx)
+    _check_no_self_escalation(op, req, ctx)
     policy = op.policy_for(req)
     out = {"op": op.key, "summary": op.summary, "policy": policy, "args": args,
            "request": req.summary(), "notes": list(req.notes)}
