@@ -1,6 +1,6 @@
 name: qkeee-erp
 version: 0.1.0
-description: "ERPNext reads and writes as gateway tools, with the requester bound to the gateway session sender (never a tool argument) and the ERPNext credentials kept gateway-side. Also forces chat-created Kanban tasks into triage and records each task's requester origin for its workers."
+description: "ERPNext reads and writes as gateway tools, with the requester bound to the gateway session sender (never a tool argument) and the ERPNext credentials kept gateway-side. Also forces chat-created Kanban tasks into triage and records each task's requester origin for its workers. Blocks terminal and execute_code calls that override HERMES_SESSION_* or read the ERPNext credentials."
 author: "Qkeee"
 kind: standalone
 provides_tools:

@@ -44,7 +44,9 @@ never an attempt to answer it anyway. Stated once, in
 Call ERPNext **only through the `qkeee_erp` tools**. They run in the
 gateway, bind the requester to this turn's sender, and hold the ERPNext
 credentials. Never read the credentials file, and never call ERPNext from
-the terminal or `execute_code` (no `client.py`, no `curl`).
+the terminal or `execute_code` (no `client.py`, no `curl`). A gateway
+guard blocks calls that set `HERMES_SESSION_*` or touch the credentials
+file, and names the rule; do not retry them another way.
 
 | Tool | Use | Script it replaces |
 | --- | --- | --- |

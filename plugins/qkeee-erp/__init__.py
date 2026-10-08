@@ -1,12 +1,14 @@
-"""qkeee-erp plugin: ERPNext tools bound to the gateway sender, and the Kanban
-requester origin (agents/.scratch/qkeee-erp-requester-identity-binding,
-issues 04 and 09).
+"""qkeee-erp plugin: ERPNext tools bound to the gateway sender, the Kanban
+requester origin, and a guard against identity override
+(agents/.scratch/qkeee-erp-requester-identity-binding, issues 03, 04 and 09).
 
 - erp_tools.py: erp_query, erp_get, erp_report, erp_discover,
   erp_execute_write. They run in the gateway process and reuse the
   qkeee-erp-associate skill scripts as a library.
 - kanban_hooks.py: kanban_create from a chat turn starts in triage; every
   created task records its requester origin (core/kanban_origin.py).
+- identity_guard.py: blocks terminal / execute_code calls that override
+  HERMES_SESSION_* or reach the ERPNext credentials around the erp_* tools.
 
 Settings (`plugins.entries.qkeee-erp.settings`):
   scripts_dir  the skill's scripts/ directory. Default:
@@ -60,7 +62,7 @@ def register(ctx) -> None:
         raise
 
     from core import client, kanban_origin
-    from . import erp_tools, kanban_hooks
+    from . import erp_tools, identity_guard, kanban_hooks
 
     client.set_session_env_reader(get_session_env)
     client.set_hermes_home_reader(lambda: str(get_hermes_home()))
@@ -69,6 +71,8 @@ def register(ctx) -> None:
     for name, schema in erp_tools.SCHEMAS.items():
         ctx.register_tool(name=name, toolset=erp_tools.TOOLSET, schema=schema,
                           handler=tools.handler(name), emoji="📒")
+
+    ctx.register_hook("pre_tool_call", identity_guard.pre_tool_call)
 
     hooks = kanban_hooks.KanbanOriginHooks(
         session_env=get_session_env,

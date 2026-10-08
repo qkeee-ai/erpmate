@@ -124,3 +124,4 @@ No rule's enforceable meaning changed anywhere in this pass. 216 tests,
 untouched). Closes the mattpocock-skills-adoption plan's in-scope items
 (C1–C11, C13–C15, C17, C18); C12 and C16 remain deliberately deferred
 until F1–F13 is reviewed and committed.
+| RIB 03 | Requester identity binding L2 (2026-10-08): after 04 the agent could still prefix `HERMES_SESSION_*` overrides on a terminal command or read the credentials file | A `pre_tool_call` guard blocks terminal/`execute_code` session overrides, any non-`erp_*` tool naming `qkeee-erp.env` or `plugin-data/qkeee-erp`, and `execute_code` using `core.client` or `/api/resource|method`. Pattern match only, not a boundary | `plugins/qkeee-erp/identity_guard.py`; `SKILL.md` "Calling ERPNext" |
