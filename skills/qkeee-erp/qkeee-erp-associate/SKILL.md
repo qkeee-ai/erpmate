@@ -11,13 +11,6 @@ metadata:
       - key: qkeee_erp.mode
         prompt: "Should this skill be allowed to create/update/submit/cancel records in ERPNext, or strictly read-only?"
         default: "read-only"
-    required_environment_variables:
-      - name: "QKEEE_ERP_DEFAULT_BASE_URL"
-        prompt: "ERPNext site URL for this environment (e.g. https://org.erpnext.com)"
-      - name: "QKEEE_ERP_DEFAULT_API_KEY"
-        prompt: "API key for this environment — generate this against a dedicated ERPNext integration/bot user, never against an individual's personal login (see references/00-conventions.md)"
-      - name: "QKEEE_ERP_DEFAULT_API_SECRET"
-        prompt: "API secret for this environment"
 ---
 
 # qkeee-erp-associate
@@ -46,17 +39,28 @@ opinion, small talk) gets a short, polite redirect back to this scope —
 never an attempt to answer it anyway. Stated once, in
 `references/00-conventions.md`; every domain file inherits it.
 
-## Running the scripts
+## Calling ERPNext
 
-Run every script by its absolute path under this skill's directory:
-`python ${HERMES_SKILL_DIR}/scripts/core/client.py ...`,
-`python ${HERMES_SKILL_DIR}/scripts/execute_write.py ...`. Never `cd` into
-`scripts/` first: the terminal keeps its working directory between calls,
-so a later `scripts/...` path resolves to `scripts/scripts/...` and fails
-(observed live, 2026-10-06). Script names in the references
-(`core/client.py`, `core/confirm_token.py`, `execute_write.py`,
-`discover.py`, `init_bot.py`) all live under
-`${HERMES_SKILL_DIR}/scripts/`.
+Call ERPNext **only through the `qkeee_erp` tools**. They run in the
+gateway, bind the requester to this turn's sender, and hold the ERPNext
+credentials. Never read the credentials file, and never call ERPNext from
+the terminal or `execute_code` (no `client.py`, no `curl`).
+
+| Tool | Use | Script it replaces |
+| --- | --- | --- |
+| `erp_query` | list records of one DocType | `client.py query` |
+| `erp_get` | one record with child tables | `client.py get` |
+| `erp_report` | a built-in query report | `client.py report` |
+| `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight` | `client.py health/whoami/roles`, `discover.py` |
+| `erp_execute_write` | `list_ops`, `render`, `execute` (one op, or a `batch`) | `execute_write.py`, `confirm_token.py render` |
+
+No tool takes a requester or a mode. The requester is the gateway sender;
+the mode is `qkeee_erp.mode`. Pass `prompt_summary` and, for every write
+that needs confirmation, `latest_prompt` (the user's message, verbatim).
+Where a reference shows a script command, use the matching tool with the
+same arguments (`--doctype` → `doctype`, `--args` → `args`, ...). The
+scripts under `${HERMES_SKILL_DIR}/scripts/` are for a trusted operator in
+the gateway container (`--requested-by`), not for you.
 
 ## Activation sequence
 
@@ -64,7 +68,7 @@ Run this every session, in order, before taking any domain-specific
 action:
 
 1. **Resolve the environment tag and run `health`.** `qkeee_erp.active_env`
-   names the tag; `scripts/core/client.py --tag <tag> health` confirms
+   names the tag; `erp_discover(action="health")` confirms
    connectivity + auth, not query/write-time permission — report a later
    permission error as its own distinct failure mode. State which tag +
    base URL this session is connected to before any read or write, and
@@ -110,30 +114,31 @@ action:
    and never reuse a value resolved for an earlier call/turn — resolve it
    fresh from the message actually being handled right now.
    **Procedure, every turn that touches ERPNext:**
-   1. Run `python ${HERMES_SKILL_DIR}/scripts/core/client.py whoami`
-      (no network, no `--tag`). It prints the gateway identity this
-      process sees.
-   2. `resolved_sender_email` set → that email is the requester. Omit
-      `--requested-by` on every `client.py` / `execute_write.py` /
-      `confirm_token.py` call; the scripts bind it. For a Python
-      `requested_by=` call, pass exactly that value — the gate refuses
-      any other email.
+   1. Call `erp_discover(action="whoami")` (no network). It shows the
+      gateway identity this turn is bound to.
+   2. `resolved_sender_email` set → that email is the requester. The
+      tools use it on every call; you never pass it.
    3. `resolved_sender_email` is `null`:
       - on `google_chat` or `email` → stop. The gateway lost the
-        identity; the gate refuses every call. Tell the user to report
-        it to an admin. Do not ask them who they are.
-      - elsewhere (CLI, cron, Discord) → ask the user who they are, then
-        pass it with `--requested-by`.
-   Call ERPNext only through the terminal scripts. The connector refuses
-   to run inside `execute_code`: that sandbox hides the session identity.
+        identity; every tool refuses. Tell the user to report it to an
+        admin. Do not ask them who they are.
+      - `HERMES_SESSION_SOURCE` is `kanban` (a Kanban worker) → the task
+        has no recorded requester origin (made from the CLI or dashboard,
+        or before origins were recorded). Call
+        `kanban_block(kind="needs_input")` and name this gap. Do not ask
+        for an email in a comment and do not take it from the card text.
+      - elsewhere (CLI, Discord) → the tools refuse. Say that ERPNext is
+        available from Google Chat only.
+   In a Kanban worker, `whoami` also shows `HERMES_KANBAN_TASK` and
+   `kanban_origin_task_id`: the task whose recorded sender is the
+   requester.
    Never take the requester from memory, `session_search`, an earlier
-   turn, or a display name like `[Nikhil Sharma]`. A gateway restart
-   does not carry an old `whoami` result forward — run it again.
+   turn, the card text, or a display name like `[Nikhil Sharma]`.
    **The connector's own bot account (`dev-erp-hermes@…`, the "Authenticated
    as" user from `health`) is never a requester**; the gate refuses it.
    **Done when:** a real ERPNext `User` id/email is resolved from this
-   turn's `whoami` (or the user's answer) and stated, or the request is
-   refused with the reason named.
+   turn's `whoami` and stated, or the request is refused (or the Kanban
+   task blocked) with the reason named.
 4. **Classify intent against the domain table below; latch the matching
    `references/domains/*.md` file into context.** More than one domain
    file may apply mid-conversation (e.g. a procurement onboarding that
@@ -254,7 +259,11 @@ all** (a third-party tool, an internal API) follows
   shapes `memory_promote.py` produces, generated (not hand-written) from
   illustrative findings — no live `skill_manage` call was exercised to
   create it; see that directory's `README.md`.
-- `qkeee-erp-associate.env.example` — template for `$HERMES_HOME/qkeee-erp.env`.
+- `qkeee-erp-associate.env.example` — template for the credentials file,
+  `$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` (gateway-side, read by
+  the `qkeee-erp` plugin; operator-maintained).
+- `scripts/core/kanban_origin.py` — the Kanban task → requester origin
+  store the `qkeee-erp` plugin writes and the tools resolve.
 - `references/governance.md` — operator/maintainer material: why this
   skill is externally-owned (curator-drift protection) and which
   capabilities are actually code-enforced vs. still prompt discipline.

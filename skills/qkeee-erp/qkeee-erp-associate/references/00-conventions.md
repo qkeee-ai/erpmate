@@ -213,7 +213,10 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   mismatch), and `_validate_prod_requester()` refuses `requested_by` equal
   to the connector's own bot account. The gate also applies the session
   binding itself, so a direct `requested_by=` library call gets the same
-  check. `client.py whoami` prints what the session holds. `User`/`Role` reads are no longer
+  check. Since 2026-10-08 (issue 04) the agent calls ERPNext only through the
+  `qkeee_erp` gateway tools, which have no requester argument at all;
+  `erp_discover(action="whoami")` prints what the session holds (in a
+  Kanban worker, the task's recorded origin). `User`/`Role` reads are no longer
   gate-exempt for business reads — only the gate's own `internal=True`
   plumbing skips the gate for them.
 - **Run the same requester-permission check on every environment, every

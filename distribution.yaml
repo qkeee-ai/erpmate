@@ -19,3 +19,4 @@ distribution_owned:
   - cron/jobs.json
   - config.yaml
   - mcp.json
+  - plugins/qkeee-erp   # gateway ERPNext tools + Kanban origin; enabled by cont-init 018-qkeee-erp-plugin

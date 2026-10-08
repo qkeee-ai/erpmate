@@ -1,5 +1,11 @@
 # CLI cookbook: worked examples for `core/client.py` and `execute_write.py`
 
+**Operator use only (2026-10-08).** The agent calls ERPNext through the
+`qkeee_erp` gateway tools (`SKILL.md`, "Calling ERPNext"); each tool takes
+the same arguments as the command shapes below, minus `--requested-by`
+and `--mode`. These commands are for a trusted operator in the gateway
+container (`docker compose exec hermes ...`), who passes `--requested-by`.
+
 Copy-paste call shapes only — the mechanics behind why each shape is
 correct (auth, query cost, `qkeee-erp.env`, `discover.py`) live in
 `01-connectivity.md`; read that first if a call here doesn't make sense

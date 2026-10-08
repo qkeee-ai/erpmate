@@ -122,8 +122,10 @@ from datetime import datetime, timezone
 # preamble). Avoids hardcoding either sys.path shape.
 try:
     from confirm_token import compute_token, confirmation_code, is_fresh
+    import kanban_origin
 except ImportError:
     from core.confirm_token import compute_token, confirmation_code, is_fresh
+    from core import kanban_origin
 
 # Default attribution label for audit Comments when no domain-specific
 # label is supplied — see _do_mutate()'s `skill_label` param.
@@ -494,12 +496,55 @@ def _tag_env_var(tag: str, suffix: str) -> str:
 # is not an email (Discord/Telegram numeric ids) it is ignored here.
 _SESSION_SENDER_ENV = "HERMES_SESSION_USER_ID"
 
+# Where HERMES_SESSION_* values are read from. A terminal child gets them in
+# os.environ. Inside the gateway process (the qkeee-erp plugin tools) they
+# live in per-turn ContextVars, and os.environ is shared by every concurrent
+# session, so the plugin installs gateway.session_context.get_session_env
+# here (set_session_env_reader).
+_session_env_reader = None
+
+
+def set_session_env_reader(reader) -> None:
+    """Install `reader(name, default="") -> str` as the source of every
+    HERMES_SESSION_* value; None restores os.environ."""
+    global _session_env_reader
+    _session_env_reader = reader
+
+
+def session_env(name: str) -> str:
+    """One HERMES_SESSION_* value from the installed reader, else os.environ."""
+    if _session_env_reader is not None:
+        return _session_env_reader(name, "") or ""
+    return os.environ.get(name) or ""
+
+
+# A Kanban worker is a separate process the dispatcher starts with every
+# HERMES_SESSION_* var cleared; these two are set by the dispatcher itself
+# (hermes_cli/kanban_db_dispatch.py), per process, never by a session.
+_KANBAN_TASK_ENV = "HERMES_KANBAN_TASK"
+_KANBAN_DB_ENV = "HERMES_KANBAN_DB"
+
+
+def _kanban_origin():
+    """The recorded origin of this Kanban worker's task (core/kanban_origin.py),
+    or None when this is not a worker or the task has no origin."""
+    task_id = (os.environ.get(_KANBAN_TASK_ENV) or "").strip()
+    if not task_id:
+        return None
+    return kanban_origin.resolve_origin(kanban_origin.default_store_path(_hermes_home()),
+                                        os.environ.get(_KANBAN_DB_ENV) or "", task_id)
+
 
 def _session_sender_email() -> str:
     """The gateway-authenticated sender email for this session, or "" when
-    there is none (CLI, cron, a non-email platform id)."""
-    value = (os.environ.get(_SESSION_SENDER_ENV) or "").strip()
-    return value if "@" in value else ""
+    there is none (CLI, cron, a non-email platform id). In a Kanban worker
+    with no session sender, the sender recorded for its task's origin."""
+    value = session_env(_SESSION_SENDER_ENV).strip()
+    if "@" in value:
+        return value
+    origin = _kanban_origin()
+    email = ((origin or {}).get("user_id") or "").strip()
+    return email if "@" in email else ""
 
 
 # Platforms whose sender id is always an email. A session on one of these
@@ -526,7 +571,7 @@ def _refuse_if_execute_code_sandbox() -> None:
 
 
 _SESSION_IDENTITY_ENVS = (
-    "HERMES_SESSION_PLATFORM", "HERMES_SESSION_USER_ID",
+    "HERMES_SESSION_PLATFORM", "HERMES_SESSION_SOURCE", "HERMES_SESSION_USER_ID",
     "HERMES_SESSION_USER_ID_ALT", "HERMES_SESSION_USER_NAME",
 )
 
@@ -536,8 +581,12 @@ def session_identity() -> dict:
     sees, plus the sender email resolve_requested_by() would bind to.
     No network call. On Google Chat, USER_ID is the sender email when the
     event carried one, else the stable `users/{id}`; USER_ID_ALT is
-    `users/{id}`."""
-    snapshot = {name: os.environ.get(name) for name in _SESSION_IDENTITY_ENVS}
+    `users/{id}`. In a Kanban worker it also names the task and the task
+    whose recorded origin supplied the sender."""
+    snapshot = {name: session_env(name) or None for name in _SESSION_IDENTITY_ENVS}
+    snapshot[_KANBAN_TASK_ENV] = os.environ.get(_KANBAN_TASK_ENV) or None
+    origin = _kanban_origin()
+    snapshot["kanban_origin_task_id"] = (origin or {}).get("origin_task_id")
     snapshot["resolved_sender_email"] = _session_sender_email() or None
     return snapshot
 
@@ -969,7 +1018,7 @@ def _require_bound_requester(tag: str, requested_by: str, subject: str, log) -> 
     # a direct `requested_by=` caller (code_execution, domain modules)
     # cannot carry a stale or substituted email past the live sender.
     sender = _session_sender_email()
-    platform = (os.environ.get(_SESSION_PLATFORM_ENV) or "").strip().lower()
+    platform = session_env(_SESSION_PLATFORM_ENV).strip().lower()
     if not sender and platform in _EMAIL_SENDER_PLATFORMS:
         log(False, {"reason": "email_platform_without_session_sender", "platform": platform})
         raise UnvalidatedProdRequesterError(
@@ -1244,6 +1293,25 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     _log(True, {"path": "has_permission_rpc"})
 
 
+# The gateway's Hermes home can be context-local (hermes_constants.
+# get_hermes_home), not the process HERMES_HOME; the qkeee-erp plugin
+# installs that reader here (set_hermes_home_reader).
+_hermes_home_reader = None
+
+
+def set_hermes_home_reader(reader) -> None:
+    """Install `reader() -> str` as the Hermes home used to find the
+    credentials file; None restores HERMES_HOME / cwd."""
+    global _hermes_home_reader
+    _hermes_home_reader = reader
+
+
+def _hermes_home() -> str:
+    """The installed home reader's value, else HERMES_HOME, else cwd."""
+    home = _hermes_home_reader() if _hermes_home_reader is not None else None
+    return home or os.environ.get("HERMES_HOME") or os.getcwd()
+
+
 def _qkeee_env_file_path() -> str:
     """Path to the isolated ERPNext-credentials file, deliberately separate
     from Hermes' own profile .env. execute_code/terminal strip ALL env vars
@@ -1259,19 +1327,31 @@ def _qkeee_env_file_path() -> str:
     .env. HERMES_HOME is unconditionally forwarded into every sandbox
     child regardless of skill declarations, so it's a reliable anchor even
     when the tag-specific vars themselves aren't. Falls back to CWD for a
-    bare non-Hermes shell running this script directly."""
-    base = os.environ.get("HERMES_HOME") or os.getcwd()
-    return os.path.join(base, "qkeee-erp.env")
+    bare non-Hermes shell running this script directly.
+
+    Location (requester identity binding, issue 04): the file belongs to
+    the qkeee-erp gateway plugin, `<HERMES_HOME>/plugin-data/qkeee-erp/
+    qkeee-erp.env`. The agent reaches ERPNext only through the plugin's
+    tools; with the terminal on its own backend (agents ADR 0002) the
+    terminal cannot read this file. The old `<HERMES_HOME>/qkeee-erp.env`
+    is read only while the new file does not exist yet (cont-init
+    018-qkeee-erp-plugin moves it)."""
+    base = _hermes_home()
+    current = os.path.join(kanban_origin.plugin_data_dir(base), "qkeee-erp.env")
+    legacy = os.path.join(base, "qkeee-erp.env")
+    if not os.path.exists(current) and os.path.exists(legacy):
+        return legacy
+    return current
 
 
-def _load_qkeee_env_file() -> dict:
+def _load_qkeee_env_file(path: str = None) -> dict:
     """Hand-rolled KEY=VALUE parser for qkeee-erp.env (no python-dotenv —
     this module is stdlib-only by design, see module docstring). Comments
     (#) and blank lines skipped; a single layer of surrounding quotes is
     stripped, matching common .env convention. A missing file is not an
     error — callers fall back to os.environ for back-compat with a
     manually-exported shell."""
-    path = _qkeee_env_file_path()
+    path = path or _qkeee_env_file_path()
     result = {}
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -1300,12 +1380,17 @@ def _qkeee_env() -> dict:
     """Merged config view: qkeee-erp.env file values take precedence over
     os.environ (the file is the source of truth once it exists), os.environ
     remains the fallback for manual/CI runs that still export vars
-    directly. Cached per-process — the file doesn't change mid-invocation."""
+    directly. Cached per process and per file path: the file doesn't change
+    mid-invocation, but a gateway process can resolve more than one Hermes
+    home."""
     global _QKEEE_ENV_FILE_CACHE
+    path = _qkeee_env_file_path()
     if _QKEEE_ENV_FILE_CACHE is None:
-        _QKEEE_ENV_FILE_CACHE = _load_qkeee_env_file()
+        _QKEEE_ENV_FILE_CACHE = {}
+    if path not in _QKEEE_ENV_FILE_CACHE:
+        _QKEEE_ENV_FILE_CACHE[path] = _load_qkeee_env_file(path)
     merged = dict(os.environ)
-    merged.update(_QKEEE_ENV_FILE_CACHE)
+    merged.update(_QKEEE_ENV_FILE_CACHE[path])
     return merged
 
 

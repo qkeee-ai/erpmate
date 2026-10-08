@@ -1,0 +1,59 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Enable the qkeee-erp plugin in the installed profile and move the ERPNext
+# credentials to the plugin's gateway-side location. Idempotent. Non-fatal.
+# Set QKEEE_ERP_PLUGIN_ENABLE=0 to skip.
+#
+# The plugin (plugins/qkeee-erp, shipped by the profile distribution) gives
+# the agent its only ERPNext access: erp_query / erp_get / erp_report /
+# erp_discover / erp_execute_write, run in the gateway with the requester
+# bound to the gateway sender. It also forces chat-created Kanban tasks into
+# triage and records each task's requester origin for its workers.
+# (agents/.scratch/qkeee-erp-requester-identity-binding, issues 04 and 09)
+#
+# Credentials: <profile>/qkeee-erp.env moves to
+# <profile>/plugin-data/qkeee-erp/qkeee-erp.env (mode 600). client.py reads
+# the new path first and the old one only while the new one is missing.
+# The move alone does not hide the file from the terminal: that needs the
+# terminal on its own backend (agents docs/adr/0002-terminal-on-ssh-sidecar.md).
+#
+# Runs after 016-profile-install, which writes /run/hermes-profile-name.
+# A profile installed before the plugin shipped has no plugins/qkeee-erp yet:
+# boot once with HERMES_PROFILE_AUTO_UPDATE=1 to pull it in.
+
+[ "${QKEEE_ERP_PLUGIN_ENABLE:-1}" = "0" ] && { echo "[qkeee-erp] disabled via QKEEE_ERP_PLUGIN_ENABLE=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+NAME="$(cat /run/hermes-profile-name 2>/dev/null)"
+[ -n "$NAME" ] || { echo "[qkeee-erp] no installed profile name (016 skipped?); skipping"; exit 0; }
+DIR="$HERMES_HOME/profiles/$NAME"
+
+run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
+
+if [ ! -f "$DIR/plugins/qkeee-erp/plugin.yaml" ]; then
+    echo "[qkeee-erp:$NAME] WARNING: $DIR/plugins/qkeee-erp missing; boot once with" >&2
+    echo "[qkeee-erp:$NAME]   HERMES_PROFILE_AUTO_UPDATE=1 to install it. ERPNext tools unavailable." >&2
+    exit 0
+fi
+
+if run hermes -p "$NAME" plugins enable qkeee-erp --no-allow-tool-override; then
+    echo "[qkeee-erp:$NAME] plugin enabled"
+else
+    echo "[qkeee-erp:$NAME] WARNING: plugin enable failed; continuing" >&2
+fi
+
+OLD="$DIR/qkeee-erp.env"
+NEW_DIR="$DIR/plugin-data/qkeee-erp"
+NEW="$NEW_DIR/qkeee-erp.env"
+if [ -f "$OLD" ] && [ ! -e "$NEW" ]; then
+    if run mkdir -p "$NEW_DIR" && run mv "$OLD" "$NEW" && run chmod 600 "$NEW"; then
+        echo "[qkeee-erp:$NAME] moved credentials to $NEW"
+    else
+        echo "[qkeee-erp:$NAME] WARNING: could not move $OLD to $NEW" >&2
+    fi
+elif [ -f "$OLD" ]; then
+    echo "[qkeee-erp:$NAME] WARNING: $OLD and $NEW both exist; $OLD is no longer read." >&2
+    echo "[qkeee-erp:$NAME]   Check that $NEW is current, then delete $OLD." >&2
+fi
+[ -f "$NEW" ] && run chmod 600 "$NEW" 2>/dev/null
+exit 0

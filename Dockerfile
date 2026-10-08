@@ -60,6 +60,9 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #   017-jev-skills        jev installer; links into every profile, so it must
 #                         run after the profile exists
 #   018-hermes-lcm        link + enable the LCM plugin (default + profiles)
+#   018-qkeee-erp-plugin  enable the profile's qkeee-erp plugin (gateway
+#                         ERPNext tools, Kanban requester origin) and move
+#                         qkeee-erp.env to plugin-data/qkeee-erp/
 #   019-jev-init          first-boot jev setup: models suggest, doctor, routing
 #   0195-gateway-state    first-boot only: mark the custom profile
 #                         desired_state=running, default desired_state=stopped

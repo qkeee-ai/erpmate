@@ -615,6 +615,69 @@ class QkeeeEnvFileTests(unittest.TestCase):
         self.assertEqual(cfg["api_secret"], "secret")
 
 
+class QkeeeEnvFileLocationTests(unittest.TestCase):
+    """Issue 04: the ERPNext credentials live with the qkeee-erp plugin
+    (`<HERMES_HOME>/plugin-data/qkeee-erp/qkeee-erp.env`), gateway-side.
+    The old `<HERMES_HOME>/qkeee-erp.env` is read only until it is moved."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+
+    def _touch(self, *parts):
+        import os
+        path = os.path.join(self.home, *parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        return path
+
+    def _path(self):
+        import os
+        with unittest.mock.patch.dict(os.environ, {"HERMES_HOME": self.home}):
+            return erp_client._qkeee_env_file_path()
+
+    def test_plugin_data_file_wins_over_legacy_file(self):
+        self._touch("qkeee-erp.env")
+        new = self._touch("plugin-data", "qkeee-erp", "qkeee-erp.env")
+        self.assertEqual(self._path(), new)
+
+    def test_legacy_file_is_read_until_moved(self):
+        legacy = self._touch("qkeee-erp.env")
+        self.assertEqual(self._path(), legacy)
+
+    def test_neither_file_points_at_the_plugin_data_location(self):
+        import os
+        self.assertEqual(self._path(),
+                         os.path.join(self.home, "plugin-data", "qkeee-erp", "qkeee-erp.env"))
+
+    def test_installed_home_reader_wins_over_hermes_home_env(self):
+        # In the gateway the Hermes home can be context-local (get_hermes_home()).
+        import os
+        new = self._touch("plugin-data", "qkeee-erp", "qkeee-erp.env")
+        erp_client.set_hermes_home_reader(lambda: self.home)
+        self.addCleanup(erp_client.set_hermes_home_reader, None)
+        with unittest.mock.patch.dict(os.environ, {"HERMES_HOME": "/elsewhere"}):
+            self.assertEqual(erp_client._qkeee_env_file_path(), new)
+
+    def test_file_cache_is_per_path(self):
+        import os
+        erp_client._QKEEE_ENV_FILE_CACHE = None
+        self.addCleanup(setattr, erp_client, "_QKEEE_ENV_FILE_CACHE", None)
+        a = self._touch("a.env")
+        b = self._touch("b.env")
+        with open(a, "w") as fh:
+            fh.write("QKEEE_ERP_X_BASE_URL=https://a\n")
+        with open(b, "w") as fh:
+            fh.write("QKEEE_ERP_X_BASE_URL=https://b\n")
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            with unittest.mock.patch.object(erp_client, "_qkeee_env_file_path", return_value=a):
+                self.assertEqual(erp_client._qkeee_env()["QKEEE_ERP_X_BASE_URL"], "https://a")
+            with unittest.mock.patch.object(erp_client, "_qkeee_env_file_path", return_value=b):
+                self.assertEqual(erp_client._qkeee_env()["QKEEE_ERP_X_BASE_URL"], "https://b")
+
+
 class ValidateProdRequesterTests(unittest.TestCase):
     """_validate_prod_requester(): presence of requested_by is mandatory
     on EVERY tag now — no PROD/non-PROD distinction, no tag default to
@@ -867,6 +930,80 @@ class SessionIdentityTests(unittest.TestCase):
     def test_no_email_resolves_to_none(self):
         with patch.dict("os.environ", {"HERMES_SESSION_USER_ID": "users/1234"}):
             self.assertIsNone(ec.session_identity()["resolved_sender_email"])
+
+
+class KanbanWorkerRequesterTests(unittest.TestCase):
+    """Issue 09: a Kanban worker has no session sender (the dispatcher clears
+    HERMES_SESSION_*). Its requester is its task's recorded origin, resolved
+    through from_decompose_of — never the card text."""
+
+    def setUp(self):
+        import os
+        import sqlite3
+        import tempfile
+        import kanban_origin
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.board = os.path.join(tmp.name, "kanban.db")
+        conn = sqlite3.connect(self.board)
+        conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, "
+                     "run_id INTEGER, kind TEXT, payload TEXT, created_at INTEGER)")
+        conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES "
+                     "('t_child', 'created', '{\"from_decompose_of\": \"t_root\"}', 0)")
+        conn.commit()
+        conn.close()
+        kanban_origin.record_origin(kanban_origin.default_store_path(self.home), "t_root",
+                                    {"platform": "google_chat", "user_id": "nikhil@org.com",
+                                     "user_id_alt": "users/1234", "user_name": "Nikhil"})
+
+    def _worker(self, task_id):
+        return patch.dict("os.environ", {"HERMES_HOME": self.home, "HERMES_KANBAN_DB": self.board,
+                                         "HERMES_KANBAN_TASK": task_id,
+                                         "HERMES_SESSION_SOURCE": "kanban",
+                                         ec._SESSION_SENDER_ENV: "", "HERMES_SESSION_PLATFORM": ""})
+
+    def test_worker_requester_is_the_decompose_roots_origin(self):
+        with self._worker("t_child"):
+            self.assertEqual(ec.resolve_requested_by(None), "nikhil@org.com")
+
+    def test_worker_naming_another_requester_is_refused(self):
+        with self._worker("t_child"):
+            with self.assertRaises(ec.UnvalidatedProdRequesterError):
+                ec.resolve_requested_by("priya@org.com")
+
+    def test_worker_without_origin_has_no_requester(self):
+        with self._worker("t_cli_made"):
+            self.assertEqual(ec.resolve_requested_by(None), "")
+
+    def test_whoami_shows_the_kanban_task_and_origin(self):
+        with self._worker("t_child"):
+            snap = ec.session_identity()
+        self.assertEqual(snap["HERMES_SESSION_SOURCE"], "kanban")
+        self.assertEqual(snap["HERMES_KANBAN_TASK"], "t_child")
+        self.assertEqual(snap["kanban_origin_task_id"], "t_root")
+        self.assertEqual(snap["resolved_sender_email"], "nikhil@org.com")
+
+
+class SessionEnvReaderTests(unittest.TestCase):
+    """Issue 04: inside the gateway process the session sender lives in
+    per-turn ContextVars, not os.environ. The plugin installs a reader."""
+
+    def tearDown(self):
+        ec.set_session_env_reader(None)
+
+    def test_installed_reader_binds_the_requester(self):
+        values = {"HERMES_SESSION_USER_ID": "nikhil@org.com", "HERMES_SESSION_PLATFORM": "google_chat"}
+        ec.set_session_env_reader(lambda name, default="": values.get(name, default))
+        with patch.dict("os.environ", {ec._SESSION_SENDER_ENV: "stale@org.com"}):
+            self.assertEqual(ec.resolve_requested_by(None), "nikhil@org.com")
+            self.assertEqual(ec.session_identity()["HERMES_SESSION_PLATFORM"], "google_chat")
+
+    def test_reader_reset_falls_back_to_os_environ(self):
+        ec.set_session_env_reader(lambda name, default="": "x@org.com")
+        ec.set_session_env_reader(None)
+        with patch.dict("os.environ", {ec._SESSION_SENDER_ENV: "env@org.com"}):
+            self.assertEqual(ec.resolve_requested_by(None), "env@org.com")
 
 
 class BotIdentityRequesterGuardTests(unittest.TestCase):

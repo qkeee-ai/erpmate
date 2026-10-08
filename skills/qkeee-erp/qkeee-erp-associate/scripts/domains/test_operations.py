@@ -464,7 +464,7 @@ class InvariantTests(unittest.TestCase):
 
     def test_list_ops_matches_registry(self):
         import execute_write
-        listed = {o["op"] for o in execute_write._list_ops()}
+        listed = {o["op"] for o in execute_write.list_ops()}
         self.assertEqual(listed, {op.key for op in operations.list_operations()})
 
 

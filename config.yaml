@@ -315,6 +315,11 @@ image_gen:
 # vision kept deliberately — the doc-extraction domain
 # (qkeee-erp-associate) reads invoice PDFs/images and needs it.
 platform_toolsets:
+  # qkeee_erp (plugins/qkeee-erp): the ERPNext tools. On cli because Kanban
+  # workers run with the profile's cli toolsets (hermes_cli/
+  # kanban_db_dispatch.py, _resolve_worker_cli_toolsets); in an interactive
+  # CLI session the tools refuse (no gateway sender), and an operator uses
+  # the skill scripts with --requested-by instead.
   cli:
     - clarify
     - code_execution
@@ -322,6 +327,7 @@ platform_toolsets:
     - delegation
     - file
     - memory
+    - qkeee_erp
     - session_search
     - skills
     - terminal
@@ -346,24 +352,38 @@ platform_toolsets:
   # browser/computer_use/feishu/spotify/... schema rode along on each call
   # (visible as ~20 "check_fn ... returned False" lines per turn). Same list
   # as cli/discord.
+  # code_execution removed 2026-10-08 (requester identity binding, issue 02):
+  # no ERP skill needs it, and an execute_code script could read the ERPNext
+  # credentials and call ERPNext without the connector's gate. qkeee_erp
+  # added (issue 04): ERPNext is reached only through those gateway tools.
   google_chat:
     - clarify
-    - code_execution
     - cronjob
     - delegation
     - file
     - memory
+    - qkeee_erp
     - session_search
     - skills
     - terminal
     - todo
     - vision
     - web
+# A plugin toolset is ON for a platform unless it is "known" here and absent
+# from that platform's list (hermes_cli/tools_config.py,
+# _enabled_plugin_toolsets). qkeee_erp is known for cli, discord and
+# google_chat, so it is off on discord (a Discord id is not an ERPNext user).
+# On a platform not listed here (email, slack, ...) it is on, and its tools
+# refuse every turn whose sender is not an email.
 known_plugin_toolsets:
   cli:
+    - qkeee_erp
     - spotify
   discord:
+    - qkeee_erp
     - spotify
+  google_chat:
+    - qkeee_erp
 platforms:
   discord:
     enabled: true

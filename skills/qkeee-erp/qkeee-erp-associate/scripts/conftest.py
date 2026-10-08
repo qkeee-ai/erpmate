@@ -36,6 +36,7 @@ import importlib  # noqa: E402
 
 for _bare, _qualified in (
         ("confirm_token", "core.confirm_token"),
+        ("kanban_origin", "core.kanban_origin"),
         ("client", "core.client"),
         ("operations", "core.operations"),
         ("memory_promote", "core.memory_promote"),

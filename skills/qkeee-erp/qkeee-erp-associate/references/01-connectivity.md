@@ -66,18 +66,32 @@ whatever the platform actually hands over for "who sent this." Resolve it
 fresh on every single call (never cache or reuse a value from an earlier
 call in the same conversation), confirm it as a real ERPNext `User` (already
 enforced in code — `_validate_prod_requester()` in `core/client.py` refuses
-a call outright without a validated requester, on every tag). On a gateway
-session with a sender email (Google Chat, Email), `client.py whoami` shows
-it as `resolved_sender_email`: omit `--requested-by` and the scripts bind
-it; a `requested_by=` library call must pass that same value, or the gate
-refuses it. On `google_chat`/`email` with no sender email the gate refuses
-outright. On other platforms with no sender email, pass the user-confirmed
-identity via `--requested-by` / `requested_by=`. The connector refuses to
-run inside `execute_code` (no session identity there). See `SKILL.md` step 3 for the per-turn
+a call outright without a validated requester, on every tag). The
+`qkeee_erp` gateway tools take the requester only from the gateway: the
+session's sender email (Google Chat, Email), or in a Kanban worker the
+sender recorded for the task's origin (`core/kanban_origin.py`).
+`erp_discover(action="whoami")` shows it as `resolved_sender_email`. No
+tool takes a requester argument; with no sender the tools refuse, and a
+Kanban worker blocks the task as `needs_input`. An operator running the
+scripts by hand in the gateway container passes `--requested-by`; a
+`requested_by=` library call in a session must pass the session's sender,
+or the gate refuses it. The connector refuses to run inside `execute_code`
+(no session identity there). See `SKILL.md` step 3 for the per-turn
 procedure. Never invent, guess, or fall back to any standing default to get
 past this — there is no default to fall back to.
 
 ## Env resolution — why `qkeee-erp.env`, not native frontmatter passthrough
+
+**Current state (2026-10-08, requester identity binding issue 04).** The
+agent calls ERPNext only through the `qkeee_erp` gateway tools (see
+`SKILL.md`, "Calling ERPNext"). The file now lives gateway-side at
+`$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` (mode 600); the old
+`$HERMES_HOME/qkeee-erp.env` is read only until cont-init
+`018-qkeee-erp-plugin` moves it. The skill no longer declares
+`required_environment_variables`, so no ERPNext credential is passed
+through to a terminal or `execute_code` sandbox. The sandbox rationale
+below explains the file format and still applies to an operator running
+the scripts by hand.
 
 **A deliberate exception, documented here so it doesn't read as an
 oversight on review.** Hermes' own `required_environment_variables`/

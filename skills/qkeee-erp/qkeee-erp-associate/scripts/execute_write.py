@@ -138,7 +138,7 @@ def _confirmation_label(op) -> str:
     return f"per action: {'/'.join(gated)}" if gated else "none"
 
 
-def _list_ops() -> list:
+def list_ops() -> list:
     out = []
     for op in operations.list_operations():
         out.append({
@@ -265,7 +265,7 @@ def main(argv=None) -> int:
     p = _build_parser()
     a = p.parse_args(argv)
     if a.list_ops:
-        print(json.dumps(_list_ops(), indent=2))
+        print(json.dumps(list_ops(), indent=2))
         return EXIT_OK
     for flag, value in (("--tag", a.tag), ("--mode", a.mode), ("--requested-by", a.requested_by)):
         if not value:
