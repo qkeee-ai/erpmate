@@ -362,6 +362,182 @@ class ConditionalAndNamingMetaTests(unittest.TestCase):
         self.assertIsNone(meta["custom_fields_error"])
 
 
+class ActiveWorkflowMetaTests(unittest.TestCase):
+    """getdoctype's FormMeta carries the doctype's active workflows as
+    `__workflow_docs` — Environment Metadata, so no Workflow read (which
+    the requester gate would refuse an HR user) is needed."""
+
+    def _meta(self, doc):
+        with patch.object(discover, "read_rpc", return_value={"docs": [doc]}):
+            return discover.doctype_meta("DEMO_ERP", "Employee", requested_by="u@org.com")
+
+    def test_active_workflow_names_come_from_merged_meta(self):
+        meta = self._meta({"name": "Employee", "fields": [],
+                           "__workflow_docs": [{"name": "Employee Onboarding WF", "is_active": 1}]})
+        self.assertEqual(meta["active_workflows"], ["Employee Onboarding WF"])
+
+    def test_no_workflow_docs_key_means_unknown(self):
+        self.assertIsNone(self._meta({"name": "Employee", "fields": []})["active_workflows"])
+
+    def test_empty_workflow_docs_means_none_active(self):
+        self.assertEqual(self._meta({"name": "Employee", "fields": [],
+                                     "__workflow_docs": []})["active_workflows"], [])
+
+
+class PreflightTests(unittest.TestCase):
+    """Issue 06: one write-readiness call per doctype, run before every
+    create a spec makes. Each rule red first."""
+
+    REQ = "hr.user@org.com"
+
+    def meta(self, **over):
+        base = {
+            "doctype": "Employee", "module": "Setup", "custom": False, "istable": False,
+            "issubmittable": False, "description": None,
+            "fields": [
+                {"fieldname": "naming_series", "fieldtype": "Select", "reqd": 1,
+                 "options": "HR-EMP-", "default": "HR-EMP-"},
+                {"fieldname": "first_name", "fieldtype": "Data", "reqd": 1},
+                {"fieldname": "gender", "fieldtype": "Link", "reqd": 1, "options": "Gender"},
+                {"fieldname": "company_abbr", "fieldtype": "Data", "reqd": 1,
+                 "fetch_from": "company.abbr"},
+                {"fieldname": "employee_number", "fieldtype": "Data", "reqd": 0},
+                {"fieldname": "relieving_date", "fieldtype": "Date", "reqd": 0,
+                 "mandatory_depends_on": "eval:doc.status=='Left'"},
+            ],
+            "autoname": "naming_series:", "naming_rule": "By \"Naming Series\" field",
+            "title_field": "employee_name", "naming_series_options": ["HR-EMP-"],
+            "conditional_mandatory": [{"fieldname": "relieving_date",
+                                       "expression": "eval:doc.status=='Left'"}],
+            "active_workflows": [],
+            "custom_fields_merged": True, "custom_fields_error": None,
+        }
+        base.update(over)
+        return base
+
+    def run_preflight(self, meta=None, payload=None, modules=None, hr_settings=None,
+                      app="erpnext", doctype="Employee"):
+        meta = meta or self.meta()
+
+        def fake_get_resource(tag, dt, name, **kw):
+            if dt == "Module Def":
+                return {"data": {"name": name, "app_name": app}}
+            if dt == "HR Settings":
+                if isinstance(hr_settings, Exception):
+                    raise hr_settings
+                return {"data": hr_settings or {"emp_created_by": "Naming Series"}}
+            raise AssertionError(f"unexpected read {dt}")
+
+        def fake_modules(tag, **kw):
+            if isinstance(modules, Exception):
+                raise modules
+            return modules or {"apps_seen_via_modules": ["erpnext", "frappe", "hrms"],
+                               "modules": [], "has_more": False}
+
+        with patch.object(discover, "doctype_meta", return_value=meta), \
+                patch.object(discover, "list_modules", side_effect=fake_modules), \
+                patch.object(discover, "get_resource", side_effect=fake_get_resource), \
+                patch.object(discover, "get_env_config",
+                             return_value={"tag": "DEMO_ERP", "base_url": "https://demo.example.com"}):
+            return discover.preflight("DEMO_ERP", doctype, payload=payload, requested_by=self.REQ)
+
+    FULL = {"first_name": "Demo", "gender": "Female", "company": "Demo Co"}
+
+    def test_clean_payload_is_ready(self):
+        result = self.run_preflight(payload=self.FULL)
+        self.assertTrue(result["ready"], result["blockers"])
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["gaps"], [])
+        self.assertEqual(result["meta_source"], "getdoctype")
+        self.assertEqual(result["owning_app"], "erpnext")
+        self.assertEqual(result["custom_apps_installed"], ["hrms"])
+        self.assertFalse(result["workflow_active"])
+        self.assertEqual(result["naming"], {"autoname": "naming_series:", "series_options": ["HR-EMP-"],
+                                            "settings_rule": "HR Settings emp_created_by = Naming Series"})
+
+    def test_rule1_unmerged_custom_fields_is_not_ready(self):
+        result = self.run_preflight(meta=self.meta(custom_fields_merged=False,
+                                                   custom_fields_error="403"),
+                                    payload=self.FULL)
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["meta_source"], "bare_doctype")
+        self.assertTrue(any("custom fields" in b for b in result["blockers"]))
+
+    def test_rule2_missing_mandatory_field_is_a_blocker(self):
+        result = self.run_preflight(payload={"first_name": "Demo", "company": "Demo Co"})
+        self.assertFalse(result["ready"])
+        self.assertEqual([b for b in result["blockers"] if "gender" in b], [
+            "mandatory field 'gender' is not in the payload"])
+        mandatory = {m["fieldname"]: m for m in result["mandatory"]}
+        self.assertFalse(mandatory["gender"]["in_payload"])
+        self.assertTrue(mandatory["first_name"]["in_payload"])
+        # a default or a fetch_from fills the field: listed, never a blocker
+        self.assertEqual(mandatory["naming_series"]["filled_by"], "default")
+        self.assertEqual(mandatory["company_abbr"]["filled_by"], "fetch_from")
+        self.assertFalse(any("naming_series" in b or "company_abbr" in b for b in result["blockers"]))
+
+    def test_rule2_without_payload_lists_but_does_not_judge(self):
+        result = self.run_preflight(payload=None)
+        self.assertTrue(all(m["in_payload"] is None for m in result["mandatory"]))
+        self.assertFalse(any("not in the payload" in b for b in result["blockers"]))
+
+    def test_rule3_conditional_mandatory_is_listed_for_the_user_not_evaluated(self):
+        result = self.run_preflight(payload=self.FULL)
+        self.assertEqual(result["conditional_mandatory"], [
+            {"fieldname": "relieving_date", "expression": "eval:doc.status=='Left'",
+             "in_payload": False}])
+        self.assertTrue(result["ready"])
+
+    def test_rule4_active_workflow_is_a_blocker_with_its_name(self):
+        result = self.run_preflight(meta=self.meta(active_workflows=["Employee Approval"]),
+                                    payload=self.FULL)
+        self.assertTrue(result["workflow_active"])
+        self.assertFalse(result["ready"])
+        self.assertTrue(any("Employee Approval" in b for b in result["blockers"]))
+
+    def test_rule4_unknown_workflow_state_is_a_blocker(self):
+        result = self.run_preflight(meta=self.meta(active_workflows=None), payload=self.FULL)
+        self.assertIsNone(result["workflow_active"])
+        self.assertFalse(result["ready"])
+        self.assertTrue(any("could not confirm" in b for b in result["blockers"]))
+
+    def test_rule5_employee_number_setting_makes_employee_number_mandatory(self):
+        result = self.run_preflight(payload=self.FULL,
+                                    hr_settings={"emp_created_by": "Employee Number"})
+        self.assertEqual(result["naming"]["settings_rule"],
+                         "HR Settings emp_created_by = Employee Number")
+        self.assertFalse(result["ready"])
+        self.assertTrue(any("employee_number" in b for b in result["blockers"]))
+        ok = self.run_preflight(payload=dict(self.FULL, employee_number="E-1"),
+                                hr_settings={"emp_created_by": "Employee Number"})
+        self.assertTrue(ok["ready"], ok["blockers"])
+
+    def test_rule5_settings_check_runs_only_for_its_doctype(self):
+        result = self.run_preflight(meta=self.meta(doctype="Supplier", autoname="field:supplier_name",
+                                                   naming_series_options=None,
+                                                   conditional_mandatory=[], fields=[]),
+                                    payload={}, doctype="Supplier")
+        self.assertIsNone(result["naming"]["settings_rule"])
+
+    def test_rule6_refused_settings_read_is_a_requester_gap_and_a_blocker(self):
+        refusal = _client.UnvalidatedProdRequesterError("no read on HR Settings")
+        result = self.run_preflight(payload=self.FULL, hr_settings=refusal)
+        self.assertFalse(result["ready"])
+        self.assertEqual(len(result["gaps"]), 1)
+        gap = result["gaps"][0]
+        self.assertEqual((gap["who"], gap["user"], gap["doctype"], gap["perm"]),
+                         ("requester", self.REQ, "HR Settings", "read"))
+        self.assertIn("Then reply RECHECK ENV.", gap["prompt"])
+        self.assertTrue(any("HR Settings" in b for b in result["blockers"]))
+
+    def test_rule6_failed_module_listing_is_a_bot_gap_not_a_blocker(self):
+        result = self.run_preflight(payload=self.FULL,
+                                    modules=discover.ConnectorError("ERPNext API error (403)"))
+        self.assertIsNone(result["custom_apps_installed"])
+        self.assertEqual([(g["who"], g["doctype"]) for g in result["gaps"]], [("bot", "Module Def")])
+        self.assertTrue(result["ready"], result["blockers"])
+
+
 class SubmittableFlagTests(unittest.TestCase):
     """W40: Frappe's DocType field is `is_submittable`; the meta used to
     read a non-existent `issubmittable`, so every doctype (Purchase Order

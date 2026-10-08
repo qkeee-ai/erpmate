@@ -50,7 +50,10 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from core.client import (
+    BOT_ROLE_NAME,
     ConnectorError,
+    GateRefusal,
+    make_gap,
     _log_read,
     _request,
     get_env_config,
@@ -219,9 +222,25 @@ def doctype_meta(tag: str, doctype: str, *, requested_by: str = None, session_id
             {"fieldname": f["fieldname"], "expression": f["mandatory_depends_on"]}
             for f in fields if f.get("mandatory_depends_on")
         ],
+        # getdoctype's FormMeta attaches the doctype's ACTIVE workflows as
+        # `__workflow_docs`. None: not known (bare-DocType fallback, or a
+        # Frappe build without the key) — never read as "no workflow".
+        "active_workflows": ([w.get("name") for w in doc["__workflow_docs"] if w.get("name")]
+                             if isinstance(doc.get("__workflow_docs"), list) else None),
         "custom_fields_merged": merged_error is None,
         "custom_fields_error": merged_error,
     }
+
+
+def _module_app(tag: str, module: str, read_ctx: dict) -> tuple:
+    """(app_name, error) for a module. (None, None): no module to look up."""
+    if not module:
+        return None, None
+    try:
+        data = get_resource(tag, "Module Def", module, **read_ctx).get("data") or {}
+        return data.get("app_name"), None
+    except ConnectorError as e:
+        return None, str(e)
 
 
 def resolve_doctype(tag: str, doctype: str, *, requested_by: str = None, session_id: str = None,
@@ -247,18 +266,11 @@ def resolve_doctype(tag: str, doctype: str, *, requested_by: str = None, session
                          channel_metadata=channel_metadata, prompt_summary=prompt_summary,
                          latest_prompt=latest_prompt)
     module = meta.get("module")
-    app_name = None
-    app_lookup_error = None
-    if module:
-        try:
-            mod_result = get_resource(tag, "Module Def", module,
-                                       session_id=session_id, domain_code=domain_code,
-                                       requested_by=requested_by, channel=channel,
-                                       channel_metadata=channel_metadata,
-                                       prompt_summary=prompt_summary, latest_prompt=latest_prompt)
-            app_name = (mod_result.get("data") or {}).get("app_name")
-        except ConnectorError as e:
-            app_lookup_error = str(e)
+    app_name, app_lookup_error = _module_app(
+        tag, module, dict(session_id=session_id, domain_code=domain_code,
+                          requested_by=requested_by, channel=channel,
+                          channel_metadata=channel_metadata, prompt_summary=prompt_summary,
+                          latest_prompt=latest_prompt))
     return {
         "doctype": meta.get("doctype"),
         "module": module,
@@ -268,6 +280,147 @@ def resolve_doctype(tag: str, doctype: str, *, requested_by: str = None, session
         "istable": meta.get("istable"),
         "issubmittable": meta.get("issubmittable"),
         "field_count": len(meta.get("fields", [])),
+    }
+
+
+# Apps every ERPNext instance has; anything else installed is reported as
+# `custom_apps_installed` (its validate hooks are invisible to preflight).
+_CORE_APPS = {"frappe", "erpnext"}
+
+
+def _employee_settings_check(tag: str, payload, read_ctx: dict, gap_for) -> tuple:
+    """HR Settings `emp_created_by`: "Employee Number" names each Employee
+    by its employee_number, so that field becomes mandatory."""
+    try:
+        settings = get_resource(tag, "HR Settings", "HR Settings", **read_ctx).get("data") or {}
+    except ConnectorError as e:
+        gap = gap_for(e, "HR Settings", "read", "HR Manager",
+                      "preflight cannot read HR Settings emp_created_by, so it cannot tell whether "
+                      "employee_number is mandatory")
+        return None, [f"could not read HR Settings emp_created_by: {gap['effect']}"], [gap]
+    rule = settings.get("emp_created_by")
+    blockers = []
+    if rule == "Employee Number" and payload is not None and not payload.get("employee_number"):
+        blockers.append("HR Settings emp_created_by = Employee Number: 'employee_number' names the "
+                        "record and is not in the payload")
+    return f"HR Settings emp_created_by = {rule}", blockers, []
+
+
+# Per-doctype settings checks (preflight rule 5). Each returns
+# (settings_rule text or None, blockers, gaps).
+_SETTINGS_CHECKS = {"Employee": _employee_settings_check}
+
+
+def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str = None,
+              session_id: str = None, domain_code: str = None, channel: str = None,
+              channel_metadata: dict = None, prompt_summary: str = None,
+              latest_prompt: str = None) -> dict:
+    """Write-readiness gate for one create on `doctype` (issue 06). Run it
+    for every doctype a spec writes and paste the result into the spec.
+
+    `ready` is False when any blocker exists:
+    1. custom fields were not merged (bare-DocType meta): the agent must not
+       create until the user explicitly overrides, recorded in the spec;
+    2. a mandatory field is missing from `payload` (a field filled by its
+       default or by fetch_from is listed, never a blocker). Without a
+       payload, fields are listed and not judged;
+    3. — conditional mandatory fields are listed for the user to confirm,
+       never evaluated, never a blocker;
+    4. an active Workflow (named), or the workflow state is unknown;
+    5. a doctype settings check (Employee: HR Settings emp_created_by)
+       fails, or cannot be read.
+    6. Permission gaps use the `health` gap shape (client.make_gap()). A
+       gap that stops a rule from running is also a blocker.
+
+    Preflight cannot see server scripts or custom-app validate hooks; they
+    run only on save. execute_write.py's structured failure covers those.
+    """
+    read_ctx = dict(requested_by=requested_by, session_id=session_id, domain_code=domain_code,
+                    channel=channel, channel_metadata=channel_metadata,
+                    prompt_summary=prompt_summary, latest_prompt=latest_prompt)
+    base_url = get_env_config(tag).get("base_url", "")
+
+    def gap_for(exc, gap_doctype, perm, requester_role, effect):
+        if isinstance(exc, GateRefusal):
+            who, user, role = "requester", requested_by, requester_role
+        else:
+            who, user, role = "bot", "(the bot account)", BOT_ROLE_NAME
+        return make_gap(tag=tag, base_url=base_url, capability=f"preflight:{gap_doctype}", who=who,
+                        user=user, role=role, doctype=gap_doctype, perm=perm, effect=effect,
+                        error=str(exc)[:300])
+
+    meta = doctype_meta(tag, doctype, **read_ctx)
+    blockers, gaps = [], []
+    merged = bool(meta.get("custom_fields_merged"))
+    if not merged:
+        blockers.append("custom fields were not merged (meta fell back to the bare DocType: "
+                        f"{meta.get('custom_fields_error')}); custom mandatory fields may be "
+                        "missing. Do not create until the user explicitly overrides, and record "
+                        "the override in the spec.")
+
+    def in_payload(fieldname):
+        return None if payload is None else payload.get(fieldname) not in (None, "", [])
+
+    mandatory = []
+    for f in meta.get("fields", []):
+        if not f.get("reqd"):
+            continue
+        entry = {"fieldname": f["fieldname"], "in_payload": in_payload(f["fieldname"])}
+        if f.get("default") not in (None, ""):
+            entry["filled_by"] = "default"
+        elif f.get("fetch_from"):
+            entry["filled_by"] = "fetch_from"
+        mandatory.append(entry)
+        if entry["in_payload"] is False and "filled_by" not in entry:
+            blockers.append(f"mandatory field '{f['fieldname']}' is not in the payload")
+    conditional = [dict(c, in_payload=in_payload(c["fieldname"]))
+                   for c in meta.get("conditional_mandatory", [])]
+
+    workflows = meta.get("active_workflows")
+    if workflows is None:
+        workflow_active = None
+        blockers.append("could not confirm whether a Workflow is active on this doctype (merged "
+                        "meta carried no workflow data); the record may land in a workflow state "
+                        "the user did not expect — confirm with the user or an admin")
+    else:
+        workflow_active = bool(workflows)
+        if workflows:
+            blockers.append(f"active Workflow {', '.join(workflows)!s} on '{doctype}': the create "
+                            f"may land in a workflow state the user did not expect")
+
+    owning_app, app_error = _module_app(tag, meta.get("module"), read_ctx)
+    try:
+        apps = list_modules(tag, **read_ctx).get("apps_seen_via_modules") or []
+        custom_apps = sorted(set(apps) - _CORE_APPS)
+    except ConnectorError as e:
+        custom_apps = None
+        gaps.append(gap_for(e, "Module Def", "read", BOT_ROLE_NAME,
+                            "preflight cannot list installed custom apps, whose validation "
+                            "this create may meet"))
+
+    settings_rule = None
+    check = _SETTINGS_CHECKS.get(doctype)
+    if check:
+        settings_rule, check_blockers, check_gaps = check(tag, payload, read_ctx, gap_for)
+        blockers += check_blockers
+        gaps += check_gaps
+
+    return {
+        "doctype": meta.get("doctype") or doctype,
+        "meta_source": "getdoctype" if merged else "bare_doctype",
+        "custom_fields_merged": merged,
+        "owning_app": owning_app,
+        "owning_app_error": app_error,
+        "custom_apps_installed": custom_apps,
+        "mandatory": mandatory,
+        "conditional_mandatory": conditional,
+        "naming": {"autoname": meta.get("autoname"),
+                   "series_options": meta.get("naming_series_options"),
+                   "settings_rule": settings_rule},
+        "workflow_active": workflow_active,
+        "ready": not blockers,
+        "blockers": blockers,
+        "gaps": gaps,
     }
 
 
@@ -302,11 +455,24 @@ def _cli():
     r = sub.add_parser("resolve", help="doctype -> module -> app in one call")
     r.add_argument("doctype")
 
+    pf = sub.add_parser("preflight", help="write-readiness gate for one create: mandatory, "
+                                          "conditional, naming, workflow, settings checks")
+    pf.add_argument("doctype")
+    pf.add_argument("--payload", help="JSON object: the create payload to check")
+
     args = p.parse_args()
     try:
         channel_metadata = json.loads(args.channel_metadata) if args.channel_metadata else None
     except json.JSONDecodeError as e:
         raise SystemExit(f"--channel-metadata must be valid JSON: {e}")
+    payload = None
+    if getattr(args, "payload", None):
+        try:
+            payload = json.loads(args.payload)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"--payload must be valid JSON: {e}")
+        if not isinstance(payload, dict):
+            raise SystemExit("--payload must be a JSON object")
 
     kw = dict(
         requested_by=args.requested_by, session_id=args.session_id, domain_code=args.domain_code,
@@ -323,6 +489,8 @@ def _cli():
             print(json.dumps(doctype_meta(args.tag, args.doctype, **kw), indent=2))
         elif args.command == "resolve":
             print(json.dumps(resolve_doctype(args.tag, args.doctype, **kw), indent=2))
+        elif args.command == "preflight":
+            print(json.dumps(preflight(args.tag, args.doctype, payload=payload, **kw), indent=2))
     except ConnectorError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
