@@ -124,25 +124,58 @@ Resolve a doctype's field/shape against the live instance first
 (Non-negotiable 4 in `00-conventions.md`) — never propose it from general
 ERPNext knowledge alone:
 
+- `discover.py meta "<DocType>"` — full live field list from Frappe's
+  merged meta (`frappe.desk.form.load.getdoctype`: the DocType plus its
+  Custom Fields and Property Setters). Per field: mandatory flag, Link
+  target, and the conditional keys (`mandatory_depends_on`, `depends_on`,
+  `read_only_depends_on`, `fetch_from`, `permlevel`, `length`,
+  `non_negative`). Per doctype: `autoname`, `naming_rule`, `title_field`,
+  `naming_series_options`, `conditional_mandatory[]`, `active_workflows`
+  (`null` = unknown). If getdoctype fails it falls back to the bare
+  `DocType` record and says `custom_fields_merged: false`: custom fields
+  are then missing, so never conclude a field doesn't exist.
+  Authoritative over any doc or memory of a prior instance.
 - `discover.py resolve "<DocType>"` — module + owning app +
   submittable/custom flags. Run before assuming any doctype is uncovered
   custom territory.
-- `discover.py meta "<DocType>"` — full live field list, mandatory flags,
-  Link targets. Authoritative over any doc or memory of a prior instance.
-  **Known prerequisite:** both calls hit `GET /api/resource/DocType/<name>`,
-  which requires System Manager–level read access — a correctly
-  least-privileged steady-state bot account can 403 here. Don't present
-  that as a connectivity bug; tell the user their bot account needs read
-  access to `DocType`, or ask them to paste the relevant field list from
-  the Customize Form screen instead.
-- `discover.py modules` — installed-app inventory via a plain `Module Def`
-  list read (works broadly). `discover.py apps` mirrors the Help → About
-  dialog and includes version numbers `modules` can't derive, but its
-  whitelisted RPC method can be blocked (`PermissionError: not whitelisted`)
-  on some instances — treat it as opportunistic, fall back to `modules`
-  silently, and only ask the user to paste Help → About if exact versions
-  matter and both fail. See `02-environment-assessment.md` for the full
-  cataloging procedure this feeds.
+- `discover.py preflight "<DocType>" --payload '<json>'` — the
+  write-readiness gate, once per doctype before any create: meta source,
+  mandatory fields against the payload, conditional mandatory fields to
+  confirm, naming (incl. a settings rule — Employee: HR Settings
+  `emp_created_by`), active workflow, owning and custom apps. `ready:
+  false` lists `blockers`; permission problems come back as `gaps[]` in
+  the `health` shape. `03-spec-driven-execution.md` step 2 pastes it into
+  the spec.
+- `discover.py modules` — installed-app inventory via a `Module Def` list
+  read. `discover.py apps` mirrors the Help → About dialog and includes
+  version numbers `modules` can't derive (the `get_versions` RPC). Either
+  can fail on the **bot's** permissions — `health` names that gap — but
+  never on the requester's. Ask the user to paste Help → About only if
+  exact versions matter and both fail. See `02-environment-assessment.md`
+  for the full cataloging procedure this feeds.
+
+### Whose permission each discovery read needs
+
+The one table; other files link here. The gate checks the **requester**;
+every HTTP call is sent as the **bot**, so the bot needs the read too.
+`DocType`, `Module Def` and the `get_versions` RPC are Environment
+Metadata (agents ADR 0001, a closed list): the requester's own permission
+is never checked for them, but the requester must still be given and
+bound to the session.
+
+| Capability | Used by | Requester needs | Bot needs (role) | Effect if missing |
+| --- | --- | --- | --- | --- |
+| Merged meta (getdoctype) | `meta`, `resolve`, `preflight`, schema mapping | nothing (ADR 0001) | call getdoctype — any logged-in user on stock Frappe | falls back to bare DocType; `custom_fields_merged: false`; preflight not ready |
+| Bare DocType record | `meta` fallback only | nothing (ADR 0001) | read `DocType` — System Manager only on stock, so a correct bot 403s | no meta at all; ask the user to paste fields from Customize Form |
+| Module Def list | `modules`, `resolve` (app), `preflight` (custom apps) | nothing (ADR 0001) | read `Module Def` (`Qkeee Bot`, granted by `init_bot.py`) | no app list; catalog partial; `health` gap `module_def_read` |
+| Installed apps (get_versions) | `apps` | nothing (ADR 0001) | call get_versions — any logged-in user | no versions; use `modules` |
+| Workflow list | `health` probe | — | read `Workflow` (`Qkeee Bot`, `init_bot.py`) | `health` gap `workflow_read`; preflight reads active workflows from merged meta instead |
+| HR Settings | `preflight Employee` | read `HR Settings` (HR Manager on stock) | read `HR Settings` (a DocPerm on `Qkeee Bot`) | preflight not ready: cannot tell whether `employee_number` is mandatory |
+| Any business read/write | domain work | the doctype permission (gate) | the same, as DocPerms on `Qkeee Bot` (ADR 0003) | refused by the gate, or 403 from ERPNext |
+
+A missing grant is reported with the role-gap prompt
+(`00-conventions.md`), never in the agent's own words, and never fixed by
+the agent itself.
 
 ## Query cost: list endpoint vs. single-resource GET
 

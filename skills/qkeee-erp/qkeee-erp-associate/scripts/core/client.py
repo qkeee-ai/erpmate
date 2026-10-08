@@ -1444,7 +1444,7 @@ _CAPABILITY_PROBES = (
      "frappe.utils.change_log.get_versions", "call",
      "discover.py apps cannot list installed apps and versions; use discover.py modules"),
     ("merged_meta", "/api/method/frappe.desk.form.load.getdoctype", {"doctype": "User"},
-     "User", "read",
+     "frappe.desk.form.load.getdoctype", "call",
      "discover.py meta cannot read merged meta (custom fields, property setters); "
      "preflight cannot confirm mandatory fields"),
     ("workflow_read", "/api/resource/Workflow",
@@ -1488,12 +1488,13 @@ def probe_capabilities(tag: str, cfg: dict, bot_user: str) -> tuple:
         except ConnectorError as e:
             capabilities[capability] = False
             steps = None
-            if capability == "installed_apps":
-                # Whitelisted for any logged-in user: a failure is instance
-                # policy or version, not a missing role.
-                steps = ("ask the ERPNext admin whether this instance blocks "
-                         "frappe.utils.change_log.get_versions (whitelist policy or Frappe "
-                         "version). No role grant fixes it; discovery uses modules meanwhile.")
+            if perm == "call":
+                # Whitelisted for any logged-in user on stock Frappe: a
+                # failure is instance policy, an app override or version,
+                # not a missing role.
+                steps = (f"ask the ERPNext admin whether this instance blocks {doctype} "
+                         f"(whitelist policy, an app override, or Frappe version). No known "
+                         f"role grant fixes it.")
             gaps.append(make_gap(tag=tag, base_url=cfg.get("base_url", ""), capability=capability,
                                  who="bot", user=bot_user or "(unknown bot user)",
                                  role=BOT_ROLE_NAME, doctype=doctype, perm=perm, effect=effect,

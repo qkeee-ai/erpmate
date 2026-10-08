@@ -9,13 +9,14 @@ docs are for behavior/workflow context metadata can't give.
 
 ## Step 1 — identify what's installed
 
-Already part of `02-environment-assessment.md` step 2 — don't re-run it,
+Already part of `02-environment-assessment.md` step 1 — don't re-run it,
 reuse the result:
 
-- `discover.py modules` — installed-app inventory (always works).
-- `discover.py apps` — same, plus version numbers, opportunistic (a
-  whitelisted RPC blocked on at least one real instance — fall back to
-  `modules` silently).
+- `discover.py modules` — installed-app inventory. Needs the bot's
+  Module Def read, never the requester's (`01-connectivity.md`'s
+  permission table).
+- `discover.py apps` — same, plus version numbers (the get_versions RPC;
+  an instance can block it — then use `modules`).
 - If both are unavailable and an exact version matters, ask the user to
   paste ERPNext's own Help → About dialog.
 

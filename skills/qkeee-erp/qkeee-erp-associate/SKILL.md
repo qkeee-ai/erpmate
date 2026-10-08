@@ -236,9 +236,14 @@ all** (a third-party tool, an internal API) follows
   those three have no module. Each declares its
   allowlist, operations and gated reads; none has a write function of
   its own.
+- `scripts/discover.py` — live metadata: `meta`, `resolve`, `modules`,
+  `apps`, and `preflight` (the write-readiness gate run before every
+  create a spec makes). Usage and the whose-permission table:
+  `references/01-connectivity.md`.
 - `scripts/init_bot.py` — admin-invoked, one-time provisioning helper
   (not part of this associate's normal conversational flow); provisions
-  the `Qkeee Bot` Role and `Qkeee Bot Audit Log` doctype.
+  the `Qkeee Bot` Role, the `Qkeee Bot Audit Log` doctype, and the role's
+  read on Module Def and Workflow.
 - `scripts/doctype_defs.py` — the Role/Audit-Log create payloads
   `init_bot.py` provisions from.
 - `scripts/core/memory_promote.py` — redacts + formats findings into

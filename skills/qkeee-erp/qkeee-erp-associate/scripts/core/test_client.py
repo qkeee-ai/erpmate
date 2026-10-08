@@ -1348,7 +1348,7 @@ class HealthCapabilityProbeTests(unittest.TestCase):
         for marker, capability, doctype in (
                 ("/api/resource/Module Def", "module_def_read", "Module Def"),
                 ("get_versions", "installed_apps", "frappe.utils.change_log.get_versions"),
-                ("getdoctype", "merged_meta", "User"),
+                ("getdoctype", "merged_meta", "frappe.desk.form.load.getdoctype"),
                 ("/api/resource/Workflow", "workflow_read", "Workflow")):
             with self.subTest(capability=capability):
                 result, _ = self._health(failing=(marker,))
