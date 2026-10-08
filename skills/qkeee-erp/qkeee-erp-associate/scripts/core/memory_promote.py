@@ -181,15 +181,28 @@ load-bearing, not a courtesy.
 """
 
 
-def format_environment_md(env_tag: str, findings: dict) -> str:
+def format_environment_md(env_tag: str, findings: dict, gaps: list = None) -> str:
     """references/environment.md content. `findings` (already redacted by
     the caller via redact_findings()) is expected to carry whatever subset
     of these keys the environment-assessment procedure actually resolved:
     frappe_version, erpnext_version, installed_apps (list of {name,
-    version}), health (dict from health_check()), notes (free text)."""
+    version}), health (dict from health_check()), notes (free text).
+
+    `gaps` (the `health` gap shape, issue 09): the permission gaps still
+    open when the catalog was built. Any gap writes `catalog_complete:
+    false` and lists it, so a later session re-runs the failed steps
+    instead of trusting a catalog that is missing data."""
     date = _now_iso_date()
     header_lines = [f"# Environment: {env_tag}", "", f"## Learned {date}", ""]
     lines = list(header_lines)
+    lines.append(f"- catalog_complete: {'false' if gaps else 'true'}")
+    if gaps:
+        lines.append("- Gaps (re-run the failed assessment steps every session until they pass):")
+        for g in gaps:
+            lines.append(f"  - {g.get('capability', '?')}: missing {g.get('perm', '?')} on "
+                         f"\"{g.get('doctype', '?')}\" for {g.get('who', '?')} {g.get('user', '?')} "
+                         f"(role \"{g.get('role', '?')}\") — {g.get('effect', '')}".rstrip(" —"))
+    header_lines = list(lines)
     frappe_v = findings.get("frappe_version")
     erpnext_v = findings.get("erpnext_version")
     if frappe_v or erpnext_v:
@@ -287,7 +300,8 @@ def build_promotion_plan(env_tag: str, findings: dict, *,
                           custom_apps: dict = None,
                           non_erpnext_systems: dict = None,
                           one_line_summary: str = None,
-                          skill_already_exists: bool = False) -> list:
+                          skill_already_exists: bool = False,
+                          gaps: list = None) -> list:
     """Build the ordered list of tool-call descriptors the CALLING AGENT
     should issue, in order, via its own native `skill_manage`/`memory`
     tools — this function performs no I/O itself.
@@ -309,6 +323,10 @@ def build_promotion_plan(env_tag: str, findings: dict, *,
             created qkeee-erp-learned/<env-tag> this session — plan uses
             write_file for every reference instead of create+write_file,
             since skill_manage(create) refuses a name collision.
+        gaps: the `gaps[]` from `client.py health` (and any preflight)
+            still open. Non-empty -> environment.md says
+            `catalog_complete: false` and lists them, and the breadcrumb
+            says PARTIAL (issue 09).
 
     Returns:
         A list of dicts, each shaped as a direct kwargs call for either
@@ -324,6 +342,7 @@ def build_promotion_plan(env_tag: str, findings: dict, *,
         than silently continuing.
     """
     findings = redact_findings(findings or {})
+    gaps = redact_findings(gaps or [])
     doctypes = redact_findings(doctypes or [])
     custom_apps = redact_findings(custom_apps or {})
     non_erpnext_systems = redact_findings(non_erpnext_systems or {})
@@ -353,7 +372,7 @@ def build_promotion_plan(env_tag: str, findings: dict, *,
     plan.append({
         "tool": "skill_manage", "action": "write_file", "name": name,
         "file_path": "references/environment.md",
-        "file_content": format_environment_md(env_tag, findings),
+        "file_content": format_environment_md(env_tag, findings, gaps),
     })
     plan.append({
         "tool": "skill_manage", "action": "write_file", "name": name,
@@ -374,6 +393,8 @@ def build_promotion_plan(env_tag: str, findings: dict, *,
         })
 
     summary = one_line_summary or "environment assessed, see full notes"
+    if gaps:
+        summary = f"PARTIAL catalog ({len(gaps)} gap(s), re-assess); {summary}"
     breadcrumb = format_memory_breadcrumb(env_tag, summary)
     # 'replace' vs 'add' is a judgment call the agent should make after
     # checking current MEMORY.md content (a stale breadcrumb for the same
@@ -422,6 +443,7 @@ def _cli():
         non_erpnext_systems=doc.get("non_erpnext_systems"),
         one_line_summary=args.summary,
         skill_already_exists=args.skill_exists,
+        gaps=doc.get("gaps"),
     )
     print(json.dumps(plan, indent=2, ensure_ascii=False))
 

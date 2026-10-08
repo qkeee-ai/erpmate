@@ -11,7 +11,7 @@
     "action": "write_file",
     "name": "example-env",
     "file_path": "references/environment.md",
-    "file_content": "# Environment: example-env\n\n## Learned 2026-08-31\n\n- Frappe: 15.4.0 (illustrative, not real capture) / ERPNext: 15.2.0 (illustrative, not real capture)\n- Installed apps:\n  - frappe 15.4.0\n  - erpnext 15.2.0\n  - crm 1.2.0\n- Last health check: {\"logged_in_as\": \"qkeee-erp-bot@example.org\", \"status\": \"ok\"}\n- Notes: Example finding only -- illustrates the shape memory_promote.py produces, not real captured data from any instance.\n"
+    "file_content": "# Environment: example-env\n\n## Learned 2026-08-31\n\n- catalog_complete: true\n- Frappe: 15.4.0 (illustrative, not real capture) / ERPNext: 15.2.0 (illustrative, not real capture)\n- Installed apps:\n  - frappe 15.4.0\n  - erpnext 15.2.0\n  - crm 1.2.0\n- Last health check: {\"logged_in_as\": \"qkeee-erp-bot@example.org\", \"status\": \"ok\"}\n- Notes: Example finding only -- illustrates the shape memory_promote.py produces, not real captured data from any instance.\n"
   },
   {
     "tool": "skill_manage",

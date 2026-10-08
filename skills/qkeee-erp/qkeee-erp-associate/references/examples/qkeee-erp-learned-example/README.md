@@ -26,6 +26,10 @@ here for inspection.
   `file_content` argument of each corresponding
   `skill_manage(action="write_file", name="example-env", file_path=...,
   file_content=...)` call.
+- `references/environment-partial.md` — what `environment.md` looks like
+  when the catalog was built with gaps still open (`build_promotion_plan(...,
+  gaps=[...])`): `catalog_complete: false` plus the gap list. A later
+  session re-runs the failed steps instead of trusting it.
 - `MEMORY-breadcrumb.txt` — the exact `content` argument of the
   `memory(action="add", target="memory", content=...)` call.
 - `_skill_manage_calls.json` — the full ordered list of tool-call

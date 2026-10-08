@@ -2,6 +2,7 @@
 
 ## Learned 2026-08-31
 
+- catalog_complete: true
 - Frappe: 15.4.0 (illustrative, not real capture) / ERPNext: 15.2.0 (illustrative, not real capture)
 - Installed apps:
   - frappe 15.4.0

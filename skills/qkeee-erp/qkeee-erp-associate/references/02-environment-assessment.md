@@ -28,20 +28,36 @@ tools.
   a `meta` call that disagrees with what's recorded — re-run the relevant
   step and update. Live metadata always wins over a prior session's
   memory.
+- **Never complete.** The learned skill's `environment.md` says
+  `catalog_complete: false`. The catalog was promoted with gaps still
+  open, so it is missing data. Re-run the failed steps (the listed gaps
+  name them) on every session until they pass, then promote again with
+  no gaps. Never latch a partial catalog as if it were complete.
 
 ## Procedure
 
-1. **Health check.** `core/client.py --tag <tag> health` confirms
-   connectivity + auth, not query/write-time permission. Report a later
+0. **Health and gaps.** `core/client.py --tag <tag> health` confirms
+   connectivity + auth, and probes, as the bot, what discovery needs
+   (`capabilities`). Show each entry of `gaps[]` with the role-gap prompt
+   (`00-conventions.md`), exactly as printed, before anything else. Keep
+   the gaps: step 6 passes them to `memory_promote.py`. Report a later
    permission error as its own distinct failure mode, never lumped in
-   with a connectivity failure.
-2. **Installed apps + versions.** Run `discover.py modules` first (plain
-   REST read, always works). Run `discover.py apps` as a bonus for
-   version numbers `modules` can't derive — treat it as opportunistic
-   (`01-connectivity.md` notes it's a confirmed-blocked RPC method on at
-   least one real instance). If `apps` fails, fall back to `modules`
-   silently; ask the user to paste the Help → About dialog only if exact
-   versions genuinely matter.
+   with a connectivity failure. Whose permission each read needs: the
+   table in `01-connectivity.md`.
+1. **Installed apps + versions.** Run `discover.py modules`, then
+   `discover.py apps` for version numbers `modules` can't derive. Both are
+   Environment Metadata (agents ADR 0001): the requester's own
+   permission is not checked, so an HR user can run them. They need the
+   **bot** to read `Module Def` (and get_versions to be callable). If
+   either fails, it is a bot gap that `health` already named: say so, do
+   not guess the app list, and carry the gap into step 6. Ask the user to
+   paste the Help → About dialog only if exact versions genuinely matter.
+2. **Write readiness, before any create.** For every doctype a task will
+   create, `discover.py preflight "<DocType>" --payload '<json>'` checks
+   mandatory and conditional fields, naming, an active workflow and the
+   doctype's settings (`03-spec-driven-execution.md` step 2 pastes it into
+   the spec). Not part of first-contact cataloging; listed here so the
+   discovery calls live in one place.
 3. **Which domains apply.** Cross-reference the installed-app list
    against the domain table in `SKILL.md`. A companion app (Frappe CRM,
    Helpdesk, LMS, Insights, Wiki, Drive, Gameplan, Builder, Payments, or
@@ -94,7 +110,10 @@ tools.
    at the full skill. `memory_promote.py` can't issue the
    `skill_manage`/`memory` tool calls itself (it runs as a subprocess
    script — see its own docstring); issue the calls it returns yourself,
-   in order, and stop at the first failure.
+   in order, and stop at the first failure. Pass every gap still open
+   from step 0 (`build_promotion_plan(..., gaps=...)`, or a `gaps` key in
+   the CLI's findings JSON): the plan then writes `catalog_complete:
+   false` and lists them, so the next session knows to re-assess.
 
 ## Out of scope
 

@@ -104,5 +104,41 @@ class BuildPromotionPlanTests(unittest.TestCase):
         self.assertNotIn("123-45-6789", dumped)
 
 
+class PartialCatalogTests(unittest.TestCase):
+    """Issue 09: pending skill e701c144 promoted a catalog with no app list
+    (modules/apps had failed) and nothing said so; activation step 2 then
+    latches it and skips assessment. A catalog built with gaps says
+    `catalog_complete: false` and lists them."""
+
+    GAP = {"capability": "module_def_read", "who": "bot", "user": "bot@org.com",
+           "role": "Qkeee Bot", "doctype": "Module Def", "perm": "read",
+           "effect": "discover.py modules cannot map a DocType to its app",
+           "grant_steps": "...", "prompt": "..."}
+
+    def _environment_md(self, plan):
+        return next(s["file_content"] for s in plan
+                    if s.get("file_path") == "references/environment.md")
+
+    def test_findings_with_a_gap_are_marked_incomplete_and_list_it(self):
+        content = self._environment_md(mp.build_promotion_plan("demo_erp", {}, gaps=[self.GAP]))
+        self.assertIn("catalog_complete: false", content)
+        self.assertIn("module_def_read", content)
+        self.assertIn('read on "Module Def" for bot bot@org.com (role "Qkeee Bot")', content)
+
+    def test_findings_without_gaps_are_complete(self):
+        content = self._environment_md(mp.build_promotion_plan("demo_erp", {"frappe_version": "16"},
+                                                               gaps=[]))
+        self.assertIn("catalog_complete: true", content)
+        self.assertNotIn("Gaps", content)
+
+    def test_gaps_default_to_none_given(self):
+        content = self._environment_md(mp.build_promotion_plan("demo_erp", {}))
+        self.assertIn("catalog_complete: true", content)
+
+    def test_breadcrumb_says_partial(self):
+        plan = mp.build_promotion_plan("demo_erp", {}, gaps=[self.GAP], one_line_summary="v16")
+        self.assertIn("PARTIAL catalog", plan[-1]["content"])
+
+
 if __name__ == "__main__":
     unittest.main()
