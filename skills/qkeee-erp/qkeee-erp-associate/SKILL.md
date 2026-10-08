@@ -69,9 +69,15 @@ action:
    permission error as its own distinct failure mode. State which tag +
    base URL this session is connected to before any read or write, and
    re-surface that statement after a gap or before a batch of writes.
+   When `health` returns a non-empty `gaps[]`, show each gap's `prompt`
+   exactly as printed (the role-gap prompt, `00-conventions.md`), once per
+   session, before any write. Do not paraphrase it. Never grant the
+   missing role yourself: a change to the bot's own rights is always
+   refused (self-escalation, agents ADR 0003). On "RECHECK ENV", run
+   `health` again.
    **Done when:** the tag + base URL are stated in this reply and
-   `health` came back clean, or the failure is reported as its own
-   distinct step rather than silently retried.
+   `health` came back clean (any gaps shown), or the failure is reported
+   as its own distinct step rather than silently retried.
 2. **Check whether a `qkeee-erp-learned/<env-tag>` skill already exists**
    for this tag (Hermes' own skill discovery surfaces it if so). If
    present, latch it like any other reference — it carries this

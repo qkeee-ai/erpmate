@@ -1311,6 +1311,67 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
         self.assertIn("rbac_precheck_warning", result)
 
 
+class HealthCapabilityProbeTests(unittest.TestCase):
+    """Issue 04: `health` probes, as the bot, what discovery and preflight
+    need, and turns each failure into one gap the agent renders with the
+    role-gap prompt (00-conventions.md) instead of its own words."""
+
+    TRUST = {"reliable": True, "bot_user": "qkeee-erp-bot@org.com", "bot_roles": ["Qkeee Bot"],
+             "privileged_identity": False, "precheck_discriminates": True}
+    GAP_KEYS = {"capability", "who", "user", "role", "doctype", "perm", "effect", "grant_steps",
+                "prompt"}
+
+    def _health(self, failing=()):
+        def fake_request(cfg, method, path, params=None, payload=None):
+            for marker in failing:
+                if marker in path or marker in json.dumps(params or {}):
+                    raise ec.ConnectorError(f"ERPNext API error (403) on GET {path}: PermissionError")
+            return {"message": "qkeee-erp-bot@org.com", "data": [], "docs": [{"name": "User"}]}
+        with patch.object(ec, "get_env_config",
+                          return_value={"tag": "DEMO_ERP", "base_url": "https://demo.example.com"}), \
+                patch.object(ec, "_request", side_effect=fake_request) as req, \
+                patch.object(ec, "verify_rbac_precheck_reliable", return_value=dict(self.TRUST)):
+            return ec.health_check("DEMO_ERP"), req
+
+    def test_clean_bot_has_no_gaps(self):
+        result, req = self._health()
+        self.assertEqual(result["gaps"], [])
+        self.assertEqual(set(result["capabilities"]),
+                         {"module_def_read", "installed_apps", "merged_meta", "workflow_read"})
+        self.assertTrue(all(result["capabilities"].values()))
+        paths = [c.args[2] for c in req.call_args_list]
+        self.assertIn("/api/resource/Module Def", paths)
+        self.assertIn("/api/resource/Workflow", paths)
+        self.assertIn("/api/method/frappe.utils.change_log.get_versions", paths)
+
+    def test_each_probe_failure_maps_to_one_complete_gap(self):
+        for marker, capability, doctype in (
+                ("/api/resource/Module Def", "module_def_read", "Module Def"),
+                ("get_versions", "installed_apps", "frappe.utils.change_log.get_versions"),
+                ("getdoctype", "merged_meta", "User"),
+                ("/api/resource/Workflow", "workflow_read", "Workflow")):
+            with self.subTest(capability=capability):
+                result, _ = self._health(failing=(marker,))
+                self.assertFalse(result["capabilities"][capability])
+                self.assertEqual(len(result["gaps"]), 1)
+                gap = result["gaps"][0]
+                self.assertEqual(set(gap), self.GAP_KEYS | {"error"})
+                self.assertTrue(all(gap[k] for k in self.GAP_KEYS), gap)
+                self.assertEqual(gap["capability"], capability)
+                self.assertEqual(gap["who"], "bot")
+                self.assertEqual(gap["user"], "qkeee-erp-bot@org.com")
+                self.assertEqual(gap["doctype"], doctype)
+
+    def test_module_def_gap_renders_the_prompt(self):
+        result, _ = self._health(failing=("/api/resource/Module Def",))
+        prompt = result["gaps"][0]["prompt"]
+        self.assertIn("Environment catalog incomplete on DEMO_ERP (https://demo.example.com).", prompt)
+        self.assertIn('Missing: read on "Module Def" for bot qkeee-erp-bot@org.com '
+                      '(role "Qkeee Bot").', prompt)
+        self.assertIn('Role Permission Manager → Document Type "Module Def"', prompt)
+        self.assertIn("Then reply RECHECK ENV.", prompt)
+
+
 class RequesterRoleFallbackTests(unittest.TestCase):
     """F7 reinforcement: _requester_has_role_permission()/
     _fetch_doctype_role_permissions() — the local, RPC-independent

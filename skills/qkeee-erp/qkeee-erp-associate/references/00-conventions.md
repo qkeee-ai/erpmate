@@ -110,6 +110,10 @@ mechanism. `references/cli-cookbook.md` has the write flow.
    (universal, not PROD-only) if it's missing or doesn't resolve to a real,
    permitted ERPNext `User`. No doctype is exempt for a write — User,
    Role and DocType writes need a requester holding that permission too.
+   Environment Metadata reads (`DocType`, `Module Def`, the
+   `get_versions` RPC — a closed list, agents ADR 0001) skip only the
+   requester's permission check; the requester must still be given and
+   bound to the session.
 3. **Never write outside the active domain's `ALLOWED_WRITE_DOCTYPES`.**
    Every `scripts/domains/<slug>.py` module declares this tuple and
    registers it via `core.client.register_domain_allowlist()`. The
@@ -382,6 +386,41 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   (`skills.external_dirs`, the background-review write guard) and for
   the two confirmed cases where a profile drifted into a doc claim its
   `config.yaml` didn't actually back.
+
+## Role-gap prompt
+
+A missing permission is reported with one fixed prompt, never in the
+agent's own words. "The requester has no read permission on Module Def"
+(DEMO_ERP, 2026-10-07) told the user nothing about what to grant, to whom,
+or where.
+
+`client.py health` and `discover.py preflight` return `gaps[]`. Each gap
+has `capability`, `who` (`bot` or `requester`), `user`, `role`,
+`doctype`, `perm`, `effect`, `grant_steps`, and `prompt`: the prompt
+below, already filled in. Show `prompt` exactly as printed:
+
+```
+⚠ Environment catalog incomplete on <TAG> (<base URL>).
+Missing: <perm> on "<doctype>" for <who> <user> (role "<role>").
+Effect: <effect>.
+Fix (System Manager): Role Permission Manager → Document Type "<doctype>"
+→ Add rule → Role "<role>", Level 0 → tick <perm> → Save.
+Then reply RECHECK ENV.
+```
+
+Rules:
+
+1. Show each gap once per session, before any write. Activation step 1
+   (`SKILL.md`) runs `health` first for this reason.
+2. On "RECHECK ENV", run `health` again and show only the gaps left.
+3. Never grant the role yourself, even when asked and even with the
+   admin credential. A write to a Service Account's user, to a role it
+   holds, or to a permission row on that role is self-escalation, and the
+   pipeline refuses it (agents ADR 0003). The fix is a human admin in the
+   ERPNext UI.
+4. A `bot` gap is fixed on the `Qkeee Bot` role, never by giving the bot a
+   stock role. `init_bot.py` grants the two reads the bot needs for
+   discovery (Module Def, Workflow).
 
 ## Report-back
 

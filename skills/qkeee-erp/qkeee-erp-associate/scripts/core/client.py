@@ -1315,6 +1315,78 @@ def _request(cfg: dict, method: str, path: str, params: dict = None, payload: di
         ) from e
 
 
+# The bot account's dedicated role (agents/docs/adr/0003) — the role a
+# bot-side gap is granted on. Same value as doctype_defs.ROLE_NAME.
+BOT_ROLE_NAME = "Qkeee Bot"
+
+# What `health` probes, as the bot, before any task: (capability, path,
+# params, doctype, perm, effect when missing). Each failure becomes one gap.
+_CAPABILITY_PROBES = (
+    ("module_def_read", "/api/resource/Module Def",
+     {"fields": '["name"]', "limit_page_length": 1}, "Module Def", "read",
+     "discover.py modules/resolve cannot map a DocType to its app; the environment "
+     "catalog stays partial"),
+    ("installed_apps", "/api/method/frappe.utils.change_log.get_versions", None,
+     "frappe.utils.change_log.get_versions", "call",
+     "discover.py apps cannot list installed apps and versions; use discover.py modules"),
+    ("merged_meta", "/api/method/frappe.desk.form.load.getdoctype", {"doctype": "User"},
+     "User", "read",
+     "discover.py meta cannot read merged meta (custom fields, property setters); "
+     "preflight cannot confirm mandatory fields"),
+    ("workflow_read", "/api/resource/Workflow",
+     {"fields": '["name"]', "limit_page_length": 1}, "Workflow", "read",
+     "preflight cannot check for an active Workflow on the target doctype"),
+)
+
+_ROLE_GAP_PROMPT = (
+    "⚠ Environment catalog incomplete on {tag} ({base_url}).\n"
+    "Missing: {perm} on \"{doctype}\" for {who} {user} (role \"{role}\").\n"
+    "Effect: {effect}.\n"
+    "Fix (System Manager): {grant_steps}\n"
+    "Then reply RECHECK ENV."
+)
+
+
+def make_gap(*, tag: str, base_url: str, capability: str, who: str, user: str, role: str,
+             doctype: str, perm: str, effect: str, grant_steps: str = None,
+             error: str = None) -> dict:
+    """One permission gap, in the shape `health` and `discover.py preflight`
+    both return. `prompt` is the role-gap prompt (00-conventions.md),
+    already filled in: the agent shows it as is and never paraphrases."""
+    if grant_steps is None:
+        grant_steps = (f"Role Permission Manager → Document Type \"{doctype}\" → Add rule → "
+                       f"Role \"{role}\", Level 0 → tick {perm} → Save.")
+    gap = {"capability": capability, "who": who, "user": user, "role": role, "doctype": doctype,
+           "perm": perm, "effect": effect, "grant_steps": grant_steps}
+    gap["prompt"] = _ROLE_GAP_PROMPT.format(tag=tag, base_url=base_url, **gap)
+    if error is not None:
+        gap["error"] = error
+    return gap
+
+
+def probe_capabilities(tag: str, cfg: dict, bot_user: str) -> tuple:
+    """Run _CAPABILITY_PROBES as the bot. Returns ({capability: bool}, gaps)."""
+    capabilities, gaps = {}, []
+    for capability, path, params, doctype, perm, effect in _CAPABILITY_PROBES:
+        try:
+            _request(cfg, "GET", path, params=params)
+            capabilities[capability] = True
+        except ConnectorError as e:
+            capabilities[capability] = False
+            steps = None
+            if capability == "installed_apps":
+                # Whitelisted for any logged-in user: a failure is instance
+                # policy or version, not a missing role.
+                steps = ("ask the ERPNext admin whether this instance blocks "
+                         "frappe.utils.change_log.get_versions (whitelist policy or Frappe "
+                         "version). No role grant fixes it; discovery uses modules meanwhile.")
+            gaps.append(make_gap(tag=tag, base_url=cfg.get("base_url", ""), capability=capability,
+                                 who="bot", user=bot_user or "(unknown bot user)",
+                                 role=BOT_ROLE_NAME, doctype=doctype, perm=perm, effect=effect,
+                                 grant_steps=steps, error=str(e)[:300]))
+    return capabilities, gaps
+
+
 def health_check(tag: str = "default") -> dict:
     """Verify active environment is reachable and authenticated.
 
@@ -1329,14 +1401,22 @@ def health_check(tag: str = "default") -> dict:
     health check on its own; a caller should read the reliability flag and
     warn/act on it, matching how a doctype-specific permission gap is its
     own distinct failure mode rather than a reason to fail connectivity.
+
+    `capabilities`/`gaps` (issue 04): probes, as the bot, the reads that
+    discovery and preflight need (_CAPABILITY_PROBES). Each failure is one
+    gap (make_gap()) with a filled-in role-gap `prompt`. A clean bot
+    returns `gaps: []`. Gaps never fail the health check either.
     """
     cfg = get_env_config(tag)
     result = _request(cfg, "GET", "/api/method/frappe.auth.get_logged_user")
     trust = verify_rbac_precheck_reliable(tag)
+    capabilities, gaps = probe_capabilities(tag, cfg, trust.get("bot_user") or result.get("message"))
     out = {
         "tag": tag, "base_url": cfg["base_url"], "status": "ok",
         "logged_in_as": result.get("message"),
         "rbac_precheck_reliable": trust["reliable"],
+        "capabilities": capabilities,
+        "gaps": gaps,
     }
     if not trust["reliable"]:
         out["rbac_precheck_warning"] = (
