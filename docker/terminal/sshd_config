@@ -1,0 +1,42 @@
+# sshd for the terminal sidecar. One client: the gateway, as `hermes`, with
+# the key that 0157-terminal-ssh publishes into the shared terminal-auth
+# volume. Key auth only; no forwarding of any kind.
+
+Port 22
+HostKey /etc/ssh/hostkeys/ssh_host_ed25519_key
+
+# Read at every login, so a rotated gateway key needs no sidecar restart.
+# The volume is mounted read-only here and written by root in the gateway,
+# which StrictModes requires.
+AuthorizedKeysFile /opt/terminal-auth/authorized_keys
+AllowUsers hermes
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+StrictModes yes
+
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+GatewayPorts no
+PermitUserEnvironment no
+PrintMotd no
+
+# No AcceptEnv. Hermes forwards skill env passthrough with SendEnv; dropping
+# it here keeps every gateway-side secret value out of the sidecar.
+# sshd starts sessions with a clean environment, so set what the base image's
+# ENV would have given: the Hermes venv on PATH, and the synced ~/.hermes.
+SetEnv PATH=/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HERMES_HOME=/opt/data/.hermes PYTHONUNBUFFERED=1 PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+
+# The gateway multiplexes every terminal, file and execute_code call over a
+# ControlMaster connection; the default 10 sessions is too few for parallel
+# tool calls.
+MaxSessions 64
+ClientAliveInterval 60
+
+# scp (file sync) uses the SFTP protocol in OpenSSH 9+.
+Subsystem sftp internal-sftp

@@ -151,6 +151,7 @@ s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmark
 |---|---|
 | `01-hermes-setup` | *(base)* volume chown, config seed, bundled-skill sync into the **default** profile |
 | `0155-cwd-setup` | Creates and chowns the cwd mount so `TERMINAL_CWD` is actually enterable |
+| `0157-terminal-ssh` | Creates the gateway's ssh key for the terminal sidecar and publishes its public key to the `terminal-auth` volume |
 | `016-profile-install` | Installs this distribution on first boot; records its skill inventory to `.distribution-skills` |
 | `017-jev-skills` | Runs the jev installer — CLI, `hermes-jev` + `hermes-handoff` plugins, per-profile shims |
 | `018-hermes-lcm` | Links and enables the `hermes-lcm` plugin, sets `context.engine: lcm` |
@@ -161,6 +162,24 @@ s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmark
 | `02-reconcile-profiles` | *(base)* creates the s6 gateway slots from each profile's `desired_state` |
 
 All are idempotent and non-fatal — a failure logs a warning and boot continues.
+
+### Terminal sidecar
+
+The agent's terminal, file tools (`read_file`, `write_file`, `patch`, `search_files`) and `execute_code` do **not** run in the gateway container. `config.yaml` sets `terminal.backend: ssh`, and the gateway logs in over ssh to the compose `terminal` service ([`docker/terminal/`](./docker/terminal/)). That service mounts the cwd (`$HERMES_CWD`) and nothing from `/opt/data`, so no command the agent writes can read the ERPNext credentials, the LLM keys or the gateway's own ssh key. Agents ADR 0002 records why this is ssh and not the Hermes `docker` backend (that one needs the docker socket in the gateway: root on the host).
+
+| Piece | Where |
+|---|---|
+| Client key (gateway only) | `/opt/data/.terminal-ssh/id_ed25519`, made by `0157-terminal-ssh`; `terminal.ssh_key` points here |
+| Public key | `terminal-auth` volume: read-write in the gateway, read-only in the sidecar, read by its sshd at every login |
+| Host key | `terminal-hostkeys` volume, made on the sidecar's first start; the gateway pins it in `/opt/data/.ssh/known_hosts` |
+| Sidecar home | `terminal-home` volume at `/opt/data` *inside the sidecar*: Hermes syncs the skills tree (and any skill-declared credential file, e.g. Google Workspace tokens) into `~/.hermes` there |
+
+The sidecar's sshd accepts key auth only, allows no forwarding, and has no `AcceptEnv`, so skill env passthrough does not reach it. Each terminal call pays a small ssh round trip over a ControlMaster connection.
+
+- Manual ERP CLI runs (`client.py`, `init_bot.py`) are for a trusted operator in the gateway container (`docker compose exec hermes ...`), not for the agent.
+- After deleting the `terminal-hostkeys` volume the sidecar has a new host key and the gateway refuses it. Clear the pin: `docker compose exec -u hermes hermes ssh-keygen -R terminal -f /opt/data/.ssh/known_hosts`.
+- A deployment without the sidecar must set `terminal.backend: local` in the profile `config.yaml`; otherwise every terminal call returns a `degraded` result. `local` gives the agent read access to everything in `/opt/data`.
+- An existing install keeps its `config.yaml` on update: copy the `terminal:` block from this repo's `config.yaml` into it by hand.
 
 The compose `command` is `["sleep", "infinity"]`, **not** `gateway run`. In an s6 container `hermes gateway run` does not run a foreground gateway: it redirects to `gateway start` on the `gateway-default` slot and then sleeps anyway, which starts the *default* profile's gateway and fights `0195-gateway-state`. The gateway that should run is started by `02-reconcile-profiles`; the CMD only keeps `/init` alive.
 

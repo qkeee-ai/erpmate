@@ -56,6 +56,9 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #                         and shout when one changed since the last boot —
 #                         JEV_REF and LCM_REF float, so a rebuild can move
 #                         capabilities with no error anywhere
+#   0157-terminal-ssh     gateway ssh client key for the terminal sidecar;
+#                         publish its public key to the terminal-auth volume
+#                         (docker/terminal, agents ADR 0002)
 #   016-profile-install   install the erpnext-hermes profile distribution
 #   017-jev-skills        jev installer; links into every profile, so it must
 #                         run after the profile exists
@@ -86,7 +89,7 @@ RUN chmod -R a+rX,go-w /opt/defaults
 COPY docker/cont-init.d/ /etc/cont-init.d/
 # Globbed in three parts: `01[6-9]-*` does not match the 4-digit 015x/019x
 # names (the `-` has nothing to match against their 4th character).
-RUN set -eu; for f in /etc/cont-init.d/015[56]-* /etc/cont-init.d/01[6-9]-* \
+RUN set -eu; for f in /etc/cont-init.d/015[5-7]-* /etc/cont-init.d/01[6-9]-* \
         /etc/cont-init.d/019[5-7]-*; do \
         sed -i 's/\r$//' "$f" && chmod 0755 "$f"; \
     done

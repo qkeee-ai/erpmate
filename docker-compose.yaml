@@ -53,8 +53,12 @@ services:
       # Local-clone mode: mount the repo and set HERMES_PROFILE_LOCAL_PATH to the
       # in-container path, e.g. /opt/erpmate (must contain distribution.yaml at its root):
       # - ./:/opt/erpmate:ro
+      # Shared with the terminal sidecar (read-only there): 0157-terminal-ssh
+      # publishes the gateway's ssh public key here as authorized_keys.
+      - terminal-auth:/opt/terminal-auth
     networks:
       - hermes-net
+      - terminal-net
     environment:
       # Match the host owner of the bind mounts above, else everything the
       # container writes there is owned by uid 10000. 0155-cwd-setup warns when
@@ -165,6 +169,36 @@ services:
         limits:
           memory: 4G
           cpus: "2.0"
+  # The agent's terminal, file tools and execute_code run here, reached over
+  # Hermes' `ssh` backend (config.yaml `terminal.backend: ssh`, ssh_host
+  # `terminal`), so nothing the agent runs can read the gateway's /opt/data:
+  # ERPNext credentials, LLM keys, the gateway's ssh key. See
+  # agents docs/adr/0002-terminal-on-ssh-sidecar.md and docker/terminal/.
+  # Mounts only the working directory; Hermes syncs the skills tree into the
+  # sidecar's own ~/.hermes (terminal-home). No published ports.
+  terminal:
+    build:
+      context: .
+      dockerfile: docker/terminal/Dockerfile
+    image: qkeee/erpmate-terminal:latest
+    restart: unless-stopped
+    volumes:
+      - ${HERMES_CWD_DIR:-./data/cwd}:${HERMES_CWD:-/opt/cwd}
+      - terminal-auth:/opt/terminal-auth:ro
+      - terminal-hostkeys:/etc/ssh/hostkeys
+      - terminal-home:/opt/data
+    networks:
+      - terminal-net
+    environment:
+      # Same as the gateway, so files the agent writes in the cwd mount get
+      # the host owner.
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
   #my-tool:
   #  image: example/my-tool:latest
   #  container_name: my-tool
@@ -175,3 +209,11 @@ services:
 networks:
   hermes-net:
     driver: bridge
+  # Gateway <-> terminal sidecar only; the sidecar does not join hermes-net.
+  terminal-net:
+    driver: bridge
+
+volumes:
+  terminal-auth:
+  terminal-hostkeys:
+  terminal-home:

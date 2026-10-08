@@ -1,0 +1,54 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Prepare the gateway's ssh login to the terminal sidecar (docker/terminal,
+# agents docs/adr/0002-terminal-on-ssh-sidecar.md). Idempotent. Non-fatal.
+#
+# - Client key: $HOME/.terminal-ssh/id_ed25519 (HOME=/opt/data, the gateway
+#   volume), owned by hermes, mode 600. config.yaml `terminal.ssh_key` points
+#   here. The sidecar never mounts /opt/data, so the agent cannot read it.
+# - Public key: copied, root-owned 644, to $TERMINAL_SSH_AUTH_DIR/authorized_keys
+#   (the terminal-auth volume, mounted read-only in the sidecar; its sshd
+#   reads it at every login).
+#
+#   TERMINAL_SSH_AUTH_DIR  shared volume mount point (default /opt/terminal-auth)
+#
+# Without that mount (no sidecar in this deployment) the hook does nothing;
+# set `terminal.backend: local` in config.yaml then, or the terminal tool
+# reports the ssh backend as degraded on every call.
+
+AUTH_DIR="${TERMINAL_SSH_AUTH_DIR:-/opt/terminal-auth}"
+KEY_DIR=/opt/data/.terminal-ssh
+KEY="$KEY_DIR/id_ed25519"
+
+if [ ! -d "$AUTH_DIR" ]; then
+    echo "[terminal-ssh] $AUTH_DIR not mounted; no terminal sidecar, nothing to prepare"
+    exit 0
+fi
+
+as_hermes() { HOME=/opt/data s6-setuidgid hermes "$@"; }
+
+mkdir -p "$KEY_DIR" && chown hermes:hermes "$KEY_DIR" && chmod 700 "$KEY_DIR" \
+    || { echo "[terminal-ssh] WARNING: cannot prepare $KEY_DIR; continuing" >&2; exit 0; }
+
+if [ ! -f "$KEY" ]; then
+    if as_hermes ssh-keygen -q -t ed25519 -N '' -C hermes-gateway-terminal -f "$KEY"; then
+        echo "[terminal-ssh] generated client key $KEY"
+    else
+        echo "[terminal-ssh] WARNING: ssh-keygen failed; the terminal cannot log in" >&2
+        exit 0
+    fi
+fi
+chown hermes:hermes "$KEY" "$KEY.pub" && chmod 600 "$KEY" && chmod 644 "$KEY.pub"
+
+# StrictModes in the sidecar: the dir and file must be root-owned and not
+# group/world writable. Write via a temp file so sshd never reads half a key.
+chown root:root "$AUTH_DIR" && chmod 755 "$AUTH_DIR"
+if cp "$KEY.pub" "$AUTH_DIR/authorized_keys.tmp" \
+    && chown root:root "$AUTH_DIR/authorized_keys.tmp" \
+    && chmod 644 "$AUTH_DIR/authorized_keys.tmp" \
+    && mv -f "$AUTH_DIR/authorized_keys.tmp" "$AUTH_DIR/authorized_keys"; then
+    echo "[terminal-ssh] published client public key to $AUTH_DIR/authorized_keys"
+else
+    echo "[terminal-ssh] WARNING: could not publish the public key to $AUTH_DIR" >&2
+fi
+exit 0

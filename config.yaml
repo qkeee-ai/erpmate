@@ -398,9 +398,22 @@ platforms:
 # machine-local paths" rule. If HERMES_CWD is overridden in compose, change
 # this value with it. (Merged 2026-10-07: a second top-level `terminal:` key
 # had been added above, and YAML's last-key-wins silently dropped its cwd.)
+#
+# backend ssh (2026-10-08, requester identity binding issue 06, agents ADR
+# 0002): the terminal, file tools and execute_code run in the compose
+# `terminal` sidecar, which mounts /opt/cwd but never /opt/data, so the agent
+# cannot read the ERPNext credentials or any other gateway secret. ssh_host
+# is the compose service name; 0157-terminal-ssh creates ssh_key and
+# publishes its public key to the sidecar. No sidecar in your deployment?
+# Set backend back to local (and accept that the agent can read /opt/data).
+# Values here override TERMINAL_* env vars (gateway/run.py bridges them).
 terminal:
-  backend: local
+  backend: ssh
   cwd: /opt/cwd
+  ssh_host: terminal
+  ssh_user: hermes
+  ssh_port: 22
+  ssh_key: /opt/data/.terminal-ssh/id_ed25519
 approvals:
   destructive_slash_confirm: true
 updates:

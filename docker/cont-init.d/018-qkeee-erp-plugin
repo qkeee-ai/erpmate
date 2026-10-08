@@ -14,8 +14,8 @@
 # Credentials: <profile>/qkeee-erp.env moves to
 # <profile>/plugin-data/qkeee-erp/qkeee-erp.env (mode 600). client.py reads
 # the new path first and the old one only while the new one is missing.
-# The move alone does not hide the file from the terminal: that needs the
-# terminal on its own backend (agents docs/adr/0002-terminal-on-ssh-sidecar.md).
+# The move alone does not hide the file from the terminal: the terminal
+# sidecar does (0157-terminal-ssh, docker/terminal, agents ADR 0002).
 #
 # Runs after 016-profile-install, which writes /run/hermes-profile-name.
 # A profile installed before the plugin shipped has no plugins/qkeee-erp yet:
