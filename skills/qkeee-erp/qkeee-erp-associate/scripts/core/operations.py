@@ -46,7 +46,9 @@ confirmation code. `confirm_token.py render` is its CLI.
 
 import dataclasses
 import ipaddress
+import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -395,6 +397,70 @@ def _audit_status(doctype: str, log_name, finish_ok: bool) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Structured write failures (issue 07)
+# ---------------------------------------------------------------------------
+
+STRUCTURED_FAILURE_CLASSES = frozenset({
+    "MandatoryError", "LinkValidationError", "ValidationError", "DuplicateEntryError",
+    "UniqueValidationError",
+})
+_TAG_RE = re.compile(r"<[^>]+>")
+_MANDATORY_RE = re.compile(r"\]:\s*(.+)$")
+_LINK_RE = re.compile(r"Could not find (?:Row #\d+:\s*)?(.+?):\s*(.+)$")
+
+
+def _server_messages(body: dict) -> list:
+    """Frappe's `_server_messages`: a JSON list of JSON-encoded {message}
+    dicts. Messages come back with HTML tags stripped."""
+    try:
+        raw = json.loads(body.get("_server_messages") or "[]")
+    except (TypeError, ValueError):
+        return []
+    out = []
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            msg = json.loads(item).get("message") if isinstance(item, str) else item.get("message")
+        except (AttributeError, ValueError):
+            msg = item
+        if msg:
+            out.append(_TAG_RE.sub("", str(msg)).strip())
+    return out
+
+
+def parse_write_failure(exc) -> Optional[dict]:
+    """ERPNext's rejection of a create/update as {error_class,
+    missing_fields[], invalid_links[{field, value}], message}, for the
+    classes in STRUCTURED_FAILURE_CLASSES. None for anything else (a gate
+    refusal, a transport error, a WAF page, another exc_type): those keep
+    their own handling. `invalid_links[].field` is the label Frappe names,
+    not always the fieldname."""
+    if not isinstance(exc, _c.ERPNextAPIError):
+        return None
+    try:
+        body = json.loads(exc.body)
+    except ValueError:
+        return None
+    error_class = body.get("exc_type") if isinstance(body, dict) else None
+    if error_class not in STRUCTURED_FAILURE_CLASSES:
+        return None
+    exception = str(body.get("exception") or "")
+    detail = exception.split(": ", 1)[1] if ": " in exception else exception
+    messages = _server_messages(body)
+    missing, links = [], []
+    if error_class == "MandatoryError":
+        m = _MANDATORY_RE.search(detail)
+        if m:
+            missing = [f.strip() for f in m.group(1).split(",") if f.strip()]
+    if error_class == "LinkValidationError":
+        for text in messages or [detail]:
+            m = _LINK_RE.search(text)
+            if m:
+                links.append({"field": m.group(1).strip(), "value": m.group(2).strip()})
+    return {"error_class": error_class, "missing_fields": missing, "invalid_links": links,
+            "message": messages[0] if messages else detail}
+
+
+# ---------------------------------------------------------------------------
 # Post-hook capabilities
 # ---------------------------------------------------------------------------
 
@@ -463,6 +529,11 @@ def _send(op: Operation, req: PreparedRequest, ctx: WriteContext, *, user_approv
                 result = {"message": result}
     except Exception as e:  # noqa: BLE001 — every failure must close the audit row
         exc = e
+        failure = (parse_write_failure(e)
+                   if req.transport == "resource" and req.action in ("create", "update") else None)
+        if failure:
+            exc = _c.WriteRejectedError(f"{e}", failure)
+            exc.__cause__ = e
         if op.on_failure:
             try:
                 extra = op.on_failure(e, req, args or {}, ctx)
@@ -573,6 +644,57 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
         if policy == POLICY_TOKEN_USER_CODE:
             out["confirmation_code"] = _c.confirmation_code(token)
     return out
+
+
+_BATCH_STEP_KEYS = {"op", "args", "confirmation_token", "issued_at", "user_confirmation_text",
+                    "user_approved", "approval_note"}
+
+
+def run_batch(steps: list, ctx: WriteContext) -> dict:
+    """Run several operations in order and STOP AT THE FIRST FAILURE (issue
+    07): a gate refusal, an ERPNext rejection or an unknown outcome. Each
+    step is {"op", "args"} plus its own confirmation fields when the op
+    needs them. Returns {"steps": [...], "stopped_at": <1-based step> |
+    None, "counts": {...}}; every step reports `succeeded`, `failed` or
+    `not_attempted`, so the agent can show created / failed / not attempted
+    as one table. Never retry or patch a failed step here: ask the user."""
+    rows, stopped_at = [], None
+    for i, step in enumerate(steps, start=1):
+        args = step.get("args") or {}
+        row = {"step": i, "op": step.get("op"), "doctype": args.get("doctype"),
+               "action": args.get("action")}
+        if stopped_at is not None:
+            rows.append(dict(row, status="not_attempted"))
+            continue
+        try:
+            unknown = set(step) - _BATCH_STEP_KEYS
+            if unknown or not step.get("op"):
+                raise _c.InvalidArgumentsError(
+                    f"batch step {i}: needs 'op' and 'args'; unknown key(s) {sorted(unknown)}")
+            step_ctx = dataclasses.replace(
+                ctx.without_confirmation(), confirmation_token=step.get("confirmation_token"),
+                issued_at=step.get("issued_at"),
+                user_confirmation_text=step.get("user_confirmation_text"),
+                user_approved=bool(step.get("user_approved", ctx.user_approved)),
+                approval_note=step.get("approval_note", ctx.approval_note))
+            result = run_operation(step["op"], args, step_ctx)
+        except _c.ConnectorError as e:
+            stopped_at = i
+            row.update(status="failed", error=str(e), refused=isinstance(e, _c.GateRefusal),
+                       outcome_unknown=isinstance(e, (_c.TransportTimeoutError,
+                                                      _c.PartialOutcomeError)))
+            if isinstance(e, _c.WriteRejectedError):
+                row["write_failure"] = e.failure
+            rows.append(row)
+            continue
+        data = result.get("data") if isinstance(result, dict) else None
+        row.update(status="succeeded",
+                   name=(data or {}).get("name") if isinstance(data, dict) else args.get("name"),
+                   audit_log_status=(result or {}).get("_audit_log_status"))
+        rows.append(row)
+    counts = {s: sum(r["status"] == s for r in rows)
+              for s in ("succeeded", "failed", "not_attempted")}
+    return {"steps": rows, "stopped_at": stopped_at, "counts": counts}
 
 
 def requires_confirmation(op_key: str, args: dict) -> bool:

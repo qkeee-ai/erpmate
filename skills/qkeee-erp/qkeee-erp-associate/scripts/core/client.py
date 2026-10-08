@@ -330,6 +330,30 @@ class DoctypeNotFoundError(GateRefusal):
     missing capability rather than as a requester permission gap."""
 
 
+class ERPNextAPIError(ConnectorError):
+    """ERPNext answered with an HTTP error status. The message keeps the
+    long-standing "ERPNext API error (<status>) on ..." shape (callers match
+    on "(404)"); `.status` and the full `.body` let a caller parse Frappe's
+    exc_type and messages (operations.parse_write_failure())."""
+
+    def __init__(self, status: int, method: str, path: str, cfg: dict, body: str):
+        self.status, self.body = status, body or ""
+        super().__init__(f"ERPNext API error ({status}) on {method} {path} against "
+                         f"'{cfg.get('tag')}' ({cfg.get('base_url')}): {self.body[:500]}")
+
+
+class WriteRejectedError(ConnectorError):
+    """ERPNext rejected a create/update for a reason it named (a missing
+    mandatory field, a Link that doesn't resolve, a validation rule, a
+    duplicate). `.failure` is {error_class, missing_fields[],
+    invalid_links[{field, value}], message}. Stop, show it to the user, and
+    ask — never fill a value the user did not give."""
+
+    def __init__(self, message: str, failure: dict):
+        super().__init__(message)
+        self.failure = failure
+
+
 class TransportTimeoutError(ConnectorError):
     """Raised when ERPNext did not answer in time (connect or read
     timeout). For a write the outcome is UNKNOWN: the request may have
@@ -1286,10 +1310,7 @@ def _request(cfg: dict, method: str, path: str, params: dict = None, payload: di
             raw = resp.read()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise ConnectorError(
-            f"ERPNext API error ({e.code}) on {method} {path} against '{cfg['tag']}' "
-            f"({cfg['base_url']}): {body[:500]}"
-        ) from e
+        raise ERPNextAPIError(e.code, method, path, cfg, body) from e
     except urllib.error.URLError as e:
         if isinstance(e.reason, TimeoutError):
             raise TransportTimeoutError(timeout_msg) from e

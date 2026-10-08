@@ -31,6 +31,18 @@ For those operations `--session-id`, `--channel-metadata` and
 `--latest-prompt` are MANDATORY — a gated write is always fully
 attributed. For ungated draft writes they are still warned about loudly.
 
+## Failures and batches
+
+When ERPNext rejects a create/update for a reason it names
+(MandatoryError, LinkValidationError, ValidationError, DuplicateEntryError,
+UniqueValidationError), stdout gets `{"write_failure": {error_class,
+missing_fields, invalid_links, message}}`. Stop and ask the user; never
+fill a value they did not give.
+
+`--batch '<json list>'` runs several steps in order (each `{"op", "args"}`
+plus its own confirmation fields) and stops at the first failure. stdout
+gets the report: every step `succeeded`, `failed` or `not_attempted`.
+
 ## Exit codes
 
 0 success · 1 ERPNext/other error · 2 usage error (incl. malformed --args) · 3 refused by a gate
@@ -66,6 +78,7 @@ from core.client import (
     InvalidArgumentsError,
     PartialOutcomeError,
     TransportTimeoutError,
+    WriteRejectedError,
     resolve_requested_by,
 )
 from core.client import _parse_json_arg  # noqa: F401 -- shared JSON-flag parsing
@@ -145,6 +158,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list-ops", action="store_true", help="print every operation and exit")
     p.add_argument("--op", help="operation key (see --list-ops)")
     p.add_argument("--args", dest="op_args", help="JSON object of the operation's arguments")
+    p.add_argument("--batch", help='JSON list of steps [{"op": ..., "args": {...}, '
+                                   '"confirmation_token"?, "issued_at"?, "user_confirmation_text"?}]'
+                                   " run in order; stops at the first failure")
     p.add_argument("--tag", help="environment tag, from qkeee_erp.active_env")
     p.add_argument("--mode", choices=["read-only", "read-write"],
                    help="from qkeee_erp.mode — read-write required for any write to fire")
@@ -223,6 +239,28 @@ def _resolve_op_and_args(p, a):
     return (f"{a.domain}.generic" if a.domain else "unscoped.generic"), op_args
 
 
+_STOP_AND_ASK = ("Stop. Show the user the missing or invalid fields, ask for the values, update "
+                 "the spec and re-confirm. Never fill a value the user did not give.")
+
+
+def _run_batch(steps: list, ctx) -> int:
+    """Print run_batch()'s report; the exit code is the failing step's."""
+    report = operations.run_batch(steps, ctx)
+    print(json.dumps(report, indent=2, default=str))
+    if report["stopped_at"] is None:
+        return EXIT_OK
+    failed = report["steps"][report["stopped_at"] - 1]
+    print(f"ERROR: batch stopped at step {report['stopped_at']} of {len(steps)} "
+          f"({report['counts']['succeeded']} succeeded, {report['counts']['not_attempted']} not "
+          f"attempted): {failed['error']} — {_STOP_AND_ASK} Report created / failed / not "
+          f"attempted as a table.", file=sys.stderr)
+    if failed.get("refused"):
+        return EXIT_REFUSED
+    if failed.get("outcome_unknown"):
+        return EXIT_UNKNOWN_OUTCOME
+    return EXIT_ERROR
+
+
 def main(argv=None) -> int:
     p = _build_parser()
     a = p.parse_args(argv)
@@ -232,10 +270,24 @@ def main(argv=None) -> int:
     for flag, value in (("--tag", a.tag), ("--mode", a.mode), ("--requested-by", a.requested_by)):
         if not value:
             p.error(f"{flag} is required")
+    batch = None
     try:
-        op_key, op_args = _resolve_op_and_args(p, a)
+        if a.batch:
+            single = [f for f in ("op", "op_args", "domain", "doctype", "action", "confirmation_token",
+                                  "issued_at", "user_confirmation_text") if getattr(a, f)]
+            if single:
+                p.error(f"--batch carries each step's op/args/confirmation; it cannot be combined "
+                        f"with {['--' + f.replace('_', '-') for f in single]}.")
+            batch = _parse_json_arg("--batch", a.batch, list)
+            if not batch or not all(isinstance(s, dict) for s in batch):
+                raise ConnectorError("--batch must be a non-empty JSON list of step objects.")
+            op_key = "batch"
+            gated = any(operations.requires_confirmation(s.get("op") or "", s.get("args") or {})
+                        for s in batch)
+        else:
+            op_key, op_args = _resolve_op_and_args(p, a)
+            gated = operations.requires_confirmation(op_key, op_args)
         channel_metadata = _parse_json_arg("--channel-metadata", a.channel_metadata, dict)
-        gated = operations.requires_confirmation(op_key, op_args)
     except ConnectorError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return EXIT_USAGE
@@ -262,11 +314,18 @@ def main(argv=None) -> int:
         issued_at=a.issued_at, user_confirmation_text=a.user_confirmation_text,
         user_approved=a.user_approved, approval_note=a.approval_note,
     )
+    if batch is not None:
+        return _run_batch(batch, ctx)
     try:
         result = operations.run_operation(op_key, op_args, ctx)
     except GateRefusal as e:
         print(f"ERROR: refused, nothing was sent: {e}", file=sys.stderr)
         return EXIT_REFUSED
+    except WriteRejectedError as e:
+        print(json.dumps({"write_failure": e.failure}, indent=2))
+        print(f"ERROR: ERPNext rejected the write: {e.failure['message']} — {_STOP_AND_ASK}",
+              file=sys.stderr)
+        return EXIT_ERROR
     except InvalidArgumentsError as e:
         print(f"ERROR: invalid operation arguments, nothing was sent: {e}", file=sys.stderr)
         return EXIT_USAGE
