@@ -152,6 +152,7 @@ s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmark
 | `01-hermes-setup` | *(base)* volume chown, config seed, bundled-skill sync into the **default** profile |
 | `0155-cwd-setup` | Creates and chowns the cwd mount so `TERMINAL_CWD` is actually enterable |
 | `0157-terminal-ssh` | Creates the gateway's ssh key for the terminal sidecar and publishes its public key to the `terminal-auth` volume |
+| `0158-erp-skills-unlock` | Gives `skills/qkeee-erp` back to hermes so the profile install/update can rewrite it |
 | `016-profile-install` | Installs this distribution on first boot; records its skill inventory to `.distribution-skills` |
 | `017-jev-skills` | Runs the jev installer — CLI, `hermes-jev` + `hermes-handoff` plugins, per-profile shims |
 | `018-hermes-lcm` | Links and enables the `hermes-lcm` plugin, sets `context.engine: lcm` |
@@ -159,6 +160,7 @@ s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmark
 | `0195-gateway-state` | First boot only: marks this profile `desired_state=running` and `default` stopped |
 | `0196-dashboard-auth` | Resolves dashboard auth; mirrors creds into the default home; stops a crash-loop |
 | `0197-skills-lockdown` | Restricts the profile to the skills it ships |
+| `0198-erp-skills-readonly` | Makes `skills/qkeee-erp` root-owned, so the terminal sidecar's file sync-back cannot change the ERP code the gateway plugin imports |
 | `02-reconcile-profiles` | *(base)* creates the s6 gateway slots from each profile's `desired_state` |
 
 All are idempotent and non-fatal — a failure logs a warning and boot continues.
@@ -173,6 +175,8 @@ The agent's terminal, file tools (`read_file`, `write_file`, `patch`, `search_fi
 | Public key | `terminal-auth` volume: read-write in the gateway, read-only in the sidecar, read by its sshd at every login |
 | Host key | `terminal-hostkeys` volume, made on the sidecar's first start; the gateway pins it in `/opt/data/.ssh/known_hosts` |
 | Sidecar home | `terminal-home` volume at `/opt/data` *inside the sidecar*: Hermes syncs the skills tree (and any skill-declared credential file, e.g. Google Workspace tokens) into `~/.hermes` there |
+
+When a session's terminal closes, Hermes copies changed skill files from the sidecar back into the gateway's `skills/`. `0198-erp-skills-readonly` makes `skills/qkeee-erp` root-owned so that copy fails for the ERP code the gateway plugin imports. The failure stops that sync-back pass with a warning in the gateway log, so other changed skill files in the same pass may not come back either. Still synced to the sidecar: skill-declared credential files (e.g. Google Workspace tokens) and the `cache/` tree (uploaded documents and large tool results, from every session). The `local` backend exposed these too; the sidecar does not narrow them yet.
 
 The sidecar's sshd accepts key auth only, allows no forwarding, and has no `AcceptEnv`, so skill env passthrough does not reach it. Each terminal call pays a small ssh round trip over a ControlMaster connection.
 

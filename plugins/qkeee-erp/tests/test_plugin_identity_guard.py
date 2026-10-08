@@ -36,6 +36,11 @@ SESSION_OVERRIDES = [
     "python -c \"import os; os.environ.pop('HERMES_SESSION_PLATFORM')\"",
     "python -c \"import os; del os.environ['HERMES_SESSION_PLATFORM']\"",
     "python -c \"import subprocess; subprocess.run(['python','client.py'], env={'HERMES_SESSION_USER_ID': 'x'})\"",
+    "printf -v HERMES_SESSION_USER_ID '%s' boss@org.com; python client.py query Customer",
+    "read HERMES_SESSION_USER_ID <<< boss@org.com",
+    "HERMES_SESSION_USER_ID+=x python client.py query Customer",
+    "python -c \"import os; os.environ.__setitem__('HERMES_SESSION_USER_ID', 'x')\"",
+    "python -c \"import os; os.environ.setdefault('HERMES_SESSION_USER_ID', 'x')\"",
 ]
 
 ENV_FILE_READS = [
@@ -46,6 +51,9 @@ ENV_FILE_READS = [
     "python -c \"print(open('/opt/data/qkeee-erp.env').read())\"",
     "ls /opt/data/plugin-data/qkeee-erp/",
     "tar cf - plugin-data/qkeee-erp | base64",
+    "cat /opt/data/profiles/*/plugin-data/*/*.env",
+    "cat /opt/data/qkeee-erp.e?v",
+    "cat /opt/data/qkeee*.env",
 ]
 
 ALLOWED_CODE = [
@@ -114,6 +122,14 @@ class ScopeTests(unittest.TestCase):
                 out = identity_guard.pre_tool_call(tool_name=tool_name, args=args)
                 self.assertEqual(out["action"], "block")
                 self.assertIn("env_file", out["message"])
+
+    def test_file_tool_content_may_mention_the_env_file(self):
+        # Only path arguments count: editing docs that name the file is fine.
+        for tool_name, args in (("write_file", {"path": "/opt/cwd/notes.md", "content": "creds: qkeee-erp.env"}),
+                                ("search_files", {"pattern": "qkeee-erp.env", "path": "/opt/cwd"}),
+                                ("patch", {"edits": [{"path": "/opt/cwd/a.md", "new": "see qkeee-erp.env"}]})):
+            with self.subTest(tool=tool_name):
+                self.assertIsNone(identity_guard.pre_tool_call(tool_name=tool_name, args=args))
 
     def test_other_tools_are_ignored(self):
         self.assertIsNone(identity_guard.pre_tool_call(tool_name="read_file", args={"path": "/opt/cwd/notes.md"}))

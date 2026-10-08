@@ -1,0 +1,31 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Make the profile's skills/qkeee-erp tree read-only to hermes (root-owned).
+# Idempotent. Non-fatal. Set QKEEE_ERP_SKILLS_READONLY=0 to skip.
+#
+# Why: with the terminal on the ssh sidecar (0157-terminal-ssh, agents ADR
+# 0002), Hermes syncs the skills tree into the sidecar and, when a session's
+# terminal closes, copies every changed or new file back into the gateway's
+# skills/ (tools/environments/file_sync.py, sync_back). The qkeee-erp plugin
+# imports skills/qkeee-erp/qkeee-erp-associate/scripts/core into the gateway,
+# where the ERPNext credentials are. Without this lock the agent could edit
+# that code in the sidecar and have the gateway run it on its next start.
+# sync_back runs as hermes, so a root-owned file or directory refuses the
+# copy. Agent-written instance notes live in skills/qkeee-erp-learned/, which
+# stays writable.
+#
+# 0158-erp-skills-unlock hands the tree back to hermes before
+# 016-profile-install on the next boot.
+
+[ "${QKEEE_ERP_SKILLS_READONLY:-1}" = "0" ] && { echo "[erp-skills] read-only lock disabled via QKEEE_ERP_SKILLS_READONLY=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+for DIR in "$HERMES_HOME"/profiles/*/skills/qkeee-erp; do
+    [ -d "$DIR" ] && [ ! -L "$DIR" ] || continue
+    if chown -R root:root "$DIR" && chmod -R go-w "$DIR"; then
+        echo "[erp-skills] $DIR is read-only to hermes"
+    else
+        echo "[erp-skills] WARNING: could not lock $DIR; the agent can change gateway ERP code via sync-back" >&2
+    fi
+done
+exit 0

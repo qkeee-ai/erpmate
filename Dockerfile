@@ -59,6 +59,8 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #   0157-terminal-ssh     gateway ssh client key for the terminal sidecar;
 #                         publish its public key to the terminal-auth volume
 #                         (docker/terminal, agents ADR 0002)
+#   0158-erp-skills-unlock  give skills/qkeee-erp back to hermes so 016 can
+#                         update it (0198 locks it again)
 #   016-profile-install   install the erpnext-hermes profile distribution
 #   017-jev-skills        jev installer; links into every profile, so it must
 #                         run after the profile exists
@@ -83,14 +85,17 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #                         marker + prune pristine bundled copies + recompute
 #                         skills.disabled. After 017/018 so skills those hooks
 #                         link into the profile are allowed automatically
+#   0198-erp-skills-readonly  make skills/qkeee-erp root-owned: the sidecar's
+#                         file sync-back runs as hermes and must not rewrite
+#                         the ERP code the gateway plugin imports
 #   02-reconcile-profiles (base image) creates the s6 slots per the above
 COPY docker/defaults/ /opt/defaults/
 RUN chmod -R a+rX,go-w /opt/defaults
 COPY docker/cont-init.d/ /etc/cont-init.d/
 # Globbed in three parts: `01[6-9]-*` does not match the 4-digit 015x/019x
 # names (the `-` has nothing to match against their 4th character).
-RUN set -eu; for f in /etc/cont-init.d/015[5-7]-* /etc/cont-init.d/01[6-9]-* \
-        /etc/cont-init.d/019[5-7]-*; do \
+RUN set -eu; for f in /etc/cont-init.d/015[5-8]-* /etc/cont-init.d/01[6-9]-* \
+        /etc/cont-init.d/019[5-8]-*; do \
         sed -i 's/\r$//' "$f" && chmod 0755 "$f"; \
     done
 # Operator maintenance tools (see adminops/README.md). Baked in so they are

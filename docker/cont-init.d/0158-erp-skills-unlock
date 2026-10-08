@@ -1,0 +1,21 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Give the profile's skills/qkeee-erp tree back to hermes before
+# 016-profile-install, so `hermes profile update` can rewrite it.
+# 0198-erp-skills-readonly locks it again after the install hooks.
+# Idempotent. Non-fatal.
+#
+# The profile name comes from /run/hermes-profile-name, which 016 writes and
+# which does not survive a restart (/run is tmpfs). So this finds every
+# profile's tree instead.
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+for DIR in "$HERMES_HOME"/profiles/*/skills/qkeee-erp; do
+    [ -d "$DIR" ] && [ ! -L "$DIR" ] || continue
+    if chown -R hermes:hermes "$DIR"; then
+        echo "[erp-skills] unlocked $DIR for the profile install"
+    else
+        echo "[erp-skills] WARNING: could not unlock $DIR; profile update may fail" >&2
+    fi
+done
+exit 0
