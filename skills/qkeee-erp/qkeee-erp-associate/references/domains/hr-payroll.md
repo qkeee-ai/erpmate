@@ -25,7 +25,7 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
 - **Never surface or write sensitive employee PII (compensation, ID
   documents, personal contact details) outside the scope of the current
   authorized task.** A scope discipline, not a blanket lock — HR work is
-  inherently PII-heavy. Every draft touching PII-sensitive fields (bank
+  inherently PII-heavy. Every proposed write touching PII-sensitive fields (bank
   details, passport number, health details, emergency contacts, and
   similar) should flag them explicitly so a reviewer notices data present
   for no reason the current task explains.
@@ -40,23 +40,48 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
 - **Always confirm before any write touching an employee's record** —
   never infer license to touch fields the user didn't actually ask about.
 
+- **Demo or test employees follow `00-conventions.md`'s Demo and test
+  data section** — `Demo ` name prefix, `qkeee-demo` tag, `Inactive`,
+  synthetic values, a teardown query in the spec.
+
 ## Procedure
 
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
    **Done when:** the target doctype is confirmed inside the tuple above
    before any write is proposed.
-2. **New employee onboarding and Employee updates** stage a draft that
-   enforces ERPNext's mandatory fields and the live-discovered
-   `status: "Left"` → `relieving_date` requirement, and flags PII fields.
-   Present, confirm, then `hr_payroll.generic` `create`/`update`. Re-fetch the Employee by `name` afterward
-   (`query_resource` with explicit `fields` is sufficient — none of the
-   reviewed fields live in a child table) and check every persisted
-   field, especially that Link fields (`department`, `designation`,
-   `reports_to`, `company`, `holiday_list`) resolve to real records.
-   Employee has no submit workflow, so this post-save review is the only
-   checkpoint — fix via a further `update` and re-review if anything is
-   wrong. **Done when:** every Link field on the re-fetched record
-   resolves to a real one, and any PII field present is flagged.
+2. **New employee onboarding and Employee updates.** Employee is **not
+   submittable**: a save creates a live record, not a draft. Say "saved"
+   or "created", and say it is live (`00-conventions.md` term rule).
+   - **State the side effects of `status: "Active"`** before confirming:
+     an Active Employee enters payroll runs, attendance, leave allocation
+     and headcount reports, and its `date_of_birth` triggers birthday
+     reminders when HR Settings enables them. Ask whether `Inactive` fits
+     the task better (it always does for demo or test data — see
+     `00-conventions.md`'s Demo and test data section).
+   - **Run `discover.py preflight Employee --payload '<json>'`.** It
+     covers the mandatory fields, the live-discovered conditional
+     `status: "Left"` → `relieving_date` rule, and the first check below.
+     Then confirm the other two:
+     1. HR Settings `emp_created_by` (Naming Series / Employee Number /
+        Full Name). "Employee Number" makes `employee_number` mandatory
+        and the record's name; preflight checks it.
+     2. `date_of_birth` before `date_of_joining`, and the instance's
+        minimum-age rule.
+     3. The Company's default holiday list (HRMS 16: a submitted Holiday
+        List Assignment). Without it, later leave and attendance fail.
+   - Flag PII fields. Present the exact payload, confirm, then
+     `hr_payroll.generic` `create`/`update`. Re-fetch the Employee by
+     `name` afterward (`query_resource` with explicit `fields` is
+     sufficient — none of the reviewed fields live in a child table) and
+     check every persisted field, especially that Link fields
+     (`department`, `designation`, `reports_to`, `company`,
+     `holiday_list`) resolve to real records. This post-save review is the
+     only checkpoint. A wrong value after save is a deviation: log it in
+     the spec and re-confirm before any fixing `update`
+     (`03-spec-driven-execution.md` step 6).
+   **Done when:** the side effects were stated, preflight is `ready:
+   true`, every Link field on the re-fetched record resolves to a real
+   one, and any PII field present is flagged.
 3. **Offer Letter and Employee Onboarding stop at the advisory draft.**
    Do not continue into `create`/`submit` as part of this domain's own
    logic — if the user wants the write performed, that's a separate,
@@ -115,7 +140,7 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
 
 | Capability | Outcome | Notes |
 | --- | --- | --- |
-| New employee onboarding | Employee created, checklist tracked | May source from doc-extraction |
+| New employee onboarding | Employee created (live on save), checklist tracked | Preflight first; state Active side effects; demo data: `00-conventions.md` |
 | Update employee details | Employee updated | PII fields flagged if present |
 | Leave application / balance check | Applied or reported | Submission needs Approved/Rejected + resolvable Holiday List |
 | Attendance query / regularization | Visibility or correction | Route corrections through the originating Leave Application |

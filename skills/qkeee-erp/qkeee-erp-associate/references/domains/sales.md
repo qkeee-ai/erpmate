@@ -27,7 +27,8 @@ or Delivery Note stands, a lightweight sales pipeline view.
   name.** ERPNext's own hard-mandatory Customer fields are only
   `customer_name` + `customer_type`. This domain's bar is stricter:
   `customer_group`, `territory`, and at least one of `contact_email`/
-  `contact_mobile` are required before a draft is marked ready.
+  `contact_mobile` are required before a proposed Customer is marked
+  ready. Customer is not submittable: a create saves a live record.
   Incomplete extractions must be flagged, never silently filled with a
   placeholder.
 
@@ -47,7 +48,7 @@ or Delivery Note stands, a lightweight sales pipeline view.
       from step 2 — **not optional**: `Customer.mobile_no`/`email_id`
       stay empty without it (creating the Contact and linking it via its
       own `links` table does NOT auto-populate this field).
-   Present the full staged draft (all pending payloads) and get one
+   Present the full proposal (all pending payloads) and get one
    explicit confirmation before starting step 1. After step 3, re-fetch
    the Customer via `core.client.get_resource()` (needed to check the
    Contact linkage — `query_resource` can't) and confirm

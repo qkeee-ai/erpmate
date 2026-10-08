@@ -23,8 +23,9 @@ checking a supplier's performance.
   KYC bar is stricter than ERPNext's own (confirmed live: ERPNext's
   hard-mandatory Supplier fields are only `supplier_name` +
   `supplier_type`) — the fuller bar (identity/classification, tax ID,
-  bank/payable details) must be enforced before a draft is marked
-  "ready." Incomplete extractions must be flagged, never silently filled
+  bank/payable details) must be enforced before a proposed Supplier is
+  marked "ready." Supplier is not submittable: a create saves a live
+  record. Incomplete extractions must be flagged, never silently filled
   with a placeholder. A Supplier `create` is refused outright
   (`IncompleteSupplierKYCError`, before anything is written) unless it
   carries either `kyc={"address": {...}}` WITH a tax ID — one of
@@ -69,7 +70,7 @@ checking a supplier's performance.
    **Done when:** the target doctype is confirmed inside the tuple above
    before any write is proposed.
 2. **Supplier onboarding — Supplier → Address → Contact, one
-   operation.** Present the drafted, KYC-complete record (Supplier fields plus
+   operation.** Present the proposed, KYC-complete record (Supplier fields plus
    the Address the tax ID/registered address will carry, and Contact if
    captured) and get explicit confirmation. Then a single
    `execute_write.py --domain procurement --doctype Supplier --action

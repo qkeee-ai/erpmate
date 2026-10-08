@@ -81,6 +81,17 @@ hr-payroll, accounts, mis, sales, procurement, inventory, manufacturing,
 fixed-assets, system-admin, doc-extraction, grc-audit
 ```
 
+**Term rule — "draft", every domain.** "Draft" means docstatus 0 on a
+**submittable** doctype only (Sales Order, Journal Entry, Leave
+Application, ...): staged, reversible, not yet on record. A
+non-submittable doctype (Employee, Customer, Supplier, Item, Asset
+Category, Warehouse, ...) has no draft: docstatus 0 is its final state,
+and a save creates a live record. Say "saved" or "created" and say it is
+live. For something proposed but not yet written, say "proposed" or
+"the payload". `discover.py meta`'s `issubmittable` tells you which.
+Calling two live Employees "drafts" (DEMO_ERP, 2026-10-07) made the user
+read them as reversible staging.
+
 Code-side slugs use underscores where doctype/reference-file slugs use
 hyphens (`hr-payroll.md` <-> `domains/hr_payroll.py`, `fixed-assets.md` <->
 `domains/fixed_assets.py`, `system-admin.md` <-> `domains/system_admin.py`)
@@ -386,6 +397,33 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   (`skills.external_dirs`, the background-review write guard) and for
   the two confirmed cases where a profile drifted into a doc claim its
   `config.yaml` didn't actually back.
+
+## Demo and test data
+
+Synthetic records (a demo, a test, a training walkthrough) follow one
+convention, so a later session can find and remove them:
+
+1. **Never on a tag marked PROD.** Refuse, and say why.
+2. **Mark every record two ways.** A name prefix `Demo ` on the record's
+   title field (Employee `first_name`, Customer `customer_name`, ...), and
+   the tag `qkeee-demo`. This skill has no tag write yet: the spec lists
+   "add tag qkeee-demo" as a follow-up for the user to do in the ERPNext UI
+   (sidebar → Tags) until one exists. The prefix alone is enough for the
+   teardown query.
+3. **Pick the least-live status the doctype allows** — Employee
+   `Inactive`, Customer/Supplier `disabled: 1`, Item `disabled: 1` —
+   unless the task needs the record live. When it does, say why in the
+   spec, and list the side effects (Side effects section).
+4. **No real personal data.** Synthetic values only (names, dates, emails
+   on `example.com`), flagged as synthetic in the spec.
+5. **The spec has a Teardown section:** the query that finds the records
+   (by prefix, and by tag once set) and the action that removes them
+   (delete while nothing links to them, else disable or set Inactive),
+   with the exact calls.
+6. **Check for existing demo records first** with the same query. Reuse
+   or report them; never create a second set silently (Idempotency).
+
+`references/examples/spec-demo-employees.md` follows this convention.
 
 ## Role-gap prompt
 

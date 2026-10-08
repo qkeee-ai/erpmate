@@ -60,9 +60,18 @@ unreviewed multi-step write costs a lot.
 2. **Draft the spec.** Use the template below. Keep it crisp — this is a
    working contract, not a report. State plainly where a functional
    detail is still unconfirmed against live metadata (Non-negotiable 4,
-   `00-conventions.md`) rather than papering over the gap. **Done when:**
-   every template section below is filled, or explicitly marked
-   unconfirmed rather than left blank.
+   `00-conventions.md`) rather than papering over the gap. **For every
+   doctype the spec creates, run `discover.py preflight "<DocType>"
+   --payload '<the exact payload>'`** and paste its result into Schema
+   evidence. `ready: false` means the create does not go ahead: resolve
+   each blocker with the user first. `custom_fields_merged: false` blocks
+   until the user explicitly overrides; record the override, in their
+   words, in the spec. Show any `gaps[]` with the role-gap prompt
+   (`00-conventions.md`). Run the idempotency query (does a matching
+   record already exist?) and record its result. **Done when:** every
+   template section below is filled, or explicitly marked unconfirmed
+   rather than left blank, and every create has a `ready: true` preflight
+   (or a recorded override) in Schema evidence.
 3. **Persist it — in the session's actual working directory.** Write the
    spec file to `./qkeee-erp-specs/<slug>-<YYYYMMDD-HHMM>.md`, resolved
    relative to whatever directory this session is actually running in:
@@ -106,18 +115,38 @@ unreviewed multi-step write costs a lot.
    non-negotiable in `00-conventions.md` still apply in full — the spec
    sequences the work, it doesn't relax save-draft-then-review-then-submit,
    the write-allowlist gate, or anything else already enforced in
-   `scripts/core/client.py`. **Done when:** every technical step has run,
-   or is marked deviated-with-reason in the spec file — never silently
-   skipped.
-7. **Close out.** Append a short "Outcome" section to the same spec file
-   (what actually happened, any deviation from plan and why) before
-   telling the user the task is done. Leave the file in place — it's the
-   audit trail for this task, not deleted on success. Working-scratch
-   files are disposable across *sessions* (`01-connectivity.md`), not
-   mid-task. Tell the user per `00-conventions.md`'s
-   `## Report-back` contract, not a free-form summary. **Done when:** the
-   Outcome section is appended to the spec file, before — not after —
-   telling the user the task is done.
+   `scripts/core/client.py`. Run exactly the calls in Exact calls.
+   - **Any change to an approved value is a deviation.** Log it under
+     Deviations (what, why, who agreed) and re-confirm with the user
+     before the write that uses it. There is no silent fix-up step: "the
+     Link didn't resolve, so update that field" changes data outside what
+     was approved.
+   - **A structured failure stops the step.** When `execute_write.py`
+     prints `{"write_failure": {error_class, missing_fields,
+     invalid_links, message}}`, stop. Show the user the missing or
+     invalid fields, ask for the values, update the spec, re-confirm.
+     Never fill a value the user did not give, and never retry blind.
+   - **A batch stops at the first failure.** Run several writes as one
+     `execute_write.py --batch`. On a failure, nothing after it runs.
+     Report every step as a table: created, failed, not attempted.
+   **Done when:** every technical step has run, or is marked
+   deviated-with-reason in the spec file — never silently skipped.
+7. **Close out.** Before telling the user the task is done:
+   1. Reconcile Risks / open questions: close, update or carry forward
+      each one. A risk that says "the user must confirm" after the user
+      confirmed is stale; strike it.
+   2. Append Outcome, shaped by `00-conventions.md`'s Report-back items
+      1–4: warnings first; a records table (doctype, name, action,
+      docstatus, and for a non-submittable doctype the word "live");
+      "Deviations: none" or the list; the audit status per write
+      (`_audit_log_status`); open follow-ups (gaps, pending skills,
+      teardown due).
+   Leave the file in place — it's the audit trail for this task, not
+   deleted on success. Working-scratch files are disposable across
+   *sessions* (`01-connectivity.md`), not mid-task. Tell the user per
+   the same Report-back contract, not a free-form summary. **Done when:**
+   Risks are reconciled and the Outcome section is appended to the spec
+   file, before — not after — telling the user the task is done.
 
 ## Autonomous mode
 
@@ -156,20 +185,58 @@ Numbered, high-level. Each line maps to one or more technical steps below.
 
 ## Functional steps
 What happens in ERPNext terms — doctypes touched, records read/created/
-updated/submitted, reports run, any approval/workflow implication.
+updated/submitted, reports run, any approval/workflow implication. Say
+"draft" only for docstatus 0 on a submittable doctype; a non-submittable
+record is "saved" and live on save (`00-conventions.md`).
 
-## Technical steps
-The actual calls: which `core/client.py` or `domains/<slug>.py`
-functions, in order, with the doctype/filters/payload shape. Note where a
-field/doctype shape still needs live confirmation via `discover.py`
-(`01-connectivity.md`) before the call can be finalized.
+## Schema evidence
+Per doctype written, from `discover.py preflight` (paste the result, or
+these lines from it):
+- Meta source: getdoctype | bare_doctype; custom_fields_merged: true|false
+  (false: the user's override, quoted)
+- Mandatory fields, each with the value set (or "filled by default/fetch")
+- Conditional mandatory fields, each confirmed with the user
+- Naming: autoname, series used, settings rule (e.g. HR Settings emp_created_by)
+- Workflow: none active | <name> (and what the user agreed)
+- ready: true (or the blockers and how each was resolved)
+Field counts ("129 fields") carry no decision: leave them out.
+
+## Side effects
+What each write triggers downstream (e.g. an Active Employee enters
+payroll, attendance, leave allocation, headcount reports and birthday
+reminders).
+
+## Idempotency
+The query run before create to find an existing matching record, and
+its result. A re-run of this spec must not create duplicates.
+
+## Rollback
+How to undo each write (delete, cancel, set a status), the exact call,
+and who may run it.
+
+## Teardown (demo/test data only)
+The query that finds the records (name prefix, `qkeee-demo` tag) and the
+action that removes them — `00-conventions.md`'s Demo and test data.
+
+## Exact calls
+Per write: the full `execute_write.py` command (or the `--batch` step)
+and the payload JSON, exactly as it will run. Nothing is decided at
+execution time.
 
 ## Risks / open questions
 Anything ambiguous, anything requiring a double-confirm
 (`00-conventions.md`'s GRC baseline), anything dependent on an
-unconfirmed assumption.
+unconfirmed assumption. Reconciled at close-out: closed, updated or
+carried forward.
+
+## Deviations
+"None", or each change to an approved value: what, why, who re-confirmed.
 
 ## Outcome (filled in at close-out)
-What happened, any deviation from plan and why, links/names of records
-touched.
+Report-back items 1–4 (`00-conventions.md`): warnings first; records
+table (doctype | name | action | docstatus, "live" for non-submittable);
+"Deviations: none" or the list; audit status per write; open follow-ups.
 ```
+
+A worked example, the 2026-10-07 DEMO_ERP spec rewritten to this
+template: `references/examples/spec-demo-employees.md`.
