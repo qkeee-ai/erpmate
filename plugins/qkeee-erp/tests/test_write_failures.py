@@ -6,13 +6,10 @@ only on save. When ERPNext rejects a write, the agent gets one structured
 object instead of raw Frappe text, so it asks the user instead of guessing
 a fix. A batch stops at the first failure and reports every step."""
 
-import contextlib
-import io
 import json
 import unittest
 from unittest.mock import patch
 
-from qkeee_erp_plugin.qkeee_erp import execute_write
 import testsupport
 from qkeee_erp_plugin.qkeee_erp.core import client as core_client
 from qkeee_erp_plugin.qkeee_erp.core import operations
@@ -128,17 +125,15 @@ class StructuredFailureInPipelineTests(_PipelineMixin, unittest.TestCase):
 
     def test_cli_prints_the_object_as_json_on_failure(self):
         self.mutate_results(FIXTURES["LinkValidationError"][0])
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = execute_write.main([
-                "--tag", "t", "--mode", "read-write", "--requested-by", testsupport.REQ,
-                "--domain", "hr_payroll", "--doctype", "Employee", "--action", "create",
-                "--payload", '{"first_name": "Demo", "department": "Engg"}',
-                "--session-id", "S", "--channel-metadata", "{}", "--latest-prompt", "p"])
-        self.assertEqual(code, execute_write.EXIT_ERROR)
-        printed = json.loads(out.getvalue())
+        code, out, err = testsupport.run_operator_cli([
+            "execute-write", "--op", "hr_payroll.generic", "--requested-by", testsupport.REQ,
+            "--args", json.dumps({"doctype": "Employee", "action": "create",
+                                  "payload": {"first_name": "Demo", "department": "Engg"}}),
+            "--latest-prompt", "p"])
+        self.assertEqual(code, 1)
+        printed = json.loads(out)
         self.assertEqual(printed["write_failure"], FIXTURES["LinkValidationError"][1])
-        self.assertIn("Never fill a value the user did not give", err.getvalue())
+        self.assertIn("Never fill a value the user did not give", err)
 
 
 class BatchStopRuleTests(_PipelineMixin, unittest.TestCase):
@@ -178,14 +173,11 @@ class BatchStopRuleTests(_PipelineMixin, unittest.TestCase):
 
     def test_cli_batch_prints_the_report_and_exits_with_the_failing_steps_code(self):
         self.mutate_results("A", FIXTURES["ValidationError"][0], "C")
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = execute_write.main([
-                "--tag", "t", "--mode", "read-write", "--requested-by", testsupport.REQ,
-                "--batch", json.dumps(self.STEPS),
-                "--session-id", "S", "--channel-metadata", "{}", "--latest-prompt", "p"])
-        self.assertEqual(code, execute_write.EXIT_ERROR)
-        report = json.loads(out.getvalue())
+        code, out, _ = testsupport.run_operator_cli([
+            "execute-write", "--batch", json.dumps(self.STEPS), "--requested-by", testsupport.REQ,
+            "--latest-prompt", "p"])
+        self.assertEqual(code, 1)
+        report = json.loads(out)["result"]
         self.assertEqual([r["status"] for r in report["steps"]],
                          ["succeeded", "failed", "not_attempted"])
 
@@ -200,26 +192,16 @@ class BatchStopRuleTests(_PipelineMixin, unittest.TestCase):
         self.assertEqual(approved, [True, False])
 
     def test_cli_batch_refuses_a_batch_level_user_approved(self):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                code = execute_write.main([
-                    "--tag", "t", "--mode", "read-write", "--requested-by", testsupport.REQ,
-                    "--batch", json.dumps(self.STEPS), "--user-approved"])
-            except SystemExit as e:
-                code = e.code
-        self.assertEqual(code, execute_write.EXIT_USAGE)
+        code, _, _ = testsupport.run_operator_cli([
+            "execute-write", "--batch", json.dumps(self.STEPS), "--user-approved",
+            "--requested-by", testsupport.REQ])
+        self.assertEqual(code, 2)
 
     def test_cli_batch_cannot_be_combined_with_a_single_op(self):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                code = execute_write.main([
-                    "--tag", "t", "--mode", "read-write", "--requested-by", testsupport.REQ,
-                    "--batch", json.dumps(self.STEPS), "--op", "hr_payroll.generic"])
-            except SystemExit as e:
-                code = e.code
-        self.assertEqual(code, execute_write.EXIT_USAGE)
+        code, _, _ = testsupport.run_operator_cli([
+            "execute-write", "--batch", json.dumps(self.STEPS), "--op", "hr_payroll.generic",
+            "--requested-by", testsupport.REQ])
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

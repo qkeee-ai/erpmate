@@ -318,7 +318,7 @@ def build_promotion_plan(env_tag: str, findings: dict, *,
             created qkeee-erp-learned/<env-tag> this session — plan uses
             write_file for every reference instead of create+write_file,
             since skill_manage(create) refuses a name collision.
-        gaps: the `gaps[]` from `client.py health` (and any preflight)
+        gaps: the `gaps[]` from `erp_discover health` (and any preflight)
             still open. Non-empty -> environment.md says
             `catalog_complete: false` and lists them, and the breadcrumb
             says PARTIAL (issue 09).

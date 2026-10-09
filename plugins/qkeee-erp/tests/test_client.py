@@ -147,38 +147,6 @@ class PersonaDoctypeRemovedTests(unittest.TestCase):
     def test_persona_doctype_constant_does_not_exist(self):
         self.assertFalse(hasattr(ec, "PERSONA_DOCTYPE"))
 
-    def test_register_persona_not_a_cli_subcommand(self):
-        # argparse raises SystemExit(2) for an unrecognized subcommand —
-        # confirm "register-persona" is one, not just that it errors for
-        # some other reason (e.g. a missing required flag).
-        with patch("sys.argv", ["client.py", "--tag", "default", "register-persona",
-                                 "--domain-code", "x"]), \
-                patch("sys.stderr", new_callable=__import__("io").StringIO) as mock_stderr:
-            with self.assertRaises(SystemExit):
-                ec._cli()
-        self.assertIn("invalid choice", mock_stderr.getvalue())
-        self.assertIn("register-persona", mock_stderr.getvalue())
-
-
-class ReadCliExitCodeTests(unittest.TestCase):
-    """The read CLI uses execute_write.py's exit contract: 3 = refused by a
-    gate (nothing sent), 1 = any other error. Live (DEMO_ERP 2026-10-06) a
-    read RBAC refusal exited 1, indistinguishable from an ERPNext error."""
-
-    def _run(self, exc):
-        with patch("sys.argv", ["client.py", "--tag", "t", "--requested-by", "a@b.c",
-                                "query", "Purchase Order"]),                 patch.object(ec, "query_resource", side_effect=exc),                 patch("sys.stderr", new_callable=__import__("io").StringIO):
-            with self.assertRaises(SystemExit) as cm:
-                ec._cli()
-        return cm.exception.code
-
-    def test_gate_refusal_exits_3(self):
-        self.assertEqual(self._run(ec.UnvalidatedProdRequesterError("no")), 3)
-
-    def test_other_connector_error_exits_1(self):
-        self.assertEqual(self._run(ec.ConnectorError("boom")), 1)
-
-
 class AuditLogDomainCodeTests(unittest.TestCase):
     """Qkeee Bot Audit Log's `domain_code` field — a denormalized string
     naming the active qkeee-erp-associate domain reference (e.g.

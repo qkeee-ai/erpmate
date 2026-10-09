@@ -1,6 +1,6 @@
 """ERPNext plugin tools (requester identity binding, issue 04): the requester
 comes only from the gateway session (or a Kanban task's recorded origin),
-never from a tool argument; mode comes from the profile's skill config."""
+never from a tool argument; mode comes from the plugin settings."""
 
 import json
 import os

@@ -15,13 +15,14 @@ Env/credential model (tagged, not fixed dev/test/qa/prod):
   QKEEE_ERP_<TAG>_API_SECRET
 
 <TAG> defaults to "DEFAULT" if the user didn't name one at install.
-Active tag + read-only/read-write mode stay non-secret and live in
-metadata.hermes.config (qkeee_erp.active_env, qkeee_erp.mode) — those two
-are deliberately still global: an environment switch should never silently
+Active tag + read-only/read-write mode stay non-secret and live in the
+plugin's own settings (plugins.entries.qkeee-erp.settings.active_env,
+.mode; plugins/qkeee-erp/settings.py) — those two are deliberately still
+global: an environment switch should never silently
 also change write access.
 
 There is deliberately no env-var or config default for `requested_by`
-(no `QKEEE_ERP_<TAG>_REQUESTED_BY`, no metadata.hermes.config key). A
+(no `QKEEE_ERP_<TAG>_REQUESTED_BY`, no config key). A
 standing default is a stale-identity trap — it silently attributes every
 call to whoever configured it, long after they've stopped being the
 person actually asking. `requested_by` is resolved fresh, every call,
@@ -103,7 +104,6 @@ core/operations.py — the dependency runs one way only. It has no public
 write function of its own.
 """
 
-import argparse
 import http.client
 import json
 import os
@@ -288,7 +288,7 @@ class GateRefusal(ConnectorError):
 
 
 class ReadOnlyModeError(GateRefusal):
-    """Raised when a write call is attempted while qkeee_erp.mode == read-only."""
+    """Raised when a write call is attempted while the plugin setting mode == read-only."""
 
 
 class MissingRequesterError(GateRefusal):
@@ -415,7 +415,7 @@ class UnconfirmedByUserError(GateRefusal):
 
 class ConfirmationRequiredError(GateRefusal):
     """Raised when an operation needs a confirmation_token + issued_at and
-    none was given — render it first (confirm_token.py render)."""
+    none was given — render it first (erp_execute_write phase render)."""
 
 
 class TokenMismatchError(GateRefusal):
@@ -585,7 +585,7 @@ def resolve_requested_by(cli_value: str) -> str:
     execute_write.py and confirm_token.py.
 
     There is no tag-level or config default to fall back to — every prior
-    fallback (QKEEE_ERP_<TAG>_REQUESTED_BY, any metadata.hermes.config key)
+    fallback (QKEEE_ERP_<TAG>_REQUESTED_BY, any config key)
     has been removed. The two sources are the channel's own authenticated
     sender and --requested-by on THIS call:
 
@@ -810,7 +810,7 @@ def service_account_identities(tag: str) -> list:
             raise SelfEscalationError(
                 f"Refusing: the {label} Account's identity on tag '{tag}' could not be resolved, so "
                 f"this write can't be checked for self-escalation (agents ADR 0003). Nothing was "
-                f"sent. Check `client.py --tag {tag} health`, or make the change in the ERPNext UI.")
+                f"sent. Check `erp_discover health` (tag {tag}), or make the change in the ERPNext UI.")
         accounts.append({"user": user, "roles": set(identity.get("roles") or [])})
     return accounts
 
@@ -1253,7 +1253,7 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
             raise DoctypeNotFoundError(
                 f"Refusing this call on tag '{tag}': DocType '{doctype}' does not exist on this "
                 f"instance — the app that provides it is probably not installed (check "
-                f"`discover.py modules`). Nothing was sent. This is not a permission problem; "
+                f"`erp_discover modules`). Nothing was sent. This is not a permission problem; "
                 f"tell the user this capability isn't available on this ERPNext.")
         _log(False, {"path": "local_role_docperm_fallback", "reason": "inconclusive"})
         raise UnvalidatedProdRequesterError(
@@ -1266,7 +1266,7 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
             f"attests this write's shape was reviewed ahead of time, never that "
             f"'{requested_by}' can actually do it — neither is trusted to rescue an "
             f"unverifiable requester permission by itself. Provision a bot account that can "
-            f"read User/DocType metadata (see init_bot.py / 00-conventions.md), or restore a "
+            f"read User/DocType metadata (see `hermes qkeee-erp init-bot` / 00-conventions.md), or restore a "
             f"working has_permission RPC, to unblock writes on this tag. {_NEVER_SUBSTITUTE_REQUESTER}"
         )
     allowed = check_user_permission(tag, doctype, perm_type, requested_by, docname)
@@ -1512,14 +1512,14 @@ BOT_ROLE_NAME = "Qkeee Bot"
 _CAPABILITY_PROBES = (
     ("module_def_read", "/api/resource/Module Def",
      {"fields": '["name"]', "limit_page_length": 1}, "Module Def", "read",
-     "discover.py modules/resolve cannot map a DocType to its app; the environment "
+     "erp_discover modules/resolve cannot map a DocType to its app; the environment "
      "catalog stays partial"),
     ("installed_apps", "/api/method/frappe.utils.change_log.get_versions", None,
      "frappe.utils.change_log.get_versions", "call",
-     "discover.py apps cannot list installed apps and versions; use discover.py modules"),
+     "erp_discover apps cannot list installed apps and versions; use erp_discover modules"),
     ("merged_meta", "/api/method/frappe.desk.form.load.getdoctype", {"doctype": "User"},
      "frappe.desk.form.load.getdoctype", "call",
-     "discover.py meta cannot read merged meta (custom fields, property setters); "
+     "erp_discover meta cannot read merged meta (custom fields, property setters); "
      "preflight cannot confirm mandatory fields"),
     ("workflow_read", "/api/resource/Workflow",
      {"fields": '["name"]', "limit_page_length": 1}, "Workflow", "read",
@@ -1538,7 +1538,7 @@ _ROLE_GAP_PROMPT = (
 def make_gap(*, tag: str, base_url: str, capability: str, who: str, user: str, role: str,
              doctype: str, perm: str, effect: str, grant_steps: str = None,
              error: str = None) -> dict:
-    """One permission gap, in the shape `health` and `discover.py preflight`
+    """One permission gap, in the shape `health` and `erp_discover preflight`
     both return. `prompt` is the role-gap prompt (00-conventions.md),
     already filled in: the agent shows it as is and never paraphrases."""
     if grant_steps is None:
@@ -1624,7 +1624,7 @@ def health_check(tag: str = "default") -> dict:
             f"only on a confirmed grant — an allowlist or a confirmation token never rescues "
             f"an unverified requester. The fallback can't see User Permissions or if_owner "
             f"rows. Provision a narrow-role dedicated bot account to restore the real check — "
-            f"see init_bot.py / 00-conventions.md."
+            f"see `hermes qkeee-erp init-bot` / 00-conventions.md."
         )
     return out
 
@@ -2434,153 +2434,3 @@ def discover_harness_http_tool() -> dict:
     harness-native HTTP-capable tool before shelling out to this script.
     Returns a map describing what this script assumes (nothing pre-discovered)."""
     return {"harness_http_tool_detected": False, "fallback": "urllib (this script)"}
-
-
-def _parse_json_arg(flag: str, raw: str, expected_type: type):
-    """Parse a CLI flag's JSON value, raising a clean ConnectorError (not a
-    raw traceback) on malformed JSON, and a clean error on the right-shaped-
-    but-wrong-type JSON. `expected_type` is `list` or `dict`."""
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as e:
-        example = '["name","email"]' if expected_type is list else '{"company": "Acme"}'
-        raise ConnectorError(
-            f"{flag} must be valid JSON, e.g. {flag} '{example}' - got: {raw!r} ({e})"
-        )
-    if not isinstance(value, expected_type):
-        raise ConnectorError(f"{flag} must be a JSON {expected_type.__name__} - got: {raw!r}")
-    return value
-
-
-def _cli():
-    """Manual/debug CLI for the core connector: read-only subcommands only
-    (health, list-envs, whoami, query, get, report, roles).
-
-    There is deliberately no write subcommand here. Every write goes
-    through scripts/execute_write.py, which imports every domain module
-    (so allowlists and token gates are registered), applies schema
-    mapping, and warns on missing audit context. The former `mutate`
-    subcommand wrote with no allowlist and
-    no token, and `gated-mutate` duplicated execute_write.py's domain-less
-    path without its checks - both removed (write-path hardening, W04/D4)."""
-    p = argparse.ArgumentParser(description="qkeee-erp-associate core connector CLI")
-    p.add_argument("--tag", help="environment tag, from qkeee_erp.active_env (required for health/query/get/report/roles)")
-    p.add_argument("--requested-by",
-                   help="ERPNext user id/email of the human requesting the change, for THIS call "
-                        "only — resolve it from the live inbound channel identity (chat/email "
-                        "sender) before passing it here; there is no env-var or config default "
-                        "to fall back on, mandatory on every read")
-    p.add_argument("--session-id", help="plain string correlator threaded into Qkeee Bot Audit Log rows")
-    p.add_argument("--domain-code", help="e.g. qkeee-erp-associate — threaded into audit rows")
-    p.add_argument("--channel", help="conversation surface, e.g. Discord/Telegram/WhatsApp/Email/Web/Slack/CLI/API/Other")
-    p.add_argument("--channel-metadata", help='JSON object of channel-specific tracing detail')
-    p.add_argument("--prompt-summary", help="one-line summary of the user request that led to this "
-                                             "call — threaded into Qkeee Bot Audit Log rows")
-    p.add_argument("--latest-prompt", help="verbatim most-recent user prompt from the driving chat "
-                                            "session — threaded into Qkeee Bot Audit Log rows")
-    sub = p.add_subparsers(dest="command", required=True)
-
-    sub.add_parser("health")
-    sub.add_parser("list-envs")
-    sub.add_parser("whoami", help="Print the gateway session identity this process sees (no network call)")
-
-    q = sub.add_parser("query")
-    q.add_argument("doctype")
-    q.add_argument("--filters", help="JSON list, e.g. '[[\"status\",\"=\",\"Open\"]]'")
-    q.add_argument("--fields", help="JSON list, e.g. '[\"name\",\"status\"]'")
-    q.add_argument("--limit", type=int, default=20)
-
-    g = sub.add_parser("get", help="Single-resource full-doc GET (includes child tables) — noise-stripped by default")
-    g.add_argument("doctype")
-    g.add_argument("name")
-    g.add_argument("--no-strip", action="store_true", help="skip noise-stripping, return the raw doc verbatim")
-
-    r = sub.add_parser("report", help="Run a built-in ERPNext report (e.g. 'Accounts Receivable')")
-    r.add_argument("report_name")
-    r.add_argument("--filters", help="JSON object, e.g. '{\"company\":\"Acme\"}'")
-
-    ur = sub.add_parser("roles", help="Fetch a user's assigned roles (authority-check heuristic)")
-    ur.add_argument("--user", default="", help="defaults to the authenticated bot account's own user")
-
-    args = p.parse_args()
-
-    if args.command in ("health", "query", "get", "report", "roles") and not args.tag:
-        p.error(f"--tag is required for '{args.command}'")
-    if args.command in ("query", "get", "report", "roles") and not args.session_id:
-        args.session_id = _session_or_fallback(None)
-
-    # requested_by is mandatory on every read/write, on every tag — no
-    # env-var or config default exists to fall back to. Bound to the
-    # gateway session's sender when there is one. See resolve_requested_by().
-    try:
-        effective_requested_by = resolve_requested_by(args.requested_by)
-    except GateRefusal as e:
-        print(f"ERROR: refused, nothing was sent: {e}", file=sys.stderr)
-        sys.exit(3)
-
-    if args.command in ("query", "get", "report") and not effective_requested_by:
-        p.error(
-            f"--requested-by is required for '{args.command}' — there is no env-var or "
-            f"config default. Resolve the inbound channel identity (the requesting "
-            f"user's own work email/chat identity) as a real ERPNext User and pass it "
-            f"explicitly."
-        )
-
-    try:
-        channel_metadata = _parse_json_arg("--channel-metadata", args.channel_metadata, dict)
-        if args.command == "health":
-            print(json.dumps(health_check(args.tag), indent=2))
-        elif args.command == "list-envs":
-            print(json.dumps({"configured_tags": list_configured_tags()}, indent=2))
-        elif args.command == "whoami":
-            print(json.dumps(session_identity(), indent=2))
-        elif args.command == "query":
-            filters = _parse_json_arg("--filters", args.filters, list)
-            fields = _parse_json_arg("--fields", args.fields, list)
-            print(json.dumps(query_resource(args.tag, args.doctype, filters, fields, args.limit,
-                                             session_id=args.session_id,
-                                             domain_code=args.domain_code,
-                                             requested_by=effective_requested_by,
-                                             channel=args.channel, channel_metadata=channel_metadata,
-                                             prompt_summary=args.prompt_summary,
-                                             latest_prompt=args.latest_prompt), indent=2))
-        elif args.command == "get":
-            print(json.dumps(get_resource(args.tag, args.doctype, args.name, not args.no_strip,
-                                           session_id=args.session_id,
-                                           domain_code=args.domain_code,
-                                           requested_by=effective_requested_by,
-                                           channel=args.channel, channel_metadata=channel_metadata,
-                                           prompt_summary=args.prompt_summary,
-                                           latest_prompt=args.latest_prompt), indent=2))
-        elif args.command == "report":
-            filters = _parse_json_arg("--filters", args.filters, dict)
-            print(json.dumps(run_query_report(args.tag, args.report_name, filters,
-                                               session_id=args.session_id,
-                                               domain_code=args.domain_code,
-                                               requested_by=effective_requested_by,
-                                               channel=args.channel, channel_metadata=channel_metadata,
-                                               prompt_summary=args.prompt_summary,
-                                               latest_prompt=args.latest_prompt), indent=2))
-        elif args.command == "roles":
-            # Not in the --requested-by-mandatory list above (deliberate):
-            # this is the RBAC-computing primitive itself, so it can't
-            # depend on having already passed the gate it feeds.
-            # requested_by here is attribution only (who's asking to see
-            # the roles), threaded through so a real business-intent
-            # lookup gets a real Audit Log row — not required.
-            print(json.dumps(get_user_roles(args.tag, args.user,
-                                             requested_by=effective_requested_by,
-                                             session_id=args.session_id,
-                                             domain_code=args.domain_code,
-                                             channel=args.channel, channel_metadata=channel_metadata,
-                                             prompt_summary=args.prompt_summary,
-                                             latest_prompt=args.latest_prompt), indent=2))
-    except GateRefusal as e:  # same exit contract as execute_write.py: 3 = refused, nothing sent
-        print(f"ERROR: refused, nothing was sent: {e}", file=sys.stderr)
-        sys.exit(3)
-    except ConnectorError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
-

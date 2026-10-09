@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-qkeee-erp-associate core — confirmation-token primitives, and the RENDER
-CLI that computes a token for any registered write operation.
+qkeee-erp core — confirmation-token primitives.
 
 A gated write is two steps, never one turn:
 
-1. **Render** — `confirm_token.py render --op <key> --args '<json>' ...`
-   prepares the EXACT request the operation will send (schema mapping,
-   defaults, live facts such as the record's `modified`) and prints it,
-   together with the full `args` to pass back, a `confirmation_token`, its
-   `issued_at`, and a 6-character `confirmation_code`. The agent shows the
-   prepared request and the code to the user.
-2. **Execute** — after the user's own reply containing the code,
-   `execute_write.py --op <key> --args '<printed args>'
-   --confirmation-token ... --issued-at ... --user-confirmation-text
-   '<their reply>'`. The pipeline re-prepares the request, recomputes the
-   token over it (core/operations.py operation_token()) and refuses on any
-   difference.
+1. **Render** — `erp_execute_write` phase `render` (Operator:
+   `hermes qkeee-erp render`) prepares the EXACT request the operation
+   will send (schema mapping, defaults, live facts such as the record's
+   `modified`) and returns it, together with the full `args` to pass back,
+   a `confirmation_token`, its `issued_at`, and a 6-character
+   `confirmation_code`. The agent shows the prepared request and the code
+   to the user.
+2. **Execute** — after the user's own reply containing the code, phase
+   `execute` with the returned args unchanged, the token, `issued_at` and
+   the reply as `user_confirmation_text`. The pipeline re-prepares the
+   request, recomputes the token over it (core/operations.py
+   operation_token()) and refuses on any difference.
 
 This module owns the primitives:
   - compute_token(**fields)  — deterministic hash over arbitrary facts.
@@ -32,7 +31,6 @@ hardening ticket 07.)
 
 import hashlib
 import json
-import sys
 import time
 
 # 15 minutes: long enough to cover a realistic render-then-confirm human
@@ -83,57 +81,3 @@ def confirmation_code(token: str) -> str:
     user MUST display this code and ask them to include it in their
     reply, e.g. "reply 'yes 3F0A9C' to confirm"."""
     return token[:6].upper()
-
-
-def _cli():
-    """`render`: prepare a registered operation's exact request and print
-    it with its confirmation token — see the module docstring."""
-    import argparse
-
-    from .. import execute_write  # noqa: F401 — imports every domain module (registers operations)
-    from . import operations
-    from .client import (ConnectorError, InvalidArgumentsError, _parse_json_arg,
-                             resolve_requested_by)
-
-    p = argparse.ArgumentParser(description="Render a write operation for user confirmation.")
-    sub = p.add_subparsers(dest="command", required=True)
-    r = sub.add_parser("render", help="prepare the exact request and print token + code")
-    r.add_argument("--op", required=True, help="operation key, see `execute_write.py --list-ops`")
-    r.add_argument("--args", default="{}", help="JSON object of the operation's arguments")
-    r.add_argument("--tag", required=True)
-    r.add_argument("--requested-by", required=True,
-                   help="the requester the token is bound to — the same value the execute step uses")
-    r.add_argument("--session-id")
-    r.add_argument("--domain-code", default="qkeee-erp-associate")
-    r.add_argument("--channel")
-    r.add_argument("--channel-metadata")
-    r.add_argument("--prompt-summary")
-    r.add_argument("--latest-prompt")
-    a = p.parse_args()
-
-    try:
-        op_args = _parse_json_arg("--args", a.args, dict) or {}
-        ctx = operations.WriteContext(
-            tag=a.tag, requested_by=resolve_requested_by(a.requested_by),
-            session_id=a.session_id, domain_code=a.domain_code, channel=a.channel,
-            channel_metadata=_parse_json_arg("--channel-metadata", a.channel_metadata, dict),
-            prompt_summary=a.prompt_summary, latest_prompt=a.latest_prompt,
-        )
-        out = operations.prepare_only(a.op, op_args, ctx)
-    except InvalidArgumentsError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-    except ConnectorError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(3)
-    for note in out.get("notes", []):
-        print(f"WARN: {note}", file=sys.stderr)
-    if out["policy"] == operations.POLICY_NONE:
-        out["_note"] = "This operation needs no confirmation token for these args."
-    else:
-        out["_note"] = ("Show `request` and `confirmation_code` to the user. Execute with "
-                        "execute_write.py --op <op> --args '<args above, unchanged>' "
-                        "--confirmation-token/--issued-at as printed and "
-                        "--user-confirmation-text '<the user's own reply>'.")
-    print(json.dumps(out, indent=2, default=str))
-

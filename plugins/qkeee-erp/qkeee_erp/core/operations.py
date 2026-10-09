@@ -44,7 +44,7 @@ gates, and several tokens weren't bound to what was actually sent.
 prepare_only() runs steps 1-2 (plus the operation's render_defaults, which
 fill live facts such as `expected_modified`) and returns the prepared
 request, the full args to pass back unchanged, and the token +
-confirmation code. `confirm_token.py render` is its CLI.
+confirmation code. erp_execute_write phase `render` runs it.
 """
 
 import dataclasses
@@ -188,8 +188,8 @@ class Operation:
     # CLI op, and limited to the fixed read rows in doctype_defs.py.
     self_escalation_exempt: bool = False
     args_help: dict = field(default_factory=dict)
-    # A minimal, valid argument set — printed by `execute_write.py
-    # --list-ops` as the operation's worked example, and driven through
+    # A minimal, valid argument set — printed by erp_execute_write
+    # phase list_ops as the operation's worked example, and driven through
     # every gate by domains/test_operations.py, so it can't silently rot.
     example_args: dict = field(default_factory=dict)
     cli: bool = True
@@ -354,7 +354,7 @@ def _check_ownership(op: Operation, req: PreparedRequest) -> None:
     if owner and owner != op.key:
         raise _c.DoctypeNotAllowedError(
             f"Refusing {req.action} on '{req.doctype}' via {op.key}: it is a gated operation — "
-            f"use '{owner}' (see `execute_write.py --list-ops`)."
+            f"use '{owner}' (see erp_execute_write phase list_ops)."
         )
     if op.domain is None:
         if req.doctype in UNSCOPED_DENY:
@@ -424,7 +424,7 @@ def _check_no_self_escalation(op: Operation, req: PreparedRequest, ctx: WriteCon
 def _check_mode_and_requester(req: PreparedRequest, ctx: WriteContext) -> None:
     if ctx.mode != "read-write":
         raise _c.ReadOnlyModeError(
-            f"Refusing {req.action} on '{req.doctype}': qkeee_erp.mode is '{ctx.mode}', not "
+            f"Refusing {req.action} on '{req.doctype}': the qkeee-erp plugin setting mode is '{ctx.mode}', not "
             f"'read-write'. Switch modes explicitly if this write is intended."
         )
     if not ctx.requested_by:
@@ -897,7 +897,7 @@ def check_not_modified_since_render(req: PreparedRequest, args: dict, ctx: Write
     if not expected:
         raise _c.PreconditionFailedError(
             f"Refusing {req.action} on '{req.doctype}' '{req.name}': expected_modified is missing "
-            f"— render it first (confirm_token.py render fills it from the live record)."
+            f"— render it first (erp_execute_write phase render fills it from the live record)."
         )
     current = _live_modified(ctx, req.doctype, req.name)
     if current != expected:

@@ -30,7 +30,7 @@ bound to the session sender, and every read is audit-logged under them.
 The BOT account needs read on `DocType` (getdoctype) and `Module Def`;
 `init_bot.py` grants the latter to the `Qkeee Bot` role. A bot without
 it gets a real 403 here — a permission gap to report with the role-gap
-prompt (`client.py health` lists it), not a bug in this script.
+prompt (`erp_discover health` lists it), not a bug in this script.
 
 Non-negotiable this script exists to serve: never propose a field/doctype
 that isn't confirmed live on the target instance (Non-negotiable 4,
@@ -40,9 +40,6 @@ shape of an app; only this script's output (backed by
 org's instance actually has.
 """
 
-import argparse
-import json
-import sys
 
 from .core.client import (
     BOT_ROLE_NAME,
@@ -417,76 +414,3 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
         "blockers": blockers,
         "gaps": gaps,
     }
-
-
-def _cli():
-    p = argparse.ArgumentParser(
-        description="qkeee-erp-associate discovery CLI — live DocType/app metadata, "
-                    "never guessed (Non-negotiable 4, 00-conventions.md)."
-    )
-    p.add_argument("--tag", required=True, help="environment tag, from qkeee_erp.active_env")
-    p.add_argument("--requested-by", required=True,
-                   help="ERPNext user id/email of the requester — every read here is gated + "
-                        "audited exactly like core/client.py's own reads, no exceptions")
-    p.add_argument("--session-id", help="plain string correlator threaded into Qkeee Bot Audit Log rows")
-    p.add_argument("--domain-code", default="qkeee-erp-associate/discover",
-                   help="threaded into audit rows")
-    p.add_argument("--channel", help="conversation surface, e.g. Google Chat/Discord/Telegram/"
-                        "WhatsApp/Email/Web/Slack/CLI/API/Other")
-    p.add_argument("--channel-metadata", help="JSON object of channel-specific tracing detail "
-                        "(e.g. the chat space/thread id) — threaded into the audit row so it "
-                        "isn't left blank")
-    p.add_argument("--prompt-summary", help="one-line summary of the user request driving this lookup")
-    p.add_argument("--latest-prompt", help="verbatim most-recent user prompt from the driving chat, if any")
-    sub = p.add_subparsers(dest="command", required=True)
-
-    sub.add_parser("apps", help="installed apps + versions (About-dialog data) — "
-                                 "opportunistic, try 'modules' first")
-    sub.add_parser("modules", help="Module Def rows + apps seen through them (primary app discovery)")
-
-    m = sub.add_parser("meta", help="live field schema for one DocType")
-    m.add_argument("doctype")
-
-    r = sub.add_parser("resolve", help="doctype -> module -> app in one call")
-    r.add_argument("doctype")
-
-    pf = sub.add_parser("preflight", help="write-readiness gate for one create: mandatory, "
-                                          "conditional, naming, workflow, settings checks")
-    pf.add_argument("doctype")
-    pf.add_argument("--payload", help="JSON object: the create payload to check")
-
-    args = p.parse_args()
-    try:
-        channel_metadata = json.loads(args.channel_metadata) if args.channel_metadata else None
-    except json.JSONDecodeError as e:
-        raise SystemExit(f"--channel-metadata must be valid JSON: {e}")
-    payload = None
-    if getattr(args, "payload", None):
-        try:
-            payload = json.loads(args.payload)
-        except json.JSONDecodeError as e:
-            raise SystemExit(f"--payload must be valid JSON: {e}")
-        if not isinstance(payload, dict):
-            raise SystemExit("--payload must be a JSON object")
-
-    kw = dict(
-        requested_by=args.requested_by, session_id=args.session_id, domain_code=args.domain_code,
-        channel=args.channel, channel_metadata=channel_metadata,
-        prompt_summary=args.prompt_summary, latest_prompt=args.latest_prompt,
-    )
-
-    try:
-        if args.command == "apps":
-            print(json.dumps(list_installed_apps(args.tag, **kw), indent=2))
-        elif args.command == "modules":
-            print(json.dumps(list_modules(args.tag, **kw), indent=2))
-        elif args.command == "meta":
-            print(json.dumps(doctype_meta(args.tag, args.doctype, **kw), indent=2))
-        elif args.command == "resolve":
-            print(json.dumps(resolve_doctype(args.tag, args.doctype, **kw), indent=2))
-        elif args.command == "preflight":
-            print(json.dumps(preflight(args.tag, args.doctype, payload=payload, **kw), indent=2))
-    except ConnectorError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
-

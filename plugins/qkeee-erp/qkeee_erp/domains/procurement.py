@@ -116,7 +116,7 @@ def check_kyc(req, args, ctx) -> None:
             return
         raise IncompleteSupplierKYCError(
             "Refusing to create Supplier without KYC: pass kyc={'address': {...}} (fields per "
-            "discover.py meta \"Address\" for this instance, including the tax ID) or — only "
+            "erp_discover meta \"Address\" for this instance, including the tax ID) or — only "
             "when the user has explicitly confirmed proceeding without it — "
             "kyc_waiver_confirmed=True. See references/domains/procurement.md.")
     from .. import schema_mapping

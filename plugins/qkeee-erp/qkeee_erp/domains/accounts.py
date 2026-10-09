@@ -4,7 +4,7 @@ qkeee-erp-associate — accounts domain (AP/AR, Journal Entry, tax).
 
 Writes run as operation "accounts.generic" (core/operations.py): create/
 update land drafts; submit/cancel/delete need a rendered confirmation
-token (`confirm_token.py render --op accounts.generic`) plus the user's
+token (erp_execute_write phase render, op accounts.generic) plus the user's
 confirmation code, and the record must be unchanged since render.
 
 Cross-check ALLOWED_WRITE_DOCTYPES below against

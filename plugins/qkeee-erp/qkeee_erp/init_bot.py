@@ -63,10 +63,8 @@ Usage:
         --confirm-token <token> --issued-at <epoch>
 """
 
-import argparse
 import json
 import os
-import sys
 import time
 
 from .core import client as core_client
@@ -582,25 +580,3 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         "account's roles are fixed."
     )
     return summary
-
-
-def _cli():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--tag", required=True, help="environment tag, from qkeee_erp.active_env")
-    p.add_argument("--requested-by", required=True,
-                   help="ERPNext user id/email running this init (elevated/admin account)")
-    p.add_argument("--dry-run", action="store_true",
-                   help="report what would be created, and print a confirm-token, without writing anything")
-    p.add_argument("--confirm-token", help="token printed by a prior --dry-run")
-    p.add_argument("--issued-at", type=int, help="issued_at epoch seconds printed by a prior --dry-run")
-    args = p.parse_args()
-
-    try:
-        if args.dry_run:
-            run_dry_run(args.tag, args.requested_by)
-        else:
-            run_real(args.tag, args.requested_by, args.confirm_token, args.issued_at)
-    except ConnectorError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
-

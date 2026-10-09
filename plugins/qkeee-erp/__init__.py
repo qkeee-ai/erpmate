@@ -11,6 +11,11 @@ requester origin, and a guard against identity override
 - identity_guard.py: blocks terminal / execute_code calls that override
   HERMES_SESSION_* or reach the ERPNext credentials around the erp_* tools.
 
+- cli.py: the Operator CLI, `hermes -p <profile> qkeee-erp <command>`.
+- settings.py: the plugin's own settings (plugins.entries.qkeee-erp.settings).
+  While the legacy skills.config.qkeee_erp section is present, setup is
+  pending and no erp_* tools register; the hooks always register.
+
 register() never raises: Hermes rolls back every registration of a plugin
 whose register() raises. If the library cannot load, only the identity
 guard is registered and the error is logged.
@@ -25,19 +30,33 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _skill_config() -> dict:
-    """`skills.config.qkeee_erp` from the profile config, read per call."""
-    from hermes_cli.config import load_config
-    cfg = load_config() or {}
-    value = ((cfg.get("skills") or {}).get("config") or {}).get("qkeee_erp") or {}
-    return value if isinstance(value, dict) else {}
+def _profile_config() -> dict:
+    """The profile's config.yaml, read-only (never mutate the result)."""
+    from hermes_cli.config import load_config_readonly
+    return load_config_readonly() or {}
+
+
+def _settings() -> dict:
+    """`plugins.entries.qkeee-erp.settings`, read per call so a change
+    applies to the next tool call."""
+    from . import settings
+    return settings.plugin_settings(_profile_config())
 
 
 def register(ctx) -> None:
-    from . import identity_guard
+    # pytest imports this file outside its package, so relative imports stay
+    # inside functions.
+    from . import cli, identity_guard, settings
 
     # The guard protects; it grants nothing, so it registers first and always.
     ctx.register_hook("pre_tool_call", identity_guard.pre_tool_call)
+    # The Operator CLI registers before the library loads: `setup` must be
+    # reachable exactly when the plugin cannot serve ERP calls.
+    try:
+        ctx.register_cli_command(name=cli.COMMAND, help=cli.HELP, setup_fn=cli.setup_parser,
+                                 handler_fn=cli.OperatorCli(read_config=_profile_config).run)
+    except Exception as e:
+        logger.error("qkeee-erp plugin: Operator CLI not registered: %s", e)
 
     try:
         from hermes_constants import get_hermes_home
@@ -52,13 +71,22 @@ def register(ctx) -> None:
     client.set_session_env_reader(get_session_env)
     client.set_hermes_home_reader(lambda: str(get_hermes_home()))
 
-    tools = erp_tools.ErpTools(settings=_skill_config)
-    for name, schema in erp_tools.SCHEMAS.items():
-        ctx.register_tool(name=name, toolset=erp_tools.TOOLSET, schema=schema,
-                          handler=tools.handler(name), emoji="📒")
-
     hooks = kanban_hooks.KanbanOriginHooks(
         session_env=get_session_env,
         store_path=lambda: kanban_origin.default_store_path(str(get_hermes_home())))
     ctx.register_hook("pre_tool_call", hooks.pre_tool_call)
     ctx.register_hook("post_tool_call", hooks.post_tool_call)
+
+    # Tools grant ERPNext access, so they register only when setup is done.
+    try:
+        pending = settings.setup_pending(_profile_config())
+    except Exception as e:
+        logger.error("qkeee-erp plugin: profile config not readable, no erp_* tools: %s", e)
+        return
+    if pending:
+        logger.warning("qkeee-erp plugin: no erp_* tools: %s", pending)
+        return
+    tools = erp_tools.ErpTools(settings=_settings)
+    for name, schema in erp_tools.SCHEMAS.items():
+        ctx.register_tool(name=name, toolset=erp_tools.TOOLSET, schema=schema,
+                          handler=tools.handler(name), emoji="📒")

@@ -7,8 +7,14 @@
   resource write, without going through prepare().
 - `render()`: operations.prepare_only() with a test context — the same
   render path the CLI uses, so tests exercise render -> execute for real.
+- `run_operator_cli()`: one `hermes qkeee-erp <command>` run (cli.py),
+  without Hermes: returns (exit code, stdout, stderr).
 """
 
+import argparse
+import contextlib
+import copy
+import io
 import unittest.mock
 
 from qkeee_erp_plugin.qkeee_erp.core import operations
@@ -71,3 +77,22 @@ def render(op_key, args, **ctx_kw):
 
 __all__ = ["REQ", "offline_schema", "OfflineSchemaMixin", "generic_token", "ctx", "render",
            "confirmation_code"]
+
+
+OPERATOR_CONFIG = {"plugins": {"entries": {"qkeee-erp": {"settings": {"active_env": "t",
+                                                                       "mode": "read-write"}}}}}
+
+
+def run_operator_cli(argv, config=None):
+    from qkeee_erp_plugin import cli
+    parser = argparse.ArgumentParser(prog="hermes qkeee-erp")
+    cli.setup_parser(parser)
+    cfg = OPERATOR_CONFIG if config is None else config
+    operator = cli.OperatorCli(read_config=lambda: copy.deepcopy(cfg))
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = operator.run(parser.parse_args(argv))
+        except SystemExit as e:
+            code = e.code
+    return code, out.getvalue(), err.getvalue()

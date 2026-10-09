@@ -9,7 +9,8 @@ core/operations.py, discover.py).
   the plugin installs) or, in a Kanban worker, the sender recorded for the
   task's origin. With neither, every tool refuses before any ERPNext call.
 - `mode` (read-only / read-write) is never a tool argument either. It comes
-  from the profile's skill config `skills.config.qkeee_erp.mode`.
+  from the plugin's own settings, `plugins.entries.qkeee-erp.settings.mode`
+  (settings.py).
 - The ERPNext credentials are read by client.py in this process, from
   `<HERMES_HOME>/plugin-data/qkeee-erp/qkeee-erp.env`.
 
@@ -29,7 +30,8 @@ from .qkeee_erp.core import client, operations
 TOOLSET = "qkeee_erp"
 DOMAIN_CODE = "qkeee-erp-associate"
 
-_TAG = {"type": "string", "description": "Environment tag. Omit to use skills.config.qkeee_erp.active_env."}
+_TAG = {"type": "string", "description": "Instance tag. Omit to use the active Instance (erp_discover "
+                                         "health shows its tag and base URL)."}
 _AUDIT = {
     "prompt_summary": {"type": "string", "description": "One-line summary of the user request (audit row)."},
     "latest_prompt": {"type": "string", "description": "The user's most recent message, verbatim (audit "
@@ -110,11 +112,17 @@ def _fail(error: str, **extra) -> str:
 
 
 class ErpTools:
-    """`settings()` returns the skill config {"active_env", "mode"} (read on
-    every call, so a config change applies to the next call)."""
+    """`settings()` returns the plugin settings {"active_env", "mode"} (read
+    on every call, so a config change applies to the next call).
 
-    def __init__(self, settings):
+    `requester()` and `audit(args)` default to the gateway session (sender,
+    chat, thread). The Operator CLI (cli.py) passes its own: the
+    --requested-by value and channel `cli`."""
+
+    def __init__(self, settings, requester=None, audit=None):
         self._settings = settings
+        self._requester = requester or self._session_requester
+        self._audit = audit or self._session_audit
         self._handlers = {
             "erp_query": self._query, "erp_get": self._get, "erp_report": self._report,
             "erp_discover": self._discover, "erp_execute_write": self._execute_write,
@@ -139,21 +147,21 @@ class ErpTools:
             return _fail(f"ERPNext rejected the write: {e.failure.get('message')} — {_STOP_AND_ASK}",
                          write_failure=e.failure)
         except client.InvalidArgumentsError as e:
-            return _fail(f"invalid operation arguments, nothing was sent: {e}")
+            return _fail(f"invalid operation arguments, nothing was sent: {e}", invalid_arguments=True)
         except (client.TransportTimeoutError, client.PartialOutcomeError) as e:
             return _fail(f"outcome unknown or partial: {e} Re-read the record before any retry.",
                          outcome_unknown=True)
         except client.ConnectorError as e:
             return _fail(str(e))
 
-    def _tag(self, args) -> str:
+    def tag(self, args) -> str:
         return args.get("tag") or (self._settings() or {}).get("active_env") or "default"
 
     def _mode(self) -> str:
         return (self._settings() or {}).get("mode") or "read-only"
 
     @staticmethod
-    def _requester() -> str:
+    def _session_requester() -> str:
         requester = client.resolve_requested_by("")
         if requester:
             return requester
@@ -171,7 +179,7 @@ class ErpTools:
             "tell the user to report it to an admin. Do not ask the user who they are.")
 
     @staticmethod
-    def _audit(args) -> dict:
+    def _session_audit(args) -> dict:
         env = client.session_env
         meta = {key: env(name) for key, name in (
             ("chat_id", "HERMES_SESSION_CHAT_ID"), ("thread_id", "HERMES_SESSION_THREAD_ID"),
@@ -193,21 +201,21 @@ class ErpTools:
     def _query(self, args):
         self._need(args, "doctype")
         requester = self._requester()
-        return _ok(client.query_resource(self._tag(args), args["doctype"], args.get("filters"),
+        return _ok(client.query_resource(self.tag(args), args["doctype"], args.get("filters"),
                                          args.get("fields"), int(args.get("limit") or 20),
                                          requested_by=requester, **self._audit(args)))
 
     def _get(self, args):
         self._need(args, "doctype", "name")
         requester = self._requester()
-        return _ok(client.get_resource(self._tag(args), args["doctype"], args["name"],
+        return _ok(client.get_resource(self.tag(args), args["doctype"], args["name"],
                                        not args.get("no_strip"), requested_by=requester,
                                        **self._audit(args)))
 
     def _report(self, args):
         self._need(args, "report_name")
         requester = self._requester()
-        return _ok(client.run_query_report(self._tag(args), args["report_name"], args.get("filters"),
+        return _ok(client.run_query_report(self.tag(args), args["report_name"], args.get("filters"),
                                            requested_by=requester, **self._audit(args)))
 
     def _discover(self, args):
@@ -215,8 +223,8 @@ class ErpTools:
         if action == "whoami":
             return _ok(client.session_identity())
         if action == "health":
-            return _ok(client.health_check(self._tag(args)))
-        tag, requester = self._tag(args), None
+            return _ok(client.health_check(self.tag(args)))
+        tag, requester = self.tag(args), None
         if action in ("roles", "apps", "modules", "meta", "resolve", "preflight"):
             requester = self._requester()
         kw = dict(requested_by=requester, **self._audit(args))
@@ -239,7 +247,7 @@ class ErpTools:
 
     def _context(self, args, requester) -> "operations.WriteContext":
         return operations.WriteContext(
-            tag=self._tag(args), mode=self._mode(), requested_by=requester,
+            tag=self.tag(args), mode=self._mode(), requested_by=requester,
             confirmation_token=args.get("confirmation_token"), issued_at=args.get("issued_at"),
             user_confirmation_text=args.get("user_confirmation_text"),
             user_approved=bool(args.get("user_approved")), approval_note=args.get("approval_note"),

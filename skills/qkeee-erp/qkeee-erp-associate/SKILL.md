@@ -4,13 +4,6 @@ description: "One ERPNext associate: connects, resolves intent, routes to the ri
 metadata:
   hermes:
     tags: [ERPNext, Connector, HR, Accounts, Sales, Procurement, Inventory, Fixed-Assets, System-Admin, MIS, GRC]
-    config:
-      - key: qkeee_erp.active_env
-        prompt: "Which environment tag should this skill target by default?"
-        default: "default"
-      - key: qkeee_erp.mode
-        prompt: "Should this skill be allowed to create/update/submit/cancel records in ERPNext, or strictly read-only?"
-        default: "read-only"
 ---
 
 # qkeee-erp-associate
