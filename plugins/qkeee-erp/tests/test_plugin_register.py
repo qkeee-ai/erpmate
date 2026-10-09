@@ -55,6 +55,9 @@ class RegisterTests(unittest.TestCase):
         config = patch.object(qkeee_erp_plugin, "_profile_config", return_value={})
         config.start()
         self.addCleanup(config.stop)
+        unmet = patch.object(qkeee_erp_plugin, "_setup_unmet", return_value=[])
+        unmet.start()
+        self.addCleanup(unmet.stop)
 
     def test_registers_the_erp_tools_and_hooks(self):
         ctx = FakeCtx()
@@ -82,15 +85,18 @@ class RegisterTests(unittest.TestCase):
             qkeee_erp_plugin.register(ctx)
             self.assertEqual(made.call_args.kwargs["settings"](), {"active_env": "demo", "mode": "read-write"})
 
-    def test_legacy_skill_config_registers_no_tools_until_setup(self):
-        cfg = {"skills": {"config": {"qkeee_erp": {"active_env": "demo", "mode": "read-write"}}}}
+    def test_unmet_setup_registers_no_tools_until_setup(self):
+        reasons = ["S2 plugin config: the profile config still holds skills.config.qkeee_erp",
+                   "P2 terminal backend: terminal.backend is 'local'"]
         ctx = FakeCtx()
-        with patch.object(qkeee_erp_plugin, "_profile_config", return_value=cfg), \
+        with patch.object(qkeee_erp_plugin, "_setup_unmet", return_value=reasons), \
                 self.assertLogs("qkeee_erp_plugin", level="WARNING") as logs:
             qkeee_erp_plugin.register(ctx)
         self.assertEqual(ctx.tools, [])
         self.assertEqual(ctx.cli, ["qkeee-erp"])
-        self.assertIn("hermes qkeee-erp setup", " ".join(logs.output))
+        log = " ".join(logs.output)
+        self.assertIn("qkeee-erp setup status", log)
+        self.assertIn("terminal.backend", log)
         # Hooks protect; they grant nothing, so they register either way.
         self.assertEqual(sorted(h for h, _ in ctx.hooks),
                          ["post_tool_call", "pre_tool_call", "pre_tool_call"])
@@ -110,9 +116,9 @@ class RegisterTests(unittest.TestCase):
                     qkeee_erp_plugin.register(ctx)
                 self.assertEqual(ctx.cli, ["qkeee-erp"])
 
-    def test_unreadable_config_registers_no_tools_and_does_not_raise(self):
+    def test_a_setup_check_error_registers_no_tools_and_does_not_raise(self):
         ctx = FakeCtx()
-        with patch.object(qkeee_erp_plugin, "_profile_config", side_effect=OSError("boom")), \
+        with patch.object(qkeee_erp_plugin, "_setup_unmet", side_effect=OSError("boom")), \
                 self.assertLogs("qkeee_erp_plugin", level="ERROR"):
             qkeee_erp_plugin.register(ctx)
         self.assertEqual(ctx.tools, [])

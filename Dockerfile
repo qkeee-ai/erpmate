@@ -66,8 +66,10 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #                         run after the profile exists
 #   018-hermes-lcm        link + enable the LCM plugin (default + profiles)
 #   018-qkeee-erp-plugin  enable the profile's qkeee-erp plugin (gateway
-#                         ERPNext tools, Kanban requester origin) and move
-#                         qkeee-erp.env to plugin-data/qkeee-erp/
+#                         ERPNext tools, Kanban requester origin)
+#   0185-qkeee-erp-setup  `hermes qkeee-erp setup --apply-profile-fixes`:
+#                         credentials move, plugin settings, toolsets, ssh
+#                         terminal; no erp_* tools until it is complete
 #   019-jev-init          first-boot jev setup: models suggest, doctor, routing
 #   0195-gateway-state    first-boot only: mark the custom profile
 #                         desired_state=running, default desired_state=stopped
@@ -92,10 +94,10 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 COPY docker/defaults/ /opt/defaults/
 RUN chmod -R a+rX,go-w /opt/defaults
 COPY docker/cont-init.d/ /etc/cont-init.d/
-# Globbed in three parts: `01[6-9]-*` does not match the 4-digit 015x/019x
-# names (the `-` has nothing to match against their 4th character).
+# Globbed in four parts: `01[6-9]-*` does not match the 4-digit 015x/0185/
+# 019x names (the `-` has nothing to match against their 4th character).
 RUN set -eu; for f in /etc/cont-init.d/015[5-8]-* /etc/cont-init.d/01[6-9]-* \
-        /etc/cont-init.d/019[5-8]-*; do \
+        /etc/cont-init.d/0185-* /etc/cont-init.d/019[5-8]-*; do \
         sed -i 's/\r$//' "$f" && chmod 0755 "$f"; \
     done
 # Operator maintenance tools (see adminops/README.md). Baked in so they are

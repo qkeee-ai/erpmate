@@ -118,7 +118,7 @@ hermes profile list               # all local profiles, distribution source colu
 
 `hermes profile update` only ever touches what `distribution.yaml`'s `distribution_owned` lists — currently `SOUL.md`, `skills/`, `cron/jobs.json`, `config.yaml`, `mcp.json`. Runtime state (`.env`, `qkeee-erp.env`, `memories/`, `sessions/`, etc.) is never touched by install/update.
 
-**ERP plugin on a host install:** after `profile install` or `profile update`, enable the plugin and run its Operator commands with the profile: `hermes -p <profile> plugins enable qkeee-erp`, then `hermes -p <profile> qkeee-erp --help`. A host (non-Docker) Deployment gets ERP tools only with Isolation (agents ADR 0006); the host runbook is pending (agents `.scratch/qkeee-erp-plugin-profile-split`, issue 12), together with `hermes qkeee-erp setup` (issue 07).
+**ERP plugin on a host install:** after `profile install` or `profile update`, enable the plugin and run its setup: `hermes -p <profile> plugins enable qkeee-erp`, then `hermes -p <profile> qkeee-erp setup` (add `--apply-profile-fixes` to let it set the toolsets and the ssh terminal; `--dry-run` shows the plan). Until `hermes -p <profile> qkeee-erp setup status` shows every item done, the plugin registers no ERP tools. Run `setup` again after every `profile update`. A host (non-Docker) Deployment gets ERP tools only with Isolation (agents ADR 0006); the host runbook is pending (agents `.scratch/qkeee-erp-plugin-profile-split`, issue 12).
 
 Other profile commands (not specific to this repo, general Hermes usage): `hermes profile create`, `hermes profile show`, `hermes profile rename`, `hermes profile delete`, `hermes profile use <name>` (set default), `hermes profile export` / `hermes profile import` (tar.gz, for one-off sharing without git).
 
@@ -165,6 +165,8 @@ s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmark
 | `016-profile-install` | Installs this distribution on first boot; records its skill inventory to `.distribution-skills` |
 | `017-jev-skills` | Runs the jev installer — CLI, `hermes-jev` + `hermes-handoff` plugins, per-profile shims |
 | `018-hermes-lcm` | Links and enables the `hermes-lcm` plugin, sets `context.engine: lcm` |
+| `018-qkeee-erp-plugin` | Enables the profile's `qkeee-erp` plugin |
+| `0185-qkeee-erp-setup` | Runs `hermes qkeee-erp setup --apply-profile-fixes` (credentials move, plugin settings, toolsets, ssh terminal); warns while setup is incomplete. `QKEEE_ERP_SETUP=0` skips |
 | `019-jev-init` | Seeds `<profile>/jev/routing.json`, runs `jev doctor`, writes the routing mode |
 | `0195-gateway-state` | First boot only: marks this profile `desired_state=running` and `default` stopped |
 | `0196-dashboard-auth` | Resolves dashboard auth; mirrors creds into the default home; stops a crash-loop |

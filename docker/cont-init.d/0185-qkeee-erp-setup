@@ -1,0 +1,37 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Run the qkeee-erp plugin's setup for the installed profile:
+#   hermes -p <profile> qkeee-erp setup --apply-profile-fixes
+# Idempotent: each item checks whether its result is already there. It moves
+# a legacy qkeee-erp.env into plugin-data/qkeee-erp/ (S1), moves the legacy
+# skills.config.qkeee_erp settings into the plugin's own section (S2), sets
+# the erpmate toolsets and ssh terminal (P1, P2) and checks the terminal key
+# (S3). Until every item is done the plugin registers no erp_* tools; the
+# Operator sees why with `hermes -p <profile> qkeee-erp setup status`.
+# (agents/.scratch/qkeee-erp-plugin-profile-split, issue 07)
+#
+# Runs after 0157-terminal-ssh (the key), 016-profile-install (the profile)
+# and 018-qkeee-erp-plugin (plugin enabled). Non-fatal. Set
+# QKEEE_ERP_SETUP=0 to skip. Rollback: restore the config.yaml.bak-<UTC>
+# that setup writes before its first config change.
+
+[ "${QKEEE_ERP_SETUP:-1}" = "0" ] && { echo "[qkeee-erp-setup] disabled via QKEEE_ERP_SETUP=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+NAME="$(cat /run/hermes-profile-name 2>/dev/null)"
+[ -n "$NAME" ] || { echo "[qkeee-erp-setup] no installed profile name (016 skipped?); skipping"; exit 0; }
+DIR="$HERMES_HOME/profiles/$NAME"
+
+if [ ! -f "$DIR/plugins/qkeee-erp/plugin.yaml" ]; then
+    echo "[qkeee-erp-setup:$NAME] $DIR/plugins/qkeee-erp missing; skipping (see 018-qkeee-erp-plugin)" >&2
+    exit 0
+fi
+
+run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
+
+run hermes -p "$NAME" qkeee-erp setup --apply-profile-fixes 2>&1 | sed "s/^/[qkeee-erp-setup:$NAME] /"
+if ! run hermes -p "$NAME" qkeee-erp setup status >/dev/null 2>&1; then
+    echo "[qkeee-erp-setup:$NAME] WARNING: setup not complete; no ERPNext tools until it is." >&2
+    echo "[qkeee-erp-setup:$NAME]   See: hermes -p $NAME qkeee-erp setup status" >&2
+fi
+exit 0

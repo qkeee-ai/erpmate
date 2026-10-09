@@ -1323,8 +1323,8 @@ def _qkeee_env_file_path() -> str:
     qkeee-erp.env`. The agent reaches ERPNext only through the plugin's
     tools; with the terminal on its own backend (agents ADR 0002) the
     terminal cannot read this file. The old `<HERMES_HOME>/qkeee-erp.env`
-    is read only while the new file does not exist yet (cont-init
-    018-qkeee-erp-plugin moves it)."""
+    is read only while the new file does not exist yet (the
+    setup step S1, `hermes qkeee-erp setup`, moves it)."""
     base = _hermes_home()
     current = os.path.join(kanban_origin.plugin_data_dir(base), "qkeee-erp.env")
     legacy = os.path.join(base, "qkeee-erp.env")

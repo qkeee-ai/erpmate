@@ -72,6 +72,13 @@ def _common(p, requester: bool):
 def setup_parser(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="qkeee_erp_command", metavar="<command>", required=True)
 
+    p = sub.add_parser("setup", help="bring this profile to the state the plugin needs (idempotent); "
+                                     "`setup status` only reports")
+    p.add_argument("action", nargs="?", choices=["status"], help="report each item, change nothing")
+    p.add_argument("--dry-run", action="store_true", help="print the planned changes, write nothing")
+    p.add_argument("--apply-profile-fixes", action="store_true",
+                   help="also write the Profile settings the prerequisites need (toolsets, terminal)")
+
     _common(sub.add_parser("health", help="connectivity, auth and role gaps (as the bot account)"), False)
     sub.add_parser("whoami", help="the gateway session identity this process sees (no network)")
     sub.add_parser("list-envs", help="Instance tags with a full credential set (no network)")
@@ -130,10 +137,12 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
 
 
 class OperatorCli:
-    """`read_config()` returns the profile config dict (read-only)."""
+    """`read_config()` returns the profile config dict (read-only);
+    `setup_env()` builds the setup_steps.SetupEnv for this profile."""
 
-    def __init__(self, read_config):
+    def __init__(self, read_config, setup_env=None):
         self._read_config = read_config
+        self._setup_env = setup_env
 
     def run(self, args) -> int:
         try:
@@ -146,6 +155,8 @@ class OperatorCli:
         from . import settings
 
         cmd = args.qkeee_erp_command
+        if cmd == "setup":  # needs no Requester and runs exactly when ERP commands refuse
+            return self._setup(args)
         if cmd == "whoami":
             from .qkeee_erp.core import client
             return _print_ok(client.session_identity())
@@ -174,6 +185,37 @@ class OperatorCli:
             return _init_bot(args, tools.tag({"tag": args.tag}), requester)
         name, tool_args = _tool_call(args)
         return _report(json.loads(tools.handler(name)(tool_args)))
+
+
+    def _setup(self, args) -> int:
+        from . import setup_steps
+        env = self._setup_env()
+        if args.action == "status":
+            _print_items(setup_steps.status(env))
+            unmet = setup_steps.unmet(env)
+            if unmet:
+                # The items are listed above; add what is not an item (the version check).
+                print(" ".join(["setup: not complete."] + [u for u in unmet if u.startswith("setup ")]))
+                return EXIT_ERROR
+            print(f"setup: complete for plugin version {env.version}")
+            return EXIT_OK
+        report = setup_steps.run(env, dry_run=args.dry_run, apply_profile_fixes=args.apply_profile_fixes)
+        _print_items(report["items"])
+        for change in report["changes"]:
+            print(f"  {change}")
+        if report["backup"]:
+            print(f"config backup: {report['backup']}")
+        if report["stopped_at"]:
+            print(f"ERROR: setup stopped at {report['stopped_at']}; fix it and run setup again",
+                  file=sys.stderr)
+            return EXIT_ERROR
+        return EXIT_OK
+
+
+def _print_items(rows) -> None:
+    for r in rows:
+        line = f"{r['key']:<3} {r['label']:<17} {r['status']:<8}"
+        print(f"{line} {r['reason']}" if r["reason"] else line.rstrip())
 
 
 def _cli_requester(requester: str) -> str:

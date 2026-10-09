@@ -1,7 +1,7 @@
 #!/command/with-contenv sh
 # shellcheck shell=sh
-# Enable the qkeee-erp plugin in the installed profile and move the ERPNext
-# credentials to the plugin's gateway-side location. Idempotent. Non-fatal.
+# Enable the qkeee-erp plugin in the installed profile. Idempotent.
+# Non-fatal.
 # Set QKEEE_ERP_PLUGIN_ENABLE=0 to skip.
 #
 # The plugin (plugins/qkeee-erp, shipped by the profile distribution) gives
@@ -11,11 +11,8 @@
 # triage and records each task's requester origin for its workers.
 # (agents/.scratch/qkeee-erp-requester-identity-binding, issues 04 and 09)
 #
-# Credentials: <profile>/qkeee-erp.env moves to
-# <profile>/plugin-data/qkeee-erp/qkeee-erp.env (mode 600). client.py reads
-# the new path first and the old one only while the new one is missing.
-# The move alone does not hide the file from the terminal: the terminal
-# sidecar does (0157-terminal-ssh, docker/terminal, agents ADR 0002).
+# Everything else (credentials move, plugin settings, toolsets, terminal)
+# is `hermes qkeee-erp setup`, run by 0185-qkeee-erp-setup.
 #
 # Runs after 016-profile-install, which writes /run/hermes-profile-name.
 # A profile installed before the plugin shipped has no plugins/qkeee-erp yet:
@@ -42,18 +39,4 @@ else
     echo "[qkeee-erp:$NAME] WARNING: plugin enable failed; continuing" >&2
 fi
 
-OLD="$DIR/qkeee-erp.env"
-NEW_DIR="$DIR/plugin-data/qkeee-erp"
-NEW="$NEW_DIR/qkeee-erp.env"
-if [ -f "$OLD" ] && [ ! -e "$NEW" ]; then
-    if run mkdir -p "$NEW_DIR" && run mv "$OLD" "$NEW" && run chmod 600 "$NEW"; then
-        echo "[qkeee-erp:$NAME] moved credentials to $NEW"
-    else
-        echo "[qkeee-erp:$NAME] WARNING: could not move $OLD to $NEW" >&2
-    fi
-elif [ -f "$OLD" ]; then
-    echo "[qkeee-erp:$NAME] WARNING: $OLD and $NEW both exist; $OLD is no longer read." >&2
-    echo "[qkeee-erp:$NAME]   Check that $NEW is current, then delete $OLD." >&2
-fi
-[ -f "$NEW" ] && run chmod 600 "$NEW" 2>/dev/null
 exit 0

@@ -15,8 +15,9 @@ requester origin, and a guard against identity override
   erp_* tools (load on demand with skill_view).
 - cli.py: the Operator CLI, `hermes -p <profile> qkeee-erp <command>`.
 - settings.py: the plugin's own settings (plugins.entries.qkeee-erp.settings).
-  While the legacy skills.config.qkeee_erp section is present, setup is
-  pending and no erp_* tools register; the hooks always register.
+- setup_steps.py: `hermes qkeee-erp setup`. Until every setup item is done
+  for this plugin version, no erp_* tools register; the hooks, the CLI and
+  the usage skill always register.
 
 register() never raises: Hermes rolls back every registration of a plugin
 whose register() raises. If the library cannot load, only the identity
@@ -46,18 +47,26 @@ def _settings() -> dict:
     return settings.plugin_settings(_profile_config())
 
 
+def _setup_unmet() -> list:
+    """Why ERP tools must not register now (setup_steps.unmet); [] when
+    setup is complete for this plugin version."""
+    from . import setup_steps
+    return setup_steps.unmet(setup_steps.production_env())
+
+
 def register(ctx) -> None:
     # pytest imports this file outside its package, so relative imports stay
     # inside functions.
-    from . import cli, identity_guard, settings
+    from . import cli, identity_guard, setup_steps
 
     # The guard protects; it grants nothing, so it registers first and always.
     ctx.register_hook("pre_tool_call", identity_guard.pre_tool_call)
     # The Operator CLI registers before the library loads: `setup` must be
     # reachable exactly when the plugin cannot serve ERP calls.
     try:
+        operator = cli.OperatorCli(read_config=_profile_config, setup_env=setup_steps.production_env)
         ctx.register_cli_command(name=cli.COMMAND, help=cli.HELP, setup_fn=cli.setup_parser,
-                                 handler_fn=cli.OperatorCli(read_config=_profile_config).run)
+                                 handler_fn=operator.run)
     except Exception as e:
         logger.error("qkeee-erp plugin: Operator CLI not registered: %s", e)
     try:
@@ -88,14 +97,16 @@ def register(ctx) -> None:
     except Exception as e:
         logger.error("qkeee-erp plugin: Kanban origin hooks not registered: %s", e)
 
-    # Tools grant ERPNext access, so they register only when setup is done.
+    # Tools grant ERPNext access, so they register only when setup is
+    # complete (spec D7). The plugin never writes config on load.
     try:
-        pending = settings.setup_pending(_profile_config())
+        unmet = _setup_unmet()
     except Exception as e:
-        logger.error("qkeee-erp plugin: profile config not readable, no erp_* tools: %s", e)
+        logger.error("qkeee-erp plugin: setup state not readable, no erp_* tools: %s", e)
         return
-    if pending:
-        logger.warning("qkeee-erp plugin: no erp_* tools: %s", pending)
+    if unmet:
+        logger.warning("qkeee-erp plugin: no erp_* tools until setup is complete; see "
+                       "`hermes qkeee-erp setup status`: %s", "; ".join(unmet))
         return
     tools = erp_tools.ErpTools(settings=_settings)
     try:
