@@ -79,11 +79,14 @@ def register(ctx) -> None:
     client.set_session_env_reader(get_session_env)
     client.set_hermes_home_reader(lambda: str(get_hermes_home()))
 
-    hooks = kanban_hooks.KanbanOriginHooks(
-        session_env=get_session_env,
-        store_path=lambda: kanban_origin.default_store_path(str(get_hermes_home())))
-    ctx.register_hook("pre_tool_call", hooks.pre_tool_call)
-    ctx.register_hook("post_tool_call", hooks.post_tool_call)
+    try:
+        hooks = kanban_hooks.KanbanOriginHooks(
+            session_env=get_session_env,
+            store_path=lambda: kanban_origin.default_store_path(str(get_hermes_home())))
+        ctx.register_hook("pre_tool_call", hooks.pre_tool_call)
+        ctx.register_hook("post_tool_call", hooks.post_tool_call)
+    except Exception as e:
+        logger.error("qkeee-erp plugin: Kanban origin hooks not registered: %s", e)
 
     # Tools grant ERPNext access, so they register only when setup is done.
     try:
@@ -95,6 +98,9 @@ def register(ctx) -> None:
         logger.warning("qkeee-erp plugin: no erp_* tools: %s", pending)
         return
     tools = erp_tools.ErpTools(settings=_settings)
-    for name, schema in erp_tools.SCHEMAS.items():
-        ctx.register_tool(name=name, toolset=erp_tools.TOOLSET, schema=schema,
-                          handler=tools.handler(name), emoji="📒")
+    try:
+        for name, schema in erp_tools.SCHEMAS.items():
+            ctx.register_tool(name=name, toolset=erp_tools.TOOLSET, schema=schema,
+                              handler=tools.handler(name), emoji="📒")
+    except Exception as e:
+        logger.error("qkeee-erp plugin: erp_* tools not (fully) registered: %s", e)

@@ -37,6 +37,10 @@ COMMAND = "qkeee-erp"
 HELP = "ERPNext Operator commands for the qkeee-erp plugin"
 
 _DISCOVER_ACTIONS = ("apps", "modules", "meta", "resolve", "preflight")
+# execute-write confirmation flags: (argparse dest, flag) -> tool argument of the same name.
+_CONFIRMATION_FLAGS = (("confirmation_token", "--confirmation-token"), ("issued_at", "--issued-at"),
+                       ("user_confirmation_text", "--user-confirmation-text"),
+                       ("user_approved", "--user-approved"), ("approval_note", "--approval-note"))
 
 
 class _Usage(Exception):
@@ -180,8 +184,9 @@ def _cli_requester(requester: str) -> str:
 
 
 def _cli_audit(cmd: str, tool_args: dict) -> dict:
+    from . import erp_tools
     from .qkeee_erp.core import client
-    return dict(session_id=client._session_or_fallback(None), domain_code="qkeee-erp-associate",
+    return dict(session_id=client._session_or_fallback(None), domain_code=erp_tools.DOMAIN_CODE,
                 channel="cli", channel_metadata={"operator": getpass.getuser(), "command": cmd},
                 prompt_summary=tool_args.get("prompt_summary"),
                 latest_prompt=tool_args.get("latest_prompt"))
@@ -215,23 +220,15 @@ def _tool_call(a) -> tuple[str, dict]:
     if cmd == "execute-write":
         batch = _json("--batch", a.batch, list)
         if batch is not None:
-            single = [flag for key, flag in (("op", "--op"), ("op_args", "--args"),
-                                             ("confirmation_token", "--confirmation-token"),
-                                             ("issued_at", "--issued-at"),
-                                             ("user_confirmation_text", "--user-confirmation-text"),
-                                             ("user_approved", "--user-approved"),
-                                             ("approval_note", "--approval-note"))
+            single = [flag for key, flag in (("op", "--op"), ("op_args", "--args"), *_CONFIRMATION_FLAGS)
                       if getattr(a, key)]
             if single:
                 raise _Usage(f"--batch carries each step's op, args and confirmation; do not combine "
                              f"it with {', '.join(single)}")
-            out.pop("op"), out.pop("args")
+            del out["op"]
+            del out["args"]
             out["batch"] = batch
-        out.update({k: v for k, v in (("confirmation_token", a.confirmation_token),
-                                      ("issued_at", a.issued_at),
-                                      ("user_confirmation_text", a.user_confirmation_text),
-                                      ("user_approved", a.user_approved),
-                                      ("approval_note", a.approval_note)) if v})
+        out.update({key: getattr(a, key) for key, _ in _CONFIRMATION_FLAGS if getattr(a, key)})
     return "erp_execute_write", out
 
 

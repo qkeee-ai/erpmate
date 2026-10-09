@@ -95,6 +95,21 @@ class RegisterTests(unittest.TestCase):
         self.assertEqual(sorted(h for h, _ in ctx.hooks),
                          ["post_tool_call", "pre_tool_call", "pre_tool_call"])
 
+    def test_a_failing_tool_or_hook_registration_does_not_raise(self):
+        for method in ("register_tool", "register_hook"):
+            with self.subTest(method=method):
+                ctx = FakeCtx()
+                original = getattr(ctx, method)
+
+                def flaky(*a, _orig=original, **kw):
+                    if a[:1] != ("pre_tool_call",) or kw or len(ctx.hooks) > 0:
+                        raise RuntimeError("hermes api drift")
+                    return _orig(*a, **kw)
+                setattr(ctx, method, flaky)
+                with self.assertLogs("qkeee_erp_plugin", level="ERROR"):
+                    qkeee_erp_plugin.register(ctx)
+                self.assertEqual(ctx.cli, ["qkeee-erp"])
+
     def test_unreadable_config_registers_no_tools_and_does_not_raise(self):
         ctx = FakeCtx()
         with patch.object(qkeee_erp_plugin, "_profile_config", side_effect=OSError("boom")), \

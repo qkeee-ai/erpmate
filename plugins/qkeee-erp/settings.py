@@ -57,12 +57,13 @@ def migrate_legacy_config(cfg: dict) -> list[str]:
     copied = {k: legacy[k] for k in KEYS if k in legacy and k not in current}
     dropped = [k for k in _DROPPED if k in current]
     if copied or dropped:
-        plugins = cfg.setdefault("plugins", {})
-        entries = plugins.setdefault("entries", {})
-        entry = entries.setdefault(PLUGIN_ID, {})
-        settings = entry.setdefault("settings", {})
-        if not isinstance(settings, dict):
-            settings = entry["settings"] = {}
+        parent = cfg
+        for key in ("plugins", "entries", PLUGIN_ID, "settings"):
+            # YAML `key:` with no value loads as None: replace it, never index it.
+            if not isinstance(parent.get(key), dict):
+                parent[key] = {}
+            parent = parent[key]
+        settings = parent
         for key, value in copied.items():
             settings[key] = value
             changes.append(f"plugins.entries.{PLUGIN_ID}.settings.{key} = {value!r} "

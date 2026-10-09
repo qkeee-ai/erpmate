@@ -29,7 +29,7 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
   similar) should flag them explicitly so a reviewer notices data present
   for no reason the current task explains.
 - **Offer Letter (Job Offer) and Employee Onboarding never auto-commit,
-  regardless of `qkeee_erp.mode`.** Compensation sensitivity (Job Offer)
+  regardless of the write mode.** Compensation sensitivity (Job Offer)
   and irreversible-in-practice organizational commitment (both) put these
   above this domain's other read-write-capable capabilities — advisory-
   only, full stop, no "ready" state to chain into a write. The only

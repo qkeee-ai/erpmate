@@ -24,13 +24,13 @@ or not.
 
 - **Never create or update an ERPNext record directly from extraction
   output.** Output always lands as a staged, human-reviewable report
-  first — this holds regardless of `qkeee_erp.mode`. Not a self-imposed
+  first — this holds regardless of the write mode. Not a self-imposed
   restraint on a capability this domain has and chooses not to use: this
   domain has **no ERPNext connector at all** — no `core.client` import,
   no write operation, nothing that can reach ERPNext's write
   endpoints. Writing to ERPNext from here isn't refrained from, it's
   structurally impossible. This is the one domain in the library not
-  gated by `qkeee_erp.mode` at all — its safety property is structural,
+  gated by the write mode at all — its safety property is structural,
   not config-driven.
 - **Low-confidence or not-found fields must be explicitly flagged, never
   silently guessed or filled with a placeholder.**

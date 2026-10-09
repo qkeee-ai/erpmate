@@ -1,13 +1,13 @@
 ---
 name: usage
-description: "Rules for calling the erp_* tools safely: requester, audit context, the confirmed-write flow, role gaps, refusals and failures."
+description: "Rules for calling the erp_* tools safely: Requester, audit context, the confirmed-write flow, role gaps, refusals and failures."
 ---
 
 # qkeee-erp: calling the erp_* tools
 
 The `qkeee_erp` tools are the only way to reach ERPNext. They run in the
 gateway, hold the ERPNext credentials, and bind every call to the person
-who sent this turn's message (the **requester**). These rules apply to
+who sent this turn's message (the **Requester**; "the user" below). These rules apply to
 every agent that has the tools.
 
 | Tool | Use |
@@ -26,16 +26,16 @@ every agent that has the tools.
   the user with its reason. Do not retry it with other arguments, another
   tool, or a shell command.
 
-## 2. The requester comes from the gateway
+## 2. The Requester comes from the gateway
 
-- No tool takes a requester. Do not ask the user who they are, and do not
+- No tool takes a Requester. Do not ask the user who they are, and do not
   take an identity from memory, an earlier turn, a display name or a card.
 - `erp_discover` `whoami` shows the identity this turn is bound to (no
   network call).
 - If a tool refuses because the turn has no sender, tell the user, and
-  stop. In a Kanban worker without a recorded requester, block the task
+  stop. In a Kanban worker without a recorded Requester, block the task
   with `kanban_block(kind="needs_input")` and name the gap.
-- The bot account itself is never a requester.
+- The bot account itself is never a Requester.
 
 ## 3. Pass the audit context
 
@@ -51,7 +51,7 @@ every agent that has the tools.
   `base_url`. State them to the user before the first read or write of a
   session, and again before a batch of writes.
 - Pass `tag` only when the user names another Instance.
-- The write mode (read-only or read-write) is an operator setting. You
+- The write mode (read-only or read-write) is an Operator setting (`health` returns it as `mode`). You
   cannot change it. In read-only mode every write is refused.
 
 ## 5. Show role gaps exactly
@@ -84,7 +84,7 @@ and the action, and say that access, not connectivity, is the problem.
 
 - Never write `user_confirmation_text` yourself.
 - Any change after render is refused: other args, a changed record,
-  another requester, or more than 15 minutes. Render again and ask again.
+  another Requester, or more than 15 minutes. Render again and ask again.
 - An operation that needs no confirmation says so in its render result.
 
 ## 8. Handle failures honestly

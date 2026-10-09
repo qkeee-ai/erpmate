@@ -107,7 +107,7 @@ operation; `erp_execute_write list_ops` lists them), reads by
 rules are in `qkeee-erp:usage`; `references/tool-cookbook.md` has the
 write flow.
 
-1. **Never issue a write while `qkeee_erp.mode` is `read-only`.**
+1. **Never issue a write while the write mode (`erp_discover health` → `mode`) is `read-only`.**
    The pipeline checks `mode` before every write and raises
    `ReadOnlyModeError` otherwise.
 2. **Never issue a read or write without a resolved requester identity.**

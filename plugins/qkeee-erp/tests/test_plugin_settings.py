@@ -86,6 +86,15 @@ class MigrateTests(unittest.TestCase):
         self.assertEqual(cfg["plugins"]["enabled"], ["qkeee-erp"])
         self.assertFalse(cfg["plugins"]["entries"]["qkeee-erp"]["allow_tool_override"])
 
+    def test_null_sections_from_yaml_are_replaced(self):
+        for nulls in ({"plugins": None}, {"plugins": {"entries": None}},
+                      {"plugins": {"entries": {"qkeee-erp": None}}}):
+            with self.subTest(nulls=nulls):
+                cfg = copy.deepcopy(LEGACY)
+                cfg.update(copy.deepcopy(nulls))
+                settings.migrate_legacy_config(cfg)
+                self.assertEqual(settings.plugin_settings(cfg), {"active_env": "demo", "mode": "read-write"})
+
     def test_fresh_config_needs_no_change(self):
         cfg = {"model": {"default": "x"}}
         self.assertEqual(settings.migrate_legacy_config(cfg), [])
