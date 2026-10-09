@@ -555,8 +555,7 @@ def _refuse_if_execute_code_sandbox() -> None:
         raise SandboxedCallerError(
             "Refusing: the ERPNext connector cannot run inside execute_code. That "
             "sandbox hides the gateway session identity, so the requester cannot be "
-            "bound. Nothing was sent. Run the skill scripts from the terminal instead "
-            "(python ${HERMES_SKILL_DIR}/scripts/core/client.py ... / execute_write.py ...)."
+            "bound. Nothing was sent. Use the erp_* tools instead."
         )
 
 

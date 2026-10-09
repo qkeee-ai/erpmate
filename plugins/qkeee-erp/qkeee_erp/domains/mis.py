@@ -11,7 +11,6 @@ unconditionally — before any read. Keep this covered by
 scripts/domains/test_allowlist_gates.py.
 """
 
-
 from ..core import client as core_client
 from ..core import operations
 

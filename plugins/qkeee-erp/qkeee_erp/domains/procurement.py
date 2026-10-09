@@ -30,7 +30,6 @@ confirmed proceeding without KYC). With KYC:
   KycPartialFailureError names the Supplier left behind.
 """
 
-
 from ..core import client as core_client
 from ..core import operations
 

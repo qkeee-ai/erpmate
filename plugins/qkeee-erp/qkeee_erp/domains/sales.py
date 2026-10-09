@@ -9,7 +9,6 @@ ALLOWED_WRITE_DOCTYPES against references/domains/sales.md before
 expanding.
 """
 
-
 from ..core import client as core_client
 from ..core import operations
 

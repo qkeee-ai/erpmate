@@ -15,12 +15,12 @@ file tests the code-level backstop."""
 import unittest
 from unittest.mock import patch
 
-from qkeee_erp_plugin.qkeee_erp.core import client as core_client  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.core import operations  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.core import client as core_client
+from qkeee_erp_plugin.qkeee_erp.core import operations
 
-from qkeee_erp_plugin.qkeee_erp.domains import procurement  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp import schema_mapping  # noqa: E402
-import testsupport  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import procurement
+from qkeee_erp_plugin.qkeee_erp import schema_mapping
+import testsupport
 
 _OFFLINE = testsupport.offline_schema()
 

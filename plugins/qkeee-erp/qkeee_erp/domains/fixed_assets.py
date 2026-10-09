@@ -26,7 +26,6 @@ allowlist; fixed_assets.sell is checked against the accounts allowlist
 (it creates a Sales Invoice).
 """
 
-
 from ..core import client as core_client
 from ..core import operations
 from ..core.operations import PreparedRequest, require_args

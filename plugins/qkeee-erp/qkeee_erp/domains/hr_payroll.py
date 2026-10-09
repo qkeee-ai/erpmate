@@ -9,7 +9,6 @@ Cross-check ALLOWED_WRITE_DOCTYPES against references/domains/
 hr-payroll.md before expanding.
 """
 
-
 from ..core import client as core_client
 from ..core import operations
 

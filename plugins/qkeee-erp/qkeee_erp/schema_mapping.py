@@ -81,8 +81,8 @@ data transform, easy to unit-test without a live instance.
 
 import re
 
-from .core.client import ConnectorError  # noqa: E402
-from . import discover  # noqa: E402
+from .core.client import ConnectorError
+from . import discover
 
 # Small, deliberately narrow synonym table — see module docstring's
 # "Exact/normalized match auto-applies; fuzzy/synonym matches are

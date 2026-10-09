@@ -16,7 +16,6 @@ ALLOWED_WRITE_DOCTYPES: cross-check against references/domains/
 inventory.md before expanding.
 """
 
-
 from ..core import client as core_client
 from ..core import operations
 

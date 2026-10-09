@@ -22,9 +22,9 @@ deliberate test update.
 import unittest
 from unittest.mock import patch
 
-from qkeee_erp_plugin.qkeee_erp.core import client as core_client  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.core import operations  # noqa: E402
-import testsupport  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.core import client as core_client
+from qkeee_erp_plugin.qkeee_erp.core import operations
+import testsupport
 
 _OFFLINE = testsupport.offline_schema()
 
@@ -38,14 +38,14 @@ def tearDownModule():
     for p in _OFFLINE:
         p.stop()
 
-from qkeee_erp_plugin.qkeee_erp.domains import accounts  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.domains import fixed_assets  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.domains import hr_payroll  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.domains import inventory  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.domains import mis  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.domains import procurement  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.domains import sales  # noqa: E402
-from qkeee_erp_plugin.qkeee_erp.domains import system_admin  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import accounts
+from qkeee_erp_plugin.qkeee_erp.domains import fixed_assets
+from qkeee_erp_plugin.qkeee_erp.domains import hr_payroll
+from qkeee_erp_plugin.qkeee_erp.domains import inventory
+from qkeee_erp_plugin.qkeee_erp.domains import mis
+from qkeee_erp_plugin.qkeee_erp.domains import procurement
+from qkeee_erp_plugin.qkeee_erp.domains import sales
+from qkeee_erp_plugin.qkeee_erp.domains import system_admin
 
 # One disallowed doctype per domain — deliberately NOT in that domain's
 # ALLOWED_WRITE_DOCTYPES, and not a doctype any other domain's allowlist

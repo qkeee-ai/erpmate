@@ -11,7 +11,6 @@ Cross-check ALLOWED_WRITE_DOCTYPES below against
 references/domains/accounts.md before expanding it.
 """
 
-
 from ..core import client as core_client
 from ..core import operations
 

@@ -27,7 +27,6 @@ the admin credential, since the Role Permission Manager and scheduler
 methods are System-Manager-only.
 """
 
-
 from ..core import client as core_client
 from ..core import operations
 from ..core.operations import Operation, PreparedRequest, require_args

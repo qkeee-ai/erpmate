@@ -409,7 +409,7 @@ class ProvisioningOperationTests(unittest.TestCase):
         self.assertEqual(result["_audit_log_status"], "exempt")
 
 
-from qkeee_erp_plugin.qkeee_erp import schema_mapping as _sm  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp import schema_mapping as _sm
 _REAL_MAP = _sm.map_payload_for_write
 
 
