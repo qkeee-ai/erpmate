@@ -57,13 +57,14 @@ def _setup_unmet() -> list:
 def register(ctx) -> None:
     # pytest imports this file outside its package, so relative imports stay
     # inside functions.
-    from . import cli, identity_guard, setup_steps
+    from . import identity_guard
 
     # The guard protects; it grants nothing, so it registers first and always.
     ctx.register_hook("pre_tool_call", identity_guard.pre_tool_call)
     # The Operator CLI registers before the library loads: `setup` must be
     # reachable exactly when the plugin cannot serve ERP calls.
     try:
+        from . import cli, setup_steps
         operator = cli.OperatorCli(read_config=_profile_config, setup_env=setup_steps.production_env)
         ctx.register_cli_command(name=cli.COMMAND, help=cli.HELP, setup_fn=cli.setup_parser,
                                  handler_fn=operator.run)

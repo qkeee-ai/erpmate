@@ -140,7 +140,7 @@ class OperatorCli:
     """`read_config()` returns the profile config dict (read-only);
     `setup_env()` builds the setup_steps.SetupEnv for this profile."""
 
-    def __init__(self, read_config, setup_env=None):
+    def __init__(self, read_config, setup_env):
         self._read_config = read_config
         self._setup_env = setup_env
 
@@ -192,10 +192,9 @@ class OperatorCli:
         env = self._setup_env()
         if args.action == "status":
             _print_items(setup_steps.status(env))
-            unmet = setup_steps.unmet(env)
-            if unmet:
-                # The items are listed above; add what is not an item (the version check).
-                print(" ".join(["setup: not complete."] + [u for u in unmet if u.startswith("setup ")]))
+            if setup_steps.unmet(env):
+                gap = setup_steps.version_gap(env)
+                print("setup: not complete." + (f" {gap}" if gap else ""))
                 return EXIT_ERROR
             print(f"setup: complete for plugin version {env.version}")
             return EXIT_OK

@@ -14,7 +14,6 @@ skipped otherwise. Run with `python -m pytest tests` from the repo root.
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,14 +32,8 @@ def _hermes(home, *args, check=True):
     return result
 
 
-@pytest.fixture()
-def home():
-    path = Path(tempfile.mkdtemp())
-    yield path
-    shutil.rmtree(path, ignore_errors=True)
-
-
-def test_install_then_update_keeps_instance_notes_and_ships_the_plugin(home):
+def test_install_then_update_keeps_instance_notes_and_ships_the_plugin(tmp_path):
+    home = tmp_path
     _hermes(home, "profile", "install", str(REPO), "--name", "dist", "--yes")
     profile = home / "profiles" / "dist"
     assert (profile / "plugins" / "qkeee-erp" / "setup_steps.py").is_file()

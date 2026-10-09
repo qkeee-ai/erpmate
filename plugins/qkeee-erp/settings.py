@@ -18,7 +18,7 @@ from __future__ import annotations
 PLUGIN_ID = "qkeee-erp"
 KEYS = ("active_env", "mode")
 SETUP_HINT = "run `hermes qkeee-erp setup`"
-_DROPPED = ("scripts_dir",)  # issue 04: the library is in the plugin package now
+DROPPED = ("scripts_dir",)  # issue 04: the library is in the plugin package now
 
 
 def _mapping(value) -> dict:
@@ -55,7 +55,7 @@ def migrate_legacy_config(cfg: dict) -> list[str]:
     entry = _entry(cfg)
     current = _mapping(entry.get("settings"))
     copied = {k: legacy[k] for k in KEYS if k in legacy and k not in current}
-    dropped = [k for k in _DROPPED if k in current]
+    dropped = [k for k in DROPPED if k in current]
     if copied or dropped:
         parent = cfg
         for key in ("plugins", "entries", PLUGIN_ID, "settings"):

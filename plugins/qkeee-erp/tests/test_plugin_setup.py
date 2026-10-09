@@ -355,6 +355,144 @@ class UnmetTests(SetupTestCase):
         self.assertEqual((self.raw(), self.write_calls), (before, 0))
 
 
+class ReviewFixTests(SetupTestCase):
+    def test_old_and_new_credentials_both_present_is_pending(self):
+        self.config(FRESH)
+        self.make_key()
+        self.credentials()
+        old = self.credentials(legacy=True)
+        report = setup.run(self.env())
+        row = next(i for i in report["items"] if i["key"] == "S1")
+        self.assertEqual(row["status"], setup.PENDING)
+        self.assertIn("delete", row["reason"])
+        self.assertTrue(os.path.exists(old))  # never deleted by setup
+
+    def test_two_backups_in_the_same_second_do_not_overwrite(self):
+        import datetime
+        fixed = datetime.datetime(2026, 10, 9, 10, 0, 0, tzinfo=datetime.timezone.utc)
+        self.config(DEV_ERP)
+        setup.run(self.env(now=lambda: fixed))
+        self.config(DEV_ERP)  # the legacy section again
+        setup.run(self.env(now=lambda: fixed))
+        self.assertEqual(len(self.backups()), 2)
+
+    def test_a_home_relative_key_path_is_expanded(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"HOME": self.home, "USERPROFILE": self.home}):
+            self.config(FRESH.replace("ssh_key: {key}", "ssh_key: ~/terminal-key"))
+            self.credentials()
+            setup.run(self.env())
+            self.assertEqual(self.keygen_calls, [os.path.expanduser("~/terminal-key")])
+        self.assertTrue(self.keygen_calls[0].startswith(self.home))
+
+    def test_last_complete_version_survives_two_incomplete_runs(self):
+        self.config(FRESH)
+        self.credentials()
+        self.make_key()
+        setup.run(self.env())
+        self.config(DEV_ERP)
+        setup.run(self.env(version="0.3.0"))
+        setup.run(self.env(version="0.3.0"))
+        with open(setup.state_path(self.home), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["last_complete_version"], VERSION)
+
+    def test_version_gap_is_its_own_value(self):
+        self.config(FRESH)
+        self.credentials()
+        self.make_key()
+        self.assertIn("never", setup.version_gap(self.env()))
+        setup.run(self.env())
+        self.assertIsNone(setup.version_gap(self.env()))
+
+
+    def test_status_shows_a_failure_from_the_last_run(self):
+        self.config(DEV_ERP)
+
+        def broken(cfg):
+            raise OSError("disk full")
+        setup.run(self.env(write_config=broken))
+        row = next(r for r in setup.status(self.env()) if r["key"] == "S2")
+        self.assertEqual(row["status"], setup.FAILED)
+        self.assertIn("disk full", row["reason"])
+
+    def test_scripts_dir_alone_is_dropped(self):
+        self.config(FRESH)
+        self.credentials()
+        self.make_key()
+        cfg = self.read()
+        cfg["plugins"] = {"entries": {"qkeee-erp": {"settings": {"scripts_dir": "/x"}}}}
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f)
+        self.assertEqual(self.statuses({"items": setup.status(self.env())})["S2"], setup.PENDING)
+        setup.run(self.env())
+        self.assertNotIn("scripts_dir", self.read()["plugins"]["entries"]["qkeee-erp"]["settings"])
+
+    def test_any_erp_chat_platform_loses_code_execution_but_cli_keeps_it(self):
+        self.config(FRESH)
+        cfg = self.read()
+        cfg["platform_toolsets"]["email"] = ["code_execution", "qkeee_erp"]
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f)
+        report = setup.run(self.env(), dry_run=True)
+        self.assertIn("email", next(i["reason"] for i in report["items"] if i["key"] == "P1"))
+        setup.run(self.env(), apply_profile_fixes=True)
+        toolsets = self.read()["platform_toolsets"]
+        self.assertNotIn("code_execution", toolsets["email"])
+        self.assertIn("code_execution", toolsets["cli"])
+        self.assertIn("code_execution", toolsets["discord"])  # serves no ERP
+
+    def test_dry_run_plans_the_key_after_planning_the_ssh_terminal(self):
+        self.config(DEV_ERP)
+        report = setup.run(self.env(), dry_run=True, apply_profile_fixes=True)
+        self.assertTrue(any(c.startswith("S3: would created ssh key") for c in report["changes"]),
+                        report["changes"])
+        self.assertEqual(self.keygen_calls, [])
+
+
+class RegisterContractTests(SetupTestCase):
+    """register() through the real setup checks (no patched _setup_unmet)."""
+
+    def register(self):
+        import sys
+        from unittest.mock import patch
+        import qkeee_erp_plugin
+        import test_plugin_register as reg
+        from qkeee_erp_plugin.qkeee_erp.core import client
+        self.addCleanup(client.set_session_env_reader, None)
+        self.addCleanup(client.set_hermes_home_reader, None)
+        ctx = reg.FakeCtx()
+        with patch.dict(sys.modules, reg._hermes_modules()), \
+                patch.object(setup, "production_env", self.env), \
+                patch.object(qkeee_erp_plugin, "_profile_config", return_value={}):
+            qkeee_erp_plugin.register(ctx)
+        return ctx
+
+    def test_tools_only_after_a_complete_setup_hooks_always(self):
+        self.config(DEV_ERP)
+        self.credentials(legacy=True)
+        before = self.register()
+        self.assertEqual(before.tools, [])
+        setup.run(self.env(), apply_profile_fixes=True)
+        after = self.register()
+        self.assertEqual(len(after.tools), 5)
+        for ctx in (before, after):
+            self.assertEqual(sorted(h for h, _ in ctx.hooks),
+                             ["post_tool_call", "pre_tool_call", "pre_tool_call"])
+
+
+class ShippedValuesTests(unittest.TestCase):
+    """The values P1/P2 write with the flag are the shipped config.yaml's."""
+
+    def test_match_the_shipped_config(self):
+        repo = os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        with open(os.path.join(repo, "config.yaml"), encoding="utf-8") as f:
+            shipped = yaml.safe_load(f)
+        self.assertEqual(sorted(shipped["platform_toolsets"]["google_chat"]),
+                         sorted(setup.SHIPPED_GOOGLE_CHAT))
+        for key, value in setup.DOCKER_TERMINAL.items():
+            self.assertEqual(shipped["terminal"][key], value, key)
+
+
 class OperatorCliTests(SetupTestCase):
     """`hermes qkeee-erp setup [status] [--dry-run] [--apply-profile-fixes]`."""
 

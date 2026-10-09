@@ -93,6 +93,9 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #   02-reconcile-profiles (base image) creates the s6 slots per the above
 COPY docker/defaults/ /opt/defaults/
 RUN chmod -R a+rX,go-w /opt/defaults
+# Tells `hermes qkeee-erp setup` it runs in this image (P2 then writes the
+# sidecar terminal values, not the host ones).
+ENV QKEEE_ERP_IN_CONTAINER=1
 COPY docker/cont-init.d/ /etc/cont-init.d/
 # Globbed in four parts: `01[6-9]-*` does not match the 4-digit 015x/0185/
 # 019x names (the `-` has nothing to match against their 4th character).

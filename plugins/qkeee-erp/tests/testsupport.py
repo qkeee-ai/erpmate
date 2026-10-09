@@ -83,12 +83,17 @@ OPERATOR_CONFIG = {"plugins": {"entries": {"qkeee-erp": {"settings": {"active_en
                                                                        "mode": "read-write"}}}}}
 
 
+def _no_setup_env():
+    raise AssertionError("this test runs no setup command")
+
+
 def run_operator_cli(argv, config=None, setup_env=None):
     from qkeee_erp_plugin import cli
     parser = argparse.ArgumentParser(prog="hermes qkeee-erp")
     cli.setup_parser(parser)
     cfg = OPERATOR_CONFIG if config is None else config
-    operator = cli.OperatorCli(read_config=lambda: copy.deepcopy(cfg), setup_env=setup_env)
+    operator = cli.OperatorCli(read_config=lambda: copy.deepcopy(cfg),
+                               setup_env=setup_env or _no_setup_env)
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
