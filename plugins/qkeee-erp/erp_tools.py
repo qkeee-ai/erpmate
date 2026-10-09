@@ -25,7 +25,7 @@ import os
 
 from .qkeee_erp import discover
 from .qkeee_erp import execute_write  # imports every domain module: registers allowlists + operations
-from .qkeee_erp.core import client, operations
+from .qkeee_erp.core import client, memory_promote, operations
 
 TOOLSET = "qkeee_erp"
 DOMAIN_CODE = "qkeee-erp-associate"
@@ -37,7 +37,9 @@ _AUDIT = {
     "latest_prompt": {"type": "string", "description": "The user's most recent message, verbatim (audit "
                                                        "row). Mandatory for a write that needs confirmation."},
 }
-_NO_REQUESTER_NOTE = ("The requester is taken from the gateway session; there is no requester argument.")
+_NO_REQUESTER_NOTE = ("The requester is taken from the gateway session; there is no requester argument. "
+                      "A refusal is final: report it, never retry it another way (terminal, "
+                      "execute_code, other arguments). Calling rules: skill_view('qkeee-erp:usage').")
 
 
 def _schema(name, description, properties, required=()):
@@ -68,21 +70,33 @@ SCHEMAS = {
         required=("report_name",)),
     "erp_discover": _schema(
         "erp_discover",
-        "ERPNext connectivity and live metadata. health: connectivity, auth and role gaps. whoami: the "
-        "requester this turn is bound to (no network). roles: a user's roles. apps / modules: installed "
-        "apps. meta / resolve: one DocType's live schema / module and app. preflight: write-readiness "
-        "check for one create (needs doctype and payload).",
+        "ERPNext connectivity and live metadata. health: the active Instance's tag and base URL, the "
+        "write mode, connectivity, auth and role gaps; show each gaps[].prompt exactly as returned, once per "
+        "session, and never grant the bot a role yourself. whoami: the requester this turn is bound "
+        "to (no network). roles: a user's roles. apps / modules: installed apps. meta / resolve: one "
+        "DocType's live schema / module and app. preflight: write-readiness check for one create "
+        "(needs doctype and payload). promotion_plan: turn environment findings into Instance Notes "
+        "(redacted) as an ordered list of skill_manage/memory calls for you to issue (no network).",
         {"action": {"type": "string", "enum": ["health", "whoami", "roles", "apps", "modules", "meta",
-                                                "resolve", "preflight"]},
+                                                "resolve", "preflight", "promotion_plan"]},
          "doctype": {"type": "string"}, "payload": {"type": "object"},
-         "user": {"type": "string", "description": "roles: the user to look up; omit for the bot account."}},
+         "user": {"type": "string", "description": "roles: the user to look up; omit for the bot account."},
+         "findings": {"type": "object",
+                      "description": "promotion_plan: {findings, doctypes, custom_apps, "
+                                     "non_erpnext_systems, gaps}; pass raw values, they are redacted."},
+         "summary": {"type": "string", "description": "promotion_plan: one-line memory breadcrumb."},
+         "skill_exists": {"type": "boolean",
+                          "description": "promotion_plan: the Instance Notes skill already exists."}},
         required=("action",)),
     "erp_execute_write": _schema(
         "erp_execute_write",
         "The only ERPNext write path. list_ops: every registered operation and its arguments. render: "
-        "prepare the exact request; show its request and confirmation_code to the user. execute: run "
-        "the operation with the rendered args unchanged, plus confirmation_token, issued_at and the "
-        "user's own reply as user_confirmation_text. batch: several steps, stops at the first failure.",
+        "prepare the exact request; show its request and confirmation_code to the user and wait for "
+        "their reply. execute: run the operation with the rendered args unchanged, plus "
+        "confirmation_token, issued_at and the user's own reply, verbatim, as user_confirmation_text "
+        "(never write that text yourself); pass latest_prompt. batch: several steps, stops at the "
+        "first failure. On write_failure, ask the user for the named fields; never fill a value they "
+        "did not give.",
         {"phase": {"type": "string", "enum": ["list_ops", "render", "execute"]},
          "op": {"type": "string", "description": "Operation key from list_ops, e.g. sales.generic."},
          "args": {"type": "object", "description": "The operation's arguments."},
@@ -223,7 +237,14 @@ class ErpTools:
         if action == "whoami":
             return _ok(client.session_identity())
         if action == "health":
-            return _ok(client.health_check(self.tag(args)))
+            return _ok({**client.health_check(self.tag(args)), "mode": self._mode()})
+        if action == "promotion_plan":
+            doc = args.get("findings") or {}
+            return _ok(memory_promote.build_promotion_plan(
+                self.tag(args), doc.get("findings") or {}, doctypes=doc.get("doctypes"),
+                custom_apps=doc.get("custom_apps"), non_erpnext_systems=doc.get("non_erpnext_systems"),
+                one_line_summary=args.get("summary"), skill_already_exists=bool(args.get("skill_exists")),
+                gaps=doc.get("gaps")))
         tag, requester = self.tag(args), None
         if action in ("roles", "apps", "modules", "meta", "resolve", "preflight"):
             requester = self._requester()

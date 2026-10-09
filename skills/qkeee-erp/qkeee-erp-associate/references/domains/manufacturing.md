@@ -8,18 +8,18 @@ file's specifics carry** (no `<erp-instance>` round trip, no confirmed
 field-mandatory list, no confirmed submit/cancel behavior, no confirmed
 Workflow-vs-role-heuristic finding for this module). Treat every claim
 below as a starting hypothesis to verify against a real target instance
-(`discover.py resolve`/`meta`, per `01-connectivity.md`) before acting on
+(`erp_discover resolve`/`meta`, per `01-connectivity.md`) before acting on
 it, not as ground truth the way `domains/inventory.md`'s batch-tracking
 finding is.
 
-**No code exists yet either.** There is no `scripts/domains/
+**No code exists yet either.** There is no `qkeee_erp/domains/
 manufacturing.py`. This reference document describes the target shape a
 future `manufacturing.py` should take; until that module exists and
 registers an `ALLOWED_WRITE_DOCTYPES` allowlist via
 `core.client.register_domain_allowlist()`,
 there is no `manufacturing.*` operation, and `unscoped.generic` refuses
 BOM, Work Order, Job Card, Production Plan, Routing, Workstation and
-Operation (`core/operations.py` `UNSCOPED_DENY`) — there is no write path
+Operation (`qkeee_erp.core.operations` `UNSCOPED_DENY`) — there is no write path
 for this domain in the shipped skill yet, full stop. Anything below framed as
 "drafting/creating" a manufacturing doctype describes a future build
 target, not a live capability.
@@ -58,12 +58,12 @@ trusting it, same caveat as the intro above.
 Draft, needs live confirmation — same caveat as the intro above.
 
 1. Before proposing any manufacturing-specific field or workflow, run
-   `discover.py resolve "BOM"` / `"Work Order"` / `"Job Card"` and
-   `discover.py meta` for each — per `01-connectivity.md`'s non-negotiable
+   `erp_discover resolve "BOM"` / `"Work Order"` / `"Job Card"` and
+   `erp_discover meta` for each — per `01-connectivity.md`'s non-negotiable
    4, do not carry general ERPNext manufacturing knowledge into a specific
    org's instance without this confirmation, especially here where no
    prior build has ever done it. **Done when:** every field/doctype
-   claim in the ensuing draft traces to a live `discover.py` result, not
+   claim in the ensuing draft traces to a live `erp_discover` result, not
    general knowledge.
 2. **BOM (Bill of Materials):** review/draft the item/operation/raw-
    material structure. Query existing BOMs for an item before assuming
@@ -118,7 +118,7 @@ with `domain=` omitted since there's no allowlist yet to gate against) is
 usable today for a user who just wants to look at BOM/Work Order/Job Card
 data — but say explicitly that manufacturing writes aren't a capability of
 this skill yet (the unscoped operation refuses them anyway). When a real build happens, it
-should write `scripts/domains/manufacturing.py`, declare its
+should write `qkeee_erp/domains/manufacturing.py`, declare its
 `ALLOWED_WRITE_DOCTYPES`, and replace every "proposed"/"unconfirmed" claim
 in this file with a live-verified one — the same bar every other domain
 file here is held to.

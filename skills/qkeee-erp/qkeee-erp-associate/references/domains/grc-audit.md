@@ -1,7 +1,7 @@
 # Domain: grc-audit (cross-cutting statutory-audit framing)
 
 Not a doctype-scoped domain like the other ten — there is no
-`scripts/domains/grc_audit.py` and no `ALLOWED_WRITE_DOCTYPES` of its own.
+`qkeee_erp/domains/grc_audit.py` and no `ALLOWED_WRITE_DOCTYPES` of its own.
 This is the cross-cutting frame that pulls together the RBAC/audit/
 redaction guardrails already stated once in `00-conventions.md`'s GRC
 baseline, into the shape a statutory-audit conversation actually needs:
@@ -21,7 +21,7 @@ reviews).
 
 ## The audit trail this skill produces
 
-Every write goes through the operation pipeline's (`core/operations.py`) two-phase
+Every write goes through the operation pipeline's (`qkeee_erp.core.operations`) two-phase
 logging into `Qkeee Bot Audit Log` (`Attempted` → `Success`/`Failure`),
 carrying: `session`, `requested_by`, `action`, `reference_doctype`/
 `reference_name`, `timestamp`, `status`, `payload_before`/`payload_after`
@@ -41,7 +41,7 @@ unconditionally — neither is debug-gated or PROD-only.
   yet, or a doctype temporarily unreachable, means the real write still
   happens but doesn't get logged; an orphaned `Attempted` row is the
   detectable trace of a crash mid-write, not a cover-up.
-  `AUDIT_EXEMPT_DOCTYPES` in `core/client.py` deliberately excludes the
+  `AUDIT_EXEMPT_DOCTYPES` in `qkeee_erp.core.client` deliberately excludes the
   audit log itself and `Comment` from being logged, to avoid infinite
   recursion — not a gap in coverage of business writes. On the read
   path, the equivalent exemption (`_LOG_READ_RECURSION_EXEMPT_DOCTYPES`)
@@ -97,10 +97,10 @@ unconditionally — neither is debug-gated or PROD-only.
 4. **State plainly which GRC guarantees are live vs. still aspirational**
    when a compliance-minded user asks — never imply a control is enforced
    in code before confirming it against this skill's actual
-   `core/client.py`. Honesty about what's aspirational vs. live is itself
+   `qkeee_erp.core.client`. Honesty about what's aspirational vs. live is itself
    a GRC property this skill should model, not undermine. **Done when:**
    every guarantee named in the reply is confirmed live against
-   `core/client.py`, or explicitly marked aspirational.
+   `qkeee_erp.core.client`, or explicitly marked aspirational.
 5. **Segregation-of-duties questions** ("did the same person both approve
    and execute this write") map to `requested_by` (who asked) vs. whoever
    is actually operating this skill (the bot account, always) — this
@@ -124,6 +124,6 @@ unconditionally — neither is debug-gated or PROD-only.
 
 Cross-cutting over every functional domain — always paired with one of
 them in an actual conversation, never invoked alone. Depends on
-`scripts/init_bot.py` having provisioned `Qkeee Bot Audit Log` on the
+`hermes qkeee-erp init-bot` having provisioned `Qkeee Bot Audit Log` on the
 target instance; if it hasn't, say so rather than reporting an empty
 trail as "clean."

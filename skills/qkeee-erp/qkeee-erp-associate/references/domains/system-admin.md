@@ -2,18 +2,18 @@
 
 This is the widest-blast-radius domain here (user/role/permission changes,
 destructive actions), and it carries the most business logic of any
-domain module. Code: `scripts/domains/system_admin.py`
+domain module. Code: `qkeee_erp/domains/system_admin.py`
 (`ALLOWED_WRITE_DOCTYPES = ("User", "Role", "Custom Field", "Property
 Setter", "Webhook", "Workflow")`).
 
-Every write is a named operation through `execute_write.py --op`, sent
+Every write is a named operation through `erp_execute_write`, sent
 with the tag's separate ADMIN credential
 (`QKEEE_ERP_<TAG>_ADMIN_API_KEY`/`_ADMIN_API_SECRET`, a System Manager
 account). The everyday bot credential never holds System Manager. Every
 operation in this domain, `system_admin.generic` included, always needs
 the confirmation — anything sent with the admin key does: render, show
 the user the rendered request and code, execute with their reply
-(`cli-cookbook.md`).
+(`tool-cookbook.md`).
 
 | Operation | Write | Args |
 |---|---|---|
@@ -52,7 +52,7 @@ integrations, checking instance health.
   toggle) all get the same backstop.
 - **Know the token gate's limit before treating it as sufficient on its
   own.** A matching `confirmation_token` proves the call being made is
-  byte-for-byte identical to what `confirm_token.py render` last printed, and that
+  byte-for-byte identical to what `erp_execute_write render` last returned, and that
   it happened within 15 minutes — no more. It does **not** prove a human
   read the rendered confirmation and said yes. `issued_at`/token must
   only be used after the user's own reply affirmatively confirms that
@@ -178,7 +178,7 @@ integrations, checking instance health.
     account must be gone entirely — disable is reversible; delete is
     confirmed to fail with `LinkExistsError` on any user who owns/created
     other records (a never-referenced user deletes cleanly). Only after
-    both confirmations, execute with the printed args and token. A
+    both confirmations, execute with the rendered args and token. A
     failed delete leaves no Comment behind; the audit row records it.
     **Done when:** a stated reason and both confirmations are in place
     before the operation runs.
@@ -201,8 +201,9 @@ integrations, checking instance health.
 ## Relationships
 
 Provisioning of the audit-trail schema itself (`Qkeee Bot Audit Log`) is
-`scripts/init_bot.py`'s job, run once per target environment before any
-domain's writes against that tag — see `00-conventions.md`'s GRC baseline
-and `scripts/init_bot.py`'s own docstring for what it provisions (the
+the Operator's job: `hermes qkeee-erp init-bot`, run once per target
+environment before any domain's writes against that tag (Operator-only;
+you cannot run it) — see `00-conventions.md`'s GRC baseline and the
+plugin's `qkeee_erp.init_bot` docstring for what it provisions (the
 `Qkeee Bot` Role and Audit Log DocType) and what it doesn't (bot-user
 provisioning).

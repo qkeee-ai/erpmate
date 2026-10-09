@@ -1,12 +1,12 @@
 # Domain: sales (Customer, Quotation, Sales Order, Delivery Note)
 
-Code: `scripts/domains/sales.py` (`ALLOWED_WRITE_DOCTYPES = ("Customer",
+Code: `qkeee_erp/domains/sales.py` (`ALLOWED_WRITE_DOCTYPES = ("Customer",
 "Quotation", "Sales Order", "Delivery Note")`). Deliberately scoped to
 ERPNext's Selling module, not a full CRM replacement.
 
 This domain has no unique connector logic of its own. Writes are
-operation `sales.generic` through `execute_write.py` (`--domain sales`);
-submit/cancel/delete need a rendered confirmation (`cli-cookbook.md`).
+operation `sales.generic` through `erp_execute_write` (`op="sales.generic"`);
+submit/cancel/delete need a rendered confirmation (`tool-cookbook.md`).
 Composing drafts and reports below is prompt discipline.
 
 ## When this domain applies

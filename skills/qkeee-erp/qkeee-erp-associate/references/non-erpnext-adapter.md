@@ -1,6 +1,6 @@
 # Non-ERPNext systems adapter procedure
 
-Not a connector — `scripts/core/client.py` is Frappe-REST-specific by
+Not a connector — `qkeee_erp.core.client` is Frappe-REST-specific by
 construction, and nothing in this skill auto-discovers or drives an
 arbitrary external API. This is the procedure for when a user's request
 is about a system that genuinely isn't ERPNext (a third-party accounting
@@ -13,7 +13,7 @@ in our gateway's dashboard."
 ## Procedure
 
 1. **Never guess at a non-ERPNext system's shape.** Unlike ERPNext,
-   there's no `discover.py meta` equivalent, no live-metadata fallback,
+   there's no `erp_discover meta` equivalent, no live-metadata fallback,
    and no prior domain-knowledge file to ground a guess in. Explicitly
    request one of: the system's API documentation, a user guide, or a
    URL to its docs — before attempting any action against it. If none is
@@ -36,7 +36,7 @@ in our gateway's dashboard."
 4. **Catalog what's learned the same way as a custom Frappe app.** A
    non-ERPNext system's notes land under
    `qkeee-erp-learned/<env-tag>/references/non-erpnext/<system-slug>.md`
-   — same tier, same promotion path (`memory_promote.py`'s redact +
+   — same tier, same promotion path (`erp_discover promotion_plan`'s redact +
    format, then `skill_manage`), same one-line `MEMORY.md` breadcrumb
    convention as a custom app gets under `custom-apps/<app-slug>.md`. See
    `00-conventions.md`'s naming table.

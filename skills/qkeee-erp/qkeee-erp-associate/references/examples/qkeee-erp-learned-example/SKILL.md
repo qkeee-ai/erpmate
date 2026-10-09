@@ -6,8 +6,8 @@ description: "Learned notes for ERPNext environment tag 'example-env' — versio
 # qkeee-erp-learned/example-env
 
 Durable, per-environment knowledge for `qkeee-erp-associate`'s `example-env`
-tag — created and updated via `skill_manage` by
-`scripts/core/memory_promote.py`'s promotion plan. This is a satellite
+tag — created and updated via `skill_manage` from the plan that
+`erp_discover` (action `promotion_plan`) returns. This is a satellite
 skill, not a copy of the associate itself: `qkeee-erp-associate` stays
 protected/externally-owned (see its own SKILL.md status note); this
 skill is the deliberately-open counterpart Hermes' background-review pass
@@ -32,5 +32,5 @@ Every entry below is appended under a `## Learned <YYYY-MM-DD>` heading —
 never edit or delete a prior entry, per the naming conventions in
 `qkeee-erp-associate/references/00-conventions.md`. All content here has
 already been through `redact_pii()`/`_redact_pii_deep()` before landing —
-see `memory_promote.py`'s module docstring for why that pass is
+see the qkeee-erp plugin's `qkeee_erp.core.memory_promote` for why that pass is
 load-bearing, not a courtesy.

@@ -260,10 +260,9 @@ tts:
 # so those entries never matched anything and were dead config. Removed
 # 2026-08-23 (adversarial-review follow-up) rather than left in place,
 # since a stray real pattern added here later next to bogus-looking
-# entries could plausibly go unnoticed on review. Every
-# `python .../scripts/execute_write.py ...` invocation should go through
-# Hermes's normal dangerous-command approval flow, on top of (not
-# instead of) this library's own advisory-first/confirmation-token gate.
+# entries could plausibly go unnoticed on review. ERPNext writes run only
+# through the qkeee-erp plugin's erp_execute_write tool (its own
+# confirmation-token gate), never through a terminal command.
 command_allowlist: []
 onboarding:
   seen:

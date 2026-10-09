@@ -104,6 +104,33 @@ class DiscoverToolTests(ToolTestCase):
         self.assertEqual(out["result"]["resolved_sender_email"], "nikhil@org.com")
         mocked.assert_not_called()
 
+    def test_health_reports_the_instance_and_the_mode(self):
+        self.settings = {"active_env": "dev", "mode": "read-only"}
+        with patch.object(client, "health_check", return_value={"tag": "dev", "base_url": "https://e"}):
+            out = self.call(self.tools({}), "erp_discover", {"action": "health"})
+        self.assertEqual(out["result"], {"tag": "dev", "base_url": "https://e", "mode": "read-only"})
+
+    def test_promotion_plan_needs_no_requester_and_no_network(self):
+        findings = {"findings": {"frappe_version": "15.4.0", "notes": "SSN 123-45-6789"},
+                    "gaps": [{"key": "module_def_read"}]}
+        with patch.object(client, "_request") as network:
+            out = self.call(self.tools({}), "erp_discover",
+                            {"action": "promotion_plan", "findings": findings, "summary": "v15"})
+        network.assert_not_called()
+        self.assertTrue(out["ok"])
+        plan = out["result"]
+        self.assertEqual(plan[0]["action"], "create")
+        self.assertEqual(plan[-1]["tool"], "memory")
+        self.assertIn("PARTIAL", plan[-1]["content"])
+        self.assertNotIn("123-45-6789", json.dumps(plan))
+        self.assertIn("dev", plan[0]["name"])  # the active Instance tag
+
+    def test_promotion_plan_for_an_existing_learned_skill_edits_it(self):
+        out = self.call(self.tools({}), "erp_discover",
+                        {"action": "promotion_plan", "findings": {}, "skill_exists": True, "tag": "qa"})
+        self.assertEqual(out["result"][0]["action"], "edit")
+        self.assertIn("qa", out["result"][0]["name"])
+
     def test_meta_is_gated_on_the_session_sender(self):
         from qkeee_erp_plugin.qkeee_erp import discover
         with patch.object(discover, "doctype_meta", return_value={"fields": []}) as mocked:

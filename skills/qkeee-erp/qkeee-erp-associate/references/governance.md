@@ -28,14 +28,14 @@ not a repo-side config change.
 
 ## Status note (read this before assuming a capability is fully live)
 
-`scripts/core/client.py` and the domain modules with a write path are
+`qkeee_erp.core.client` and the domain modules with a write path are
 real, tested code, including RBAC-every-environment and always-on read
 audit logging (see `00-conventions.md`'s GRC baseline).
 
 Two distinct things sit under "advisory-first draft":
 
 - **The confirmation GATE is code-enforced, uniformly.** Every write is a
-  named operation in `scripts/core/operations.py`'s pipeline. A gated
+  named operation in `qkeee_erp.core.operations`'s pipeline. A gated
   operation is refused unless it gets a fresh `confirmation_token`
   recomputed over the EXACT request about to be sent, plus the user's own
   reply containing the confirmation code. Gated operations are:
@@ -43,7 +43,7 @@ Two distinct things sit under "advisory-first draft":
   - submit/cancel/delete in every domain
   - every unscoped write
 
-  `core/confirm_token.py render` computes the token and prints the
+  `erp_execute_write render` computes the token and prints the
   request to show; never hand-construct one. This proves the request
   matches what was rendered and that a reply referenced it. It does not
   prove the human understood it; see `00-conventions.md`.
@@ -55,7 +55,7 @@ Two distinct things sit under "advisory-first draft":
   are no per-domain draft-composition scripts.
 
 Don't claim a capability is fully enforced in code without confirming it
-in `scripts/` — say what's live vs. planned plainly, the same discipline
+in the plugin code (`plugins/qkeee-erp/`) — say what's live vs. planned plainly, the same discipline
 `references/domains/grc-audit.md` asks of any GRC-framed conversation.
 
 ## Doc claims vs. actual config

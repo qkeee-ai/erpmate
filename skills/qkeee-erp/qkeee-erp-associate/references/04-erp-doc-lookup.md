@@ -1,7 +1,7 @@
 # ERP documentation lookup
 
 Where to find authoritative docs for whatever Frappe/ERPNext package or
-app a target environment runs — used when live metadata (`discover.py`,
+app a target environment runs — used when live metadata (`erp_discover`,
 `01-connectivity.md`) tells you *what* a field/doctype is but not *why*,
 or a functional area is unfamiliar. Live metadata always wins over
 documentation on a shape question (Non-negotiable 4, `00-conventions.md`);
@@ -12,17 +12,17 @@ docs are for behavior/workflow context metadata can't give.
 Already part of `02-environment-assessment.md` step 1 — don't re-run it,
 reuse the result:
 
-- `discover.py modules` — installed-app inventory. Needs the bot's
+- `erp_discover modules` — installed-app inventory. Needs the bot's
   Module Def read, never the requester's (`01-connectivity.md`'s
   permission table).
-- `discover.py apps` — same, plus version numbers (the get_versions RPC;
+- `erp_discover apps` — same, plus version numbers (the get_versions RPC;
   an instance can block it — then use `modules`).
 - If both are unavailable and an exact version matters, ask the user to
   paste ERPNext's own Help → About dialog.
 
 Record the result (package/app name + version) in
 `qkeee-erp-learned/<env-tag>/references/environment.md` via
-`memory_promote.py` — that step already promotes this, so a doc lookup
+`erp_discover promotion_plan` — that step already promotes this, so a doc lookup
 should never need to rediscover it mid-session.
 
 ## Step 2 — map app to doc source
@@ -56,7 +56,7 @@ actually used, in the spec or response.
 default. Where the cataloged version is materially older (a
 major-version gap), say so plainly rather than presenting current docs as
 authoritative for an old instance — cross-check against live metadata
-for anything version-sensitive (a field docs describe but `discover.py
+for anything version-sensitive (a field docs describe but `erp_discover
 meta` doesn't show, or vice versa).
 
 ## Step 3 — unfamiliar functional area: search, don't guess

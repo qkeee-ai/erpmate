@@ -11,6 +11,8 @@ requester origin, and a guard against identity override
 - identity_guard.py: blocks terminal / execute_code calls that override
   HERMES_SESSION_* or reach the ERPNext credentials around the erp_* tools.
 
+- skills/usage/SKILL.md: `qkeee-erp:usage`, the rules for calling the
+  erp_* tools (load on demand with skill_view).
 - cli.py: the Operator CLI, `hermes -p <profile> qkeee-erp <command>`.
 - settings.py: the plugin's own settings (plugins.entries.qkeee-erp.settings).
   While the legacy skills.config.qkeee_erp section is present, setup is
@@ -26,6 +28,7 @@ Enabled at boot by docker/cont-init.d/018-qkeee-erp-plugin.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,11 @@ def register(ctx) -> None:
                                  handler_fn=cli.OperatorCli(read_config=_profile_config).run)
     except Exception as e:
         logger.error("qkeee-erp plugin: Operator CLI not registered: %s", e)
+    try:
+        ctx.register_skill("usage", Path(__file__).parent / "skills" / "usage" / "SKILL.md",
+                           description="Rules for calling the erp_* tools safely.")
+    except Exception as e:
+        logger.error("qkeee-erp plugin: skill qkeee-erp:usage not registered: %s", e)
 
     try:
         from hermes_constants import get_hermes_home

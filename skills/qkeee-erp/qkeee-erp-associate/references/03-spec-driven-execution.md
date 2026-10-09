@@ -61,8 +61,8 @@ unreviewed multi-step write costs a lot.
    working contract, not a report. State plainly where a functional
    detail is still unconfirmed against live metadata (Non-negotiable 4,
    `00-conventions.md`) rather than papering over the gap. **For every
-   doctype the spec creates, run `discover.py preflight "<DocType>"
-   --payload '<the exact payload>'`** and paste its result into Schema
+   doctype the spec creates, run `erp_discover(action="preflight", doctype="<DocType>",
+   payload={<the exact payload>})`** and paste its result into Schema
    evidence. `ready: false` means the create does not go ahead: resolve
    each blocker with the user first. `custom_fields_merged: false` blocks
    until the user explicitly overrides; record the override, in their
@@ -115,19 +115,19 @@ unreviewed multi-step write costs a lot.
    non-negotiable in `00-conventions.md` still apply in full — the spec
    sequences the work, it doesn't relax save-draft-then-review-then-submit,
    the write-allowlist gate, or anything else already enforced in
-   `scripts/core/client.py`. Run exactly the calls in Exact calls.
+   `qkeee_erp.core.client`. Run exactly the calls in Exact calls.
    - **Any change to an approved value is a deviation.** Log it under
      Deviations (what, why, who agreed) and re-confirm with the user
      before the write that uses it. There is no silent fix-up step: "the
      Link didn't resolve, so update that field" changes data outside what
      was approved.
-   - **A structured failure stops the step.** When `execute_write.py`
+   - **A structured failure stops the step.** When `erp_execute_write`
      prints `{"write_failure": {error_class, missing_fields,
      invalid_links, message}}`, stop. Show the user the missing or
      invalid fields, ask for the values, update the spec, re-confirm.
      Never fill a value the user did not give, and never retry blind.
    - **A batch stops at the first failure.** Run several writes as one
-     `execute_write.py --batch`. On a failure, nothing after it runs.
+     `erp_execute_write batch`. On a failure, nothing after it runs.
      Report every step as a table: created, failed, not attempted.
    **Done when:** every technical step has run, or is marked
    deviated-with-reason in the spec file — never silently skipped.
@@ -190,7 +190,7 @@ updated/submitted, reports run, any approval/workflow implication. Say
 record is "saved" and live on save (`00-conventions.md`).
 
 ## Schema evidence
-Per doctype written, from `discover.py preflight` (paste the result, or
+Per doctype written, from `erp_discover preflight` (paste the result, or
 these lines from it):
 - Meta source: getdoctype | bare_doctype; custom_fields_merged: true|false
   (false: the user's override, quoted)
@@ -219,7 +219,7 @@ The query that finds the records (name prefix, `qkeee-demo` tag) and the
 action that removes them — `00-conventions.md`'s Demo and test data.
 
 ## Exact calls
-Per write: the full `execute_write.py` command (or the `--batch` step)
+Per write: the full `erp_execute_write` command (or the `--batch` step)
 and the payload JSON, exactly as it will run. Nothing is decided at
 execution time.
 

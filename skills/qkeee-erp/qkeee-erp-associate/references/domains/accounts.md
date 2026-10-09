@@ -1,13 +1,13 @@
 # Domain: accounts (AP/AR, Journal Entry, tax)
 
-Code: `scripts/domains/accounts.py`
+Code: `qkeee_erp/domains/accounts.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Journal Entry", "Payment Entry", "Purchase
 Invoice", "Sales Invoice")` — see that module's docstring). Applies
 `00-conventions.md` and `01-connectivity.md` in full; this file adds only
 what's specific to AP/AR, JE drafting, 3-way match, and tax mechanics.
 
-Every write is operation `accounts.generic` through `execute_write.py`
-(`--domain accounts` shorthand) — this domain has no unique connector
+Every write is operation `accounts.generic` through `erp_execute_write`
+(`op="accounts.generic"`) — this domain has no unique connector
 logic of its own. Composing the draft (JE balance enforcement,
 cancel-impact wording) is prompt discipline; no script does it. The
 submit/cancel/delete gate is code-enforced: each needs a rendered
@@ -81,7 +81,7 @@ review, TDS/GST/e-invoicing/e-way-bill questions.
    field (`account`, `party`, `cost_center`, `against_account` where set)
    resolves to a real, existing record. Fix via `update` and re-review if
    anything is wrong. Only once the reviewed draft is correct, present it
-   for a second explicit confirmation: render it (`core/confirm_token.py render --op accounts.generic --args '{"doctype": ..., "action": "submit", "name": ...}'`), show the user the rendered request and confirmation code, and execute with their own reply — see `cli-cookbook.md`.
+   for a second explicit confirmation: render it (`erp_execute_write(phase="render", op="accounts.generic", args={"doctype": ..., "action": "submit", "name": ...})`), show the user the rendered request and confirmation code, and execute with their own reply — see `tool-cookbook.md`.
    The submit is refused without that, or if the JE changed since render.
    **Cancelling an existing document** gets the same staged-confirmation
    treatment and the same gate (`"action": "cancel"`) — state the impact

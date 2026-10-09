@@ -40,7 +40,7 @@ Synthetic values only; easy to find and remove afterwards.
 
 ## Schema evidence
 
-`discover.py preflight Employee --payload '<payload below>'`
+`erp_discover(action="preflight", doctype="Employee", payload=<payload below>)`
 (illustrative output):
 
 - Meta source: `getdoctype`; custom_fields_merged: `true`
@@ -78,8 +78,8 @@ Inactive employees. (Had they been `Active`, all of those would apply.)
 Run before create:
 
 ```
-python ${HERMES_SKILL_DIR}/scripts/core/client.py --tag DEMO_ERP query Employee \
-  --filters '[["first_name","like","Demo %"]]' --fields '["name","first_name","status"]'
+erp_query(doctype="Employee", filters=[["first_name", "like", "Demo %"]],
+          fields=["name", "first_name", "status"], prompt_summary="demo employees: idempotency check")
 ```
 
 Result (illustrative): `[]` — no demo Employees exist. A re-run of this
@@ -91,12 +91,12 @@ Delete each record while nothing links to it (confirmed write, an HR
 Manager or System Manager requester):
 
 ```
-python ${HERMES_SKILL_DIR}/scripts/core/confirm_token.py render --op hr_payroll.generic \
-  --args '{"doctype": "Employee", "action": "delete", "name": "<HR-EMP-nnnnn>"}'
+erp_execute_write(phase="render", op="hr_payroll.generic",
+                  args={"doctype": "Employee", "action": "delete", "name": "<HR-EMP-nnnnn>"})
 ```
 
-then `execute_write.py --op hr_payroll.generic --args '<printed args>'` with
-the printed token and the user's reply. If anything links to it, set
+then `erp_execute_write(phase="execute", ...)` with the rendered args,
+token and `issued_at`, and the user's reply. If anything links to it, set
 `status: "Left"` with a `relieving_date` instead.
 
 ## Teardown (demo/test data only)
@@ -112,11 +112,10 @@ the printed token and the user's reply. If anything links to it, set
 One batch; stops at the first failure:
 
 ```
-python ${HERMES_SKILL_DIR}/scripts/execute_write.py --tag DEMO_ERP --mode read-write \
-  --requested-by nikhil.sharma@qkeee.in --session-id <session> --channel "Google Chat" \
-  --channel-metadata '{"space": "<space>", "thread": "<thread>"}' \
-  --latest-prompt "<the user's literal request>" \
-  --batch '[
+erp_execute_write(phase="execute",
+  prompt_summary="create two demo Employees on DEMO_ERP",
+  latest_prompt="<the user's literal request>",
+  batch=[
     {"op": "hr_payroll.generic", "user_approved": true,
      "approval_note": "CONFIRM DEMO EMPLOYEES",
      "args": {"doctype": "Employee", "action": "create",
@@ -131,20 +130,20 @@ python ${HERMES_SKILL_DIR}/scripts/execute_write.py --tag DEMO_ERP --mode read-w
                   "gender": "Male", "date_of_birth": "1990-01-01",
                   "date_of_joining": "2026-10-01", "company": "DEMO LLP",
                   "status": "Inactive"}}}
-  ]'
+  ])
 ```
 
 `user_approved` is set per step: only for a write whose payload the user
 confirmed. A batch has no batch-level approval flag.
 
 Then, per returned name:
-`python ${HERMES_SKILL_DIR}/scripts/core/client.py --tag DEMO_ERP get Employee <name>`.
+`erp_get(doctype="Employee", name="<name>")`.
 
 ## Risks / open questions
 
 - ~~The user must confirm the synthetic values before creation.~~ Closed:
   confirmed 2026-10-07 (`CONFIRM DEMO EMPLOYEES`).
-- ~~`discover.py modules`/`apps` fail for the requester (no Module Def
+- ~~`erp_discover modules`/`apps` fail for the requester (no Module Def
   read).~~ Closed by issue 02 (Environment Metadata exemption, ADR 0001).
 - Carried forward: tag `qkeee-demo` not yet set (no tag write in this
   skill). Owner: the user, in the ERPNext UI.

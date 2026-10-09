@@ -1,12 +1,12 @@
 # Domain: procurement (Supplier, Address, Contact, PO, RFQ)
 
-Code: `scripts/domains/procurement.py`
+Code: `qkeee_erp/domains/procurement.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Supplier", "Address", "Contact", "Purchase
 Order", "Request for Quotation", "Supplier Quotation")`).
 
-Writes are operation `procurement.generic` through `execute_write.py`
-(`--domain procurement`); submit/cancel/delete need a rendered
-confirmation (`cli-cookbook.md`). Its one domain rule in code is the
+Writes are operation `procurement.generic` through `erp_execute_write`
+(`op="procurement.generic"`); submit/cancel/delete need a rendered
+confirmation (`tool-cookbook.md`). Its one domain rule in code is the
 Supplier KYC gate below. Composing drafts and reports is prompt
 discipline.
 
@@ -47,7 +47,7 @@ checking a supplier's performance.
   rather than rejecting them), and the session concluded — incorrectly —
   that GSTIN "would need a custom field on Supplier." It doesn't; it
   needs an Address record, created and linked the normal way. Confirm the
-  live field name for this instance via `discover.py meta "Address"`
+  live field name for this instance via `erp_discover meta "Address"`
   (`gstin`, `tax_id`, `pan`, or an instance-specific custom field — never
   assumed) before building the `kyc.address` payload below. **Exception:
   core ERPNext without India Compliance** — its Address has no tax-ID
@@ -73,23 +73,23 @@ checking a supplier's performance.
    operation.** Present the proposed, KYC-complete record (Supplier fields plus
    the Address the tax ID/registered address will carry, and Contact if
    captured) and get explicit confirmation. Then a single
-   `execute_write.py --domain procurement --doctype Supplier --action
-   create --payload '{...
+   `erp_execute_write(phase="execute", op="procurement.generic",
+   args={"doctype": "Supplier", "action": "create", "payload": {...
    supplier_name, supplier_type, supplier_group, country,
-   default_currency, ...}, kyc={"address": {... address_line1, city,
+   default_currency, ...}, "kyc": {"address": {... address_line1, city,
    state, country, pincode, and whichever field this instance's live
-   `discover.py meta "Address"` confirmed carries the tax ID — gstin,
+   `erp_discover meta "Address"` confirmed carries the tax ID — gstin,
    tax_id, pan, ... }, "contact": {... first_name, email_id, phone
-   ...} (optional)}'` call creates the Supplier, then the linked
+   ...} (optional)}})` call creates the Supplier, then the linked
    Address (and Contact, if given) — the Dynamic Link back to the new
    Supplier name is wired automatically, don't build it by hand. If the
    Address or Contact create fails server-side, the Supplier is deleted
    again and `KycLinkFailedError` says nothing is left behind; if even
    that delete fails, `KycPartialFailureError` names the Supplier left
-   behind — tell the user, never retry blindly (exit code 4). Only
+   behind — tell the user, never retry blindly (`outcome_unknown`). Only
    when the user has explicitly confirmed proceeding without KYC (they
    declined to provide it, a jurisdiction with no applicable tax ID),
-   pass `kyc_waiver_confirmed=True` instead — say so plainly in the
+   pass `"kyc_waiver_confirmed": true` in `args` instead — say so plainly in the
    report-back, don't let a waived KYC read the same as a captured one.
    Neither given raises `IncompleteSupplierKYCError` before anything is
    written (see the non-negotiable above). Backfilling KYC onto an

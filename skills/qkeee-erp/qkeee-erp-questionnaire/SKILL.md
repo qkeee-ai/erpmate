@@ -40,7 +40,7 @@ requester about facts they've already said they don't have.
    from context. **Done when:** the recipient's role/relationship to the
    record is known.
 3. **What's needed back?** Tie each question to the doctype's real field
-   name — confirm via `discover.py meta` (per `01-connectivity.md`) if
+   name — confirm via `erp_discover meta` (per `01-connectivity.md`) if
    this session hasn't already resolved the live schema — so the
    recipient's answer maps cleanly onto a payload later instead of
    needing re-interpretation. **Done when:** every open field maps to a

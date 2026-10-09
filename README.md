@@ -21,23 +21,31 @@ An ERPNext specialist that acts like a functional consultant, not a click-execut
 | `distribution.yaml` | Profile manifest / distribution metadata — `distribution_owned` lists exactly what `hermes profile update` is allowed to overwrite: `SOUL.md`, `skills/` (the whole tree, not just `skills/qkeee-erp/`), `cron/jobs.json`, `config.yaml`, `mcp.json` |
 | `SOUL.md` | Agent identity, voice, personality — loaded into system prompt slot #1 |
 | `config.yaml` | Model, provider, toolsets, `skills.external_dirs`, `skills.write_approval`, plus the cost-control block: `auxiliary.*` (every background task pinned to a `:free` model), `compression.threshold`, trimmed `platform_toolsets`, and `context.engine: lcm` written in by the Docker boot hooks |
-| `mcp.json` | MCP server connections (currently no servers configured; ERPNext access goes through `qkeee-erp-associate`'s REST connector scripts) |
-| `skills/qkeee-erp/` | The `qkeee-erp-associate` skill — mounts read-only into the live profile via `skills.external_dirs`, edited here only |
+| `mcp.json` | MCP server connections (currently no servers configured; ERPNext access goes through the `qkeee-erp` plugin's `erp_*` tools) |
+| `skills/qkeee-erp/` | The `qkeee-erp-associate` skill: ERP domain know-how only, no code — mounts read-only into the live profile via `skills.external_dirs`, edited here only |
+| `plugins/qkeee-erp/` | The `qkeee-erp` gateway plugin: all ERP code, the `erp_*` tools, the identity guard, Kanban hooks, the `qkeee-erp:usage` skill and the Operator CLI (`hermes -p <profile> qkeee-erp …`). Its settings: `plugins.entries.qkeee-erp.settings` (`active_env`, `mode`) |
 | `cron/` | Scheduled jobs (e.g. recurring MIS reports); currently empty |
 | `adminops/` | Operator maintenance tools, baked into the image at `/opt/adminops/` (not run at boot). See [adminops/README.md](adminops/README.md) |
 | `profile.md` | Purpose / Owns / Should-Not-Own / safety policy / operating protocol for this agent — user-owned, not replaced on `profile update` |
 
-**Skill** (`skills/qkeee-erp/qkeee-erp-associate/`) — one skill, thin `SKILL.md` router, domain procedures loaded on demand:
+**Plugin** (`plugins/qkeee-erp/`) — runs only in the gateway process:
 
 | Path | Role |
 |---|---|
-| `scripts/core/client.py` | Shared connector — auth, discovery, RBAC pre-check, write-allowlist gate, PII redaction, audit logging |
-| `scripts/domains/*.py` | Per-domain functions + `ALLOWED_WRITE_DOCTYPES`: `hr_payroll`, `accounts`, `mis` (no write path), `sales`, `procurement`, `inventory`, `fixed_assets`, `system_admin` |
-| `references/domains/*.md` | Per-domain procedure, one per module above, plus `manufacturing.md` and `doc-extraction.md` |
-| `references/00-conventions.md` | Naming rules, GRC baseline, scope guardrail — single copy, referenced by every domain file |
-| `scripts/init_bot.py` | Admin-invoked, one-time: provisions the `Qkeee Bot` Role + `Qkeee Bot Audit Log` doctype |
+| `qkeee_erp/core/client.py` | Shared connector — auth, discovery, RBAC pre-check, write-allowlist gate, PII redaction, audit logging |
+| `qkeee_erp/core/operations.py` | The one write pipeline and the registry of named write operations |
+| `qkeee_erp/domains/*.py` | Per-domain allowlists + operations: `hr_payroll`, `accounts`, `mis` (no write path), `sales`, `procurement`, `inventory`, `fixed_assets`, `system_admin` |
+| `qkeee_erp/init_bot.py` | Operator-only, one-time: provisions the `Qkeee Bot` Role + `Qkeee Bot Audit Log` doctype (`hermes qkeee-erp init-bot`) |
+| `erp_tools.py`, `cli.py`, `settings.py` | The `erp_*` tools, the Operator CLI (same code path as the tools), the plugin settings |
+| `skills/usage/SKILL.md` | `qkeee-erp:usage`: the rules for calling the `erp_*` tools, loaded on demand |
 
-Domain modules import the shared core directly (same-skill imports) — there is only one connector implementation.
+**Skill** (`skills/qkeee-erp/qkeee-erp-associate/`) — thin `SKILL.md` router, domain procedures loaded on demand, no code:
+
+| Path | Role |
+|---|---|
+| `references/domains/*.md` | Per-domain procedure, one per domain module above, plus `manufacturing.md` and `doc-extraction.md` |
+| `references/00-conventions.md` | Naming rules, GRC baseline, scope guardrail — single copy, referenced by every domain file |
+| `references/tool-cookbook.md` | Worked `erp_*` calls |
 
 ### Runtime-only (never commit)
 
@@ -45,16 +53,15 @@ Domain modules import the shared core directly (same-skill imports) — there is
 
 ### ERPNext credentials: `qkeee-erp.env`, not `.env`
 
-ERPNext instance credentials (`QKEEE_ERP_*`) live in their own file at `$HERMES_HOME/qkeee-erp.env`, deliberately **outside** the profile's main `.env`. `scripts/core/client.py` reads this file directly, bypassing Hermes' sandbox env-stripping (`execute_code`/`terminal` sandboxes strip env vars by default; only statically-declared `required_environment_variables` for the DEFAULT tag survive) and the `env_passthrough` allowlist. This also keeps ERPNext secrets physically separate from any LLM-provider key in the main `.env`.
+ERPNext instance credentials (`QKEEE_ERP_*`) belong to the `qkeee-erp` plugin, not the profile: `$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` (mode 600), read only in the gateway by the plugin's connector. They never reach the agent's terminal or `execute_code`, and the plugin's identity guard blocks commands that reach for the file. This also keeps ERPNext secrets physically separate from any LLM-provider key in the main `.env`.
 
-- Copy `skills/qkeee-erp/qkeee-erp-associate/qkeee-erp-associate.env.example` to `$HERMES_HOME/qkeee-erp.env` and fill in real values out-of-band — never by having the agent read/cat this file or echo the values back.
-- One file holds every environment **tag** (`qkeee_erp.active_env`): `QKEEE_ERP_<TAG>_BASE_URL` / `_API_KEY` / `_API_SECRET` (required), plus optional `_ALLOW_INSECURE`, `_ENV_CLASS` per tag. There is deliberately **no** `_REQUESTED_BY` var — `client.py` ignores it if set (see `test_client.py`'s `test_stray_requested_by_env_var_is_ignored`); `requested_by` is resolved fresh on every call from the live inbound channel identity and passed explicitly via `--requested-by` / `requested_by=`, never from config. Add a new ERPNext instance by appending another tag's trio, never by creating a second file.
-- See `qkeee-erp-associate/references/01-connectivity.md`'s "Env resolution" section for the full rationale.
+- Copy `skills/qkeee-erp/qkeee-erp-associate/qkeee-erp-associate.env.example` to `$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` and fill in real values out-of-band — never by having the agent read/cat this file or echo the values back. A legacy `$HERMES_HOME/qkeee-erp.env` is read until it is moved.
+- One file holds every Instance **tag**: `QKEEE_ERP_<TAG>_BASE_URL` / `_API_KEY` / `_API_SECRET` (required), plus optional per-tag extras (see the example file). The active tag and the write mode are plugin settings (`plugins.entries.qkeee-erp.settings.active_env` / `.mode`). There is deliberately **no** `_REQUESTED_BY` var — the connector ignores it if set; the requester is the gateway session's sender (or `--requested-by` on an Operator CLI run), never config. Add a new ERPNext instance by appending another tag's trio, never by creating a second file.
 - Read audit logging is unconditional on every `query_resource()`/`get_resource()`/`run_query_report()` call — there is no debug flag to gate it.
 
 ### Audit-trail doctypes
 
-`scripts/init_bot.py` provisions 1 `Qkeee Bot *` doctype directly in ERPNext (no custom app) to give every bot action a compliance-grade trail.
+`hermes qkeee-erp init-bot` (Operator-only) provisions 1 `Qkeee Bot *` doctype directly in ERPNext (no custom app) to give every bot action a compliance-grade trail.
 
 | Doctype | Created | Purpose |
 |---|---|---|
@@ -110,6 +117,8 @@ hermes profile list               # all local profiles, distribution source colu
 ```
 
 `hermes profile update` only ever touches what `distribution.yaml`'s `distribution_owned` lists — currently `SOUL.md`, `skills/`, `cron/jobs.json`, `config.yaml`, `mcp.json`. Runtime state (`.env`, `qkeee-erp.env`, `memories/`, `sessions/`, etc.) is never touched by install/update.
+
+**ERP plugin on a host install:** after `profile install` or `profile update`, enable the plugin and run its Operator commands with the profile: `hermes -p <profile> plugins enable qkeee-erp`, then `hermes -p <profile> qkeee-erp --help`. A host (non-Docker) Deployment gets ERP tools only with Isolation (agents ADR 0006); the host runbook is pending (agents `.scratch/qkeee-erp-plugin-profile-split`, issue 12), together with `hermes qkeee-erp setup` (issue 07).
 
 Other profile commands (not specific to this repo, general Hermes usage): `hermes profile create`, `hermes profile show`, `hermes profile rename`, `hermes profile delete`, `hermes profile use <name>` (set default), `hermes profile export` / `hermes profile import` (tar.gz, for one-off sharing without git).
 
@@ -180,7 +189,7 @@ When a session's terminal closes, Hermes copies changed skill files from the sid
 
 The sidecar's sshd accepts key auth only, allows no forwarding, and has no `AcceptEnv`, so skill env passthrough does not reach it. Each terminal call pays a small ssh round trip over a ControlMaster connection.
 
-- Manual ERP CLI runs (`client.py`, `init_bot.py`) are for a trusted operator in the gateway container (`docker compose exec hermes ...`), not for the agent.
+- Operator ERP commands run in the gateway container, never in the sidecar: `docker compose exec -u hermes hermes hermes -p <profile> qkeee-erp <command>` (`--help` lists them). ERP reads and writes need `--requested-by <email>`; they are not for the agent.
 - After deleting the `terminal-hostkeys` volume the sidecar has a new host key and the gateway refuses it. Clear the pin: `docker compose exec -u hermes hermes ssh-keygen -R terminal -f /opt/data/.ssh/known_hosts`.
 - A deployment without the sidecar must set `terminal.backend: local` in the profile `config.yaml`; otherwise every terminal call returns a `degraded` result. `local` gives the agent read access to everything in `/opt/data`.
 - An existing install keeps its `config.yaml` on update: copy the `terminal:` block from this repo's `config.yaml` into it by hand.
@@ -300,14 +309,15 @@ Worth knowing before tuning, because two of these failed silently in earlier bui
 - **Skill source separation:** `qkeee-erp-associate` (this repo, shipped/pinned) mounts via `skills.external_dirs` (read-only) and should be marked externally-owned so Hermes' autonomous background-review pass can't silently patch its audit/RBAC/GRC logic. The satellite `qkeee-erp-learned/<env-tag>` skills it writes via `skill_manage` (per-instance environment notes — versions, custom doctypes, non-ERPNext API notes) live in the profile's normal local/learned skill space and stay open to that same background review, since letting the agent refine its own instance notes is the point. See `qkeee-erp-associate/references/00-conventions.md` and [Skills System | Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills).
 - **Save-draft-then-review-then-submit, always:** every docstatus-bearing document requires a review-before-submit step with explicit human confirmation, defined in `profile.md` — and code-enforced for submit/cancel via a fresh confirmation token, not prompt discipline alone (see `references/00-conventions.md`'s Non-negotiable 5).
 - **No auth fallbacks:** token auth (`QKEEE_ERP_*` env vars) only — no session-cookie/password workarounds that drop audit attribution.
-- **RBAC pre-check + read audit logging, every tag:** `scripts/core/client.py`'s requester-permission check and audit logging both run unconditionally on every environment and every read/write — no PROD-only or debug-only carve-out.
-- **Audit log & tracing:** every ERPNext access goes through `scripts/core/client.py`, which stamps audit-log entries with the acting bot's session id, `requested_by` (resolved fresh per call, never from a `_REQUESTED_BY` env var — see above), and the calling domain — no audit-log row is written without them.
+- **ERPNext access is the plugin's:** the agent reaches ERPNext only through the `qkeee-erp` plugin's `erp_*` tools, which run in the gateway and take the requester from the gateway session. Calling rules ship with the plugin as `qkeee-erp:usage`; the Operator CLI runs the same handlers. See `plugins/qkeee-erp/__init__.py`.
+- **RBAC pre-check + read audit logging, every tag:** the plugin connector's (`qkeee_erp/core/client.py`) requester-permission check and audit logging both run unconditionally on every environment and every read/write — no PROD-only or debug-only carve-out.
+- **Audit log & tracing:** every ERPNext access goes through the plugin connector, which stamps audit-log entries with the acting bot's session id, `requested_by` (resolved fresh per call, never from a `_REQUESTED_BY` env var — see above), and the calling domain — no audit-log row is written without them.
 
 ## Open items
 
 There are many openitems, lacunas to be worked upon, below is just a short list from top of our mind -
-- **`requested_by` identity:** resolved per-call from `--requested-by`/`requested_by=` only (no config/env-var default, by design — see `01-connectivity.md`); remaining gap is verifying the *caller* actually resolved it from a live inbound channel identity rather than passing a stale or invented value.
-- **ERPNext/Frappe MCP tooling:** pending a comprehensive MCP adapter for Frappe/ERPNext — REST connector (`scripts/core/client.py`) is the interim approach.
+- **`requested_by` identity:** bound to the gateway session's sender for the agent (no config/env-var default, by design — see `01-connectivity.md`); an Operator CLI run names it with `--requested-by`, which the Requester Gate checks but cannot prove is the person at the keyboard.
+- **ERPNext/Frappe MCP tooling:** pending a comprehensive MCP adapter for Frappe/ERPNext — REST connector (the `qkeee-erp` plugin) is the interim approach.
 - **Other ERPs:** extend beyond ERPNext with connector/client handlers for other popular ERPs.
 - **Efficiency transparency:** task-level efficiency and token-consumption scoring/visibility. Partly addressed by the `auxiliary.*` pinning and `compression.threshold` above, but there is still no per-task cost attribution.
 - **Dynamic LLM selection:** delivered under Docker by jev (see [Model routing](#model-routing-jev)) — per-turn tier and specialty classification instead of one fixed `model.default`. Remaining gaps: it is Docker-only (a host CLI install still runs a single model), `escalation` is off so a misjudged "simple" turn cannot climb, and the pools need re-validating against the catalog whenever models are added or retired.

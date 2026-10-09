@@ -34,7 +34,7 @@ code; "Planned" = documented but no code exists yet.
 | Health check (connectivity + auth verification, distinct from permission checks) | **Live** | `core/client.py`: `health_check()` |
 | List configured environment tags | **Live** | `core/client.py`: `list_configured_tags()` |
 | Environment-assessment procedure: run once per tag on first contact, and re-run when live metadata looks stale vs. durable memory | Prompt-only (procedure) | `02-environment-assessment.md` |
-| Manual/debug CLI for the core connector (`health`, `list-envs`, `query`, `get`, `report`, `roles` — read-only; the `mutate`/`gated-mutate` write subcommands were removed 2026-10-06) | **Live** | `core/client.py`: `_cli()`; worked examples in `cli-cookbook.md` |
+| Manual/debug CLI for the core connector (`health`, `list-envs`, `query`, `get`, `report`, `roles` — read-only; the `mutate`/`gated-mutate` write subcommands were removed 2026-10-06) | **Live** | `core/client.py`: `_cli()`; worked examples in `tool-cookbook.md` |
 
 ## 3. Live-metadata / anti-guessing discipline
 

@@ -1,6 +1,6 @@
 # Domain: doc-extraction (field extraction, no writes)
 
-**Not a connector domain** — there is no `scripts/domains/doc_extraction.py`
+**Not a connector domain** — there is no `qkeee_erp/domains/doc_extraction.py`
 and no `ALLOWED_WRITE_DOCTYPES` because this domain has no write path at
 all, structurally, not by allowlist. Turns attached documents — including
 scanned/photographed images — or a shared URL into structured fields
@@ -102,7 +102,7 @@ or not.
    documented here has gone unrun before. The confidence/value-key
    refusal rule IS code-enforced now, one step downstream: when this
    domain's output is handed to a write path via
-   `execute_write.py --staged-fields`, `schema_mapping.match_staged_report()`
+   `erp_execute_write --staged-fields`, `schema_mapping.match_staged_report()`
    refuses with `MalformedStagedReportError` on any field
    missing `confidence` or `value`, and additionally flags a field that's
    both `confidence: "low"` and unmatched against the live doctype schema

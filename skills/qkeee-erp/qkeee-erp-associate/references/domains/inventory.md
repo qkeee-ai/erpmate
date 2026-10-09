@@ -1,6 +1,6 @@
 # Domain: inventory (Stock, transfers, reconciliation)
 
-Code: `scripts/domains/inventory.py`
+Code: `qkeee_erp/domains/inventory.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Stock Entry", "Material Request", "Stock
 Reconciliation")`), which also carries this domain's genuine connector
 logic (both reads are gated and audit-logged — pass `requested_by=` and
@@ -64,7 +64,7 @@ prompt:
    the drafted lines, convert with `bin_rows_to_actual_source_qty()`, and
    use it as the freshness check above requires. Present, confirm, then
    `inventory.generic` `create` (lands `docstatus 0`; submit needs a
-   rendered confirmation — `cli-cookbook.md`).
+   rendered confirmation — `tool-cookbook.md`).
    **Save-draft-then-review-then-submit:** re-fetch via
    `core.client.get_resource()` (the list endpoint silently drops the
    line-items child table) and review every line — quantities and every

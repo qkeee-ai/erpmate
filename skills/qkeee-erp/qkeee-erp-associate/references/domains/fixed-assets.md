@@ -1,9 +1,9 @@
 # Domain: fixed-assets (Asset lifecycle)
 
-Code: `scripts/domains/fixed_assets.py`
+Code: `qkeee_erp/domains/fixed_assets.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Asset", "Asset Movement", "Asset Repair")`).
-Every write is a named operation through `execute_write.py --op`
-(`cli-cookbook.md` has the render → confirm → execute flow). ERPNext v16
+Every write is a named operation through `erp_execute_write`
+(`tool-cookbook.md` has the render → confirm → execute flow). ERPNext v16
 signatures were verified on 2026-10-06.
 
 | Operation | Does | Args |
@@ -73,7 +73,7 @@ of or scrapping an asset, running a physical asset verification.
    `fixed_assets.depreciation_run`/`scrap`/`restore`/`sell`** — never a
    raw request. Each needs a rendered confirmation and the user's reply
    with its code. A render for one asset cannot run against another.
-   **Done when:** the operation ran through `execute_write.py --op` with
+   **Done when:** the operation ran through `erp_execute_write` with
    the render's args, token and the user's reply.
 3. **Asset capitalization**: a draft is only "ready" when cost basis is
    present and nonzero (or a stated reason for zero), the source is
@@ -99,7 +99,7 @@ of or scrapping an asset, running a physical asset verification.
    top-level `Asset.value_after_depreciation` field, which is confirmed
    live to NOT update after a run (a stale-field trap). Only after both
    the render and the second confirmation, execute
-   `fixed_assets.depreciation_run` with the printed args and token. Its
+   `fixed_assets.depreciation_run` with the rendered args and token. Its
    render already shows the due rows and their total — check them
    against what you computed. **Done when:** the pending-rows fetch,
    the current-book-value read from `finance_books[N]` (never the stale
@@ -122,7 +122,7 @@ of or scrapping an asset, running a physical asset verification.
    Invoice is NOT submitted by this domain; gain/loss is only realized
    when someone submits that invoice separately. Only after both
    confirmations, execute `fixed_assets.scrap` (with an explicit
-   `scrap_date`) or `fixed_assets.sell` with the printed args and token.
+   `scrap_date`) or `fixed_assets.sell` with the rendered args and token.
    **The sale path (draft invoice through eventual submission) is not
    confirmed live-tested end to end** — treat its exact field defaults/
    error modes as unconfirmed until it is. **Done when:** a stated reason, the

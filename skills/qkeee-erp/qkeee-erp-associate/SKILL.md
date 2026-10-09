@@ -8,8 +8,9 @@ metadata:
 
 # qkeee-erp-associate
 
-One ERPNext associate, one voice: a single shared connector
-(`scripts/core/client.py`) plus eleven lazily-loaded domain references.
+One ERPNext associate, one voice: the `erp_*` tools of the `qkeee-erp`
+plugin plus eleven lazily-loaded domain references. This skill holds ERP
+domain know-how only; the code lives in the plugin.
 Domain expertise shows in content and procedure, not in a shifting
 register.
 
@@ -37,33 +38,35 @@ never an attempt to answer it anyway. Stated once, in
 Call ERPNext **only through the `qkeee_erp` tools**. They run in the
 gateway, bind the requester to this turn's sender, and hold the ERPNext
 credentials. Never read the credentials file, and never call ERPNext from
-the terminal or `execute_code` (no `client.py`, no `curl`). A gateway
-guard blocks calls that set `HERMES_SESSION_*` or touch the credentials
-file, and names the rule; do not retry them another way.
+the terminal or `execute_code` (no `curl`, no script). A gateway guard
+blocks calls that set `HERMES_SESSION_*` or touch the credentials file,
+and names the rule; do not retry them another way.
 
-| Tool | Use | Script it replaces |
-| --- | --- | --- |
-| `erp_query` | list records of one DocType | `client.py query` |
-| `erp_get` | one record with child tables | `client.py get` |
-| `erp_report` | a built-in query report | `client.py report` |
-| `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight` | `client.py health/whoami/roles`, `discover.py` |
-| `erp_execute_write` | `list_ops`, `render`, `execute` (one op, or a `batch`) | `execute_write.py`, `confirm_token.py render` |
+| Tool | Use |
+| --- | --- |
+| `erp_query` | list records of one DocType |
+| `erp_get` | one record with child tables |
+| `erp_report` | a built-in query report |
+| `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight`, `promotion_plan` |
+| `erp_execute_write` | `list_ops`, `render`, `execute` (one op, or a `batch`) |
 
-No tool takes a requester or a mode. The requester is the gateway sender;
-the mode is `qkeee_erp.mode`. Pass `prompt_summary` and, for every write
-that needs confirmation, `latest_prompt` (the user's message, verbatim).
-Where a reference shows a script command, use the matching tool with the
-same arguments (`--doctype` → `doctype`, `--args` → `args`, ...). The
-scripts under `${HERMES_SKILL_DIR}/scripts/` are for a trusted operator in
-the gateway container (`--requested-by`), not for you.
+**Before the first write of a session, load the calling rules:
+`skill_view("qkeee-erp:usage")`.** They cover the requester, the audit
+context (`prompt_summary`, `latest_prompt`), the render → confirm →
+execute flow, role gaps, refusals and failures. This skill does not
+repeat them. Where a reference writes `erp_discover meta "Item"`, call
+`erp_discover(action="meta", doctype="Item")`; `erp_execute_write render`
+means `phase="render"`. Commands written `hermes qkeee-erp …` are
+**Operator-only**: a person runs them on the gateway host. You cannot,
+and you never ask the user to run them for you.
 
 ## Activation sequence
 
 Run this every session, in order, before taking any domain-specific
 action:
 
-1. **Resolve the environment tag and run `health`.** `qkeee_erp.active_env`
-   names the tag; `erp_discover(action="health")` confirms
+1. **Run `health` to learn the Instance.** `erp_discover(action="health")`
+   returns the active Instance's `tag` and `base_url`, and confirms
    connectivity + auth, not query/write-time permission — report a later
    permission error as its own distinct failure mode. State which tag +
    base URL this session is connected to before any read or write, and
@@ -83,15 +86,15 @@ action:
    environment's cataloged Frappe/ERPNext/app versions and custom-doctype
    notes from a prior session. If absent (or stale — see
    `02-environment-assessment.md`'s staleness signals), run the
-   environment-assessment procedure, then **promote the findings**: run
-   `scripts/core/memory_promote.py` (or call its `build_promotion_plan()`
-   directly) with the raw findings. It redacts PII, formats the
+   environment-assessment procedure, then **promote the findings**: call
+   `erp_discover(action="promotion_plan", findings={...}, summary="...")`
+   with the raw findings (`skill_exists=true` when the learned skill
+   already exists). It redacts PII, formats the
    `SKILL.md`/`references/*.md` content, and returns an ordered list of
    `skill_manage`/`memory` tool-call descriptors. Issue those calls
    yourself, in the order given, via your own native `skill_manage`/
-   `memory` tool access — `memory_promote.py` cannot make them itself (it
-   runs as a subprocess script, a separate process from your own
-   tool-calling loop; see that module's docstring for why). Stop at the
+   `memory` tool access — the plugin cannot make them for you (they
+   belong to your own turn's write-approval context). Stop at the
    first failed call and report a partial promotion rather than
    continuing past it. See `references/examples/qkeee-erp-learned-example/`
    for the exact content shape this produces. **Done when:** either a
@@ -153,7 +156,8 @@ action:
    (`02-environment-assessment.md` / `non-erpnext-adapter.md`) is
    declared instead.
 5. **State scope and mode (read-only / read-write) for the session**
-   before taking any action — a short, explicit statement of which
+   (`health` returns `mode`; only an Operator changes it) before taking
+   any action — a short, explicit statement of which
    domain(s) are in play and whether writes are possible this session,
    restated after a gap or before a new batch of writes, same cadence as
    step 1's environment reminder. **Done when:** that statement appears
@@ -176,7 +180,8 @@ action:
 Classify the user's intent against this table, then latch exactly the
 matching `references/domains/<slug>.md` file (and, if it's the reference's
 first invocation this session, note its `ALLOWED_WRITE_DOCTYPES` from the
-matching `scripts/domains/<slug>.py` module before proposing any write).
+operation from `erp_execute_write(phase="list_ops")` before proposing any
+write).
 
 | Domain slug | Reference | Core doctypes / territory |
 | --- | --- | --- |
@@ -205,10 +210,9 @@ all** (a third-party tool, an internal API) follows
 - `references/00-conventions.md` — naming rules, non-negotiables, GRC
   baseline. Read first, applies to every domain.
 - `references/01-connectivity.md` — REST/Frappe mechanics, env resolution,
-  `discover.py` usage, the `qkeee-erp.env` design decision.
-- `references/cli-cookbook.md` — worked `core/client.py`/`execute_write.py`
-  invocations (copy-paste, not mechanics); latch only once a call is
-  actually about to run.
+  `erp_discover` usage, the `qkeee-erp.env` design decision.
+- `references/tool-cookbook.md` — worked `erp_*` calls (copy-paste,
+  not mechanics); latch only once a call is actually about to run.
 - `references/02-environment-assessment.md` — the per-environment-tag
   cataloging procedure this activation sequence's step 2 depends on.
 - `references/03-spec-driven-execution.md` — clarify → spec → persist →
@@ -220,45 +224,21 @@ all** (a third-party tool, an internal API) follows
 - `references/non-erpnext-adapter.md` — procedure for a non-ERPNext
   target system.
 - `references/domains/*.md` — one per domain slug above, lazily latched.
-- `scripts/core/client.py` — the shared connector: reads, the requester
-  gate, audit logging, transport, and the write-allowlist registry
-  (`register_domain_allowlist()`). It has **no write function** and never
-  imports `operations.py`.
-- `scripts/core/operations.py` — the one write pipeline and the registry of
-  named write operations, and the only write API: `run_operation()`,
-  `prepare_only()` (render), `call_generic()` (keyword spelling for a
-  generic operation). `scripts/execute_write.py` is its only CLI
-  (`--list-ops`), `scripts/core/confirm_token.py render` its render step.
-  Dependencies run one way: domains → operations → client.
-- `scripts/domains/*.py` — eight modules for the eleven domains: `mis`'s
-  registers an empty allowlist; `doc-extraction` has no connector,
-  `manufacturing` no write path yet, and `grc-audit` is review-only, so
-  those three have no module. Each declares its
-  allowlist, operations and gated reads; none has a write function of
-  its own.
-- `scripts/discover.py` — live metadata: `meta`, `resolve`, `modules`,
-  `apps`, and `preflight` (the write-readiness gate run before every
-  create a spec makes). Usage and the whose-permission table:
-  `references/01-connectivity.md`.
-- `scripts/init_bot.py` — admin-invoked, one-time provisioning helper
-  (not part of this associate's normal conversational flow); provisions
+- The code (connector, write pipeline, domain modules, discovery,
+  provisioning, Instance Notes promotion) is in the `qkeee-erp` plugin,
+  `plugins/qkeee-erp/` in this repo. It runs only in the gateway. Its
+  calling rules ship as the plugin skill `qkeee-erp:usage`.
+- `hermes qkeee-erp init-bot` — **Operator-only**, one-time provisioning
+  of an Instance (not part of this associate's conversational flow):
   the `Qkeee Bot` Role, the `Qkeee Bot Audit Log` doctype, and the role's
   read on Module Def and Workflow.
-- `scripts/doctype_defs.py` — the Role/Audit-Log create payloads
-  `init_bot.py` provisions from.
-- `scripts/core/memory_promote.py` — redacts + formats findings into
-  `qkeee-erp-learned/<env-tag>` content and a `skill_manage`/`memory`
-  tool-call plan (see activation step 2 above). Does not call those tools
-  itself — see the module's own docstring for why it can't.
 - `references/examples/qkeee-erp-learned-example/` — the exact file
-  shapes `memory_promote.py` produces, generated (not hand-written) from
+  shapes `erp_discover` `promotion_plan` produces, generated (not hand-written) from
   illustrative findings — no live `skill_manage` call was exercised to
   create it; see that directory's `README.md`.
 - `qkeee-erp-associate.env.example` — template for the credentials file,
   `$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` (gateway-side, read by
   the `qkeee-erp` plugin; operator-maintained).
-- `scripts/core/kanban_origin.py` — the Kanban task → requester origin
-  store the `qkeee-erp` plugin writes and the tools resolve.
 - `references/governance.md` — operator/maintainer material: why this
   skill is externally-owned (curator-drift protection) and which
   capabilities are actually code-enforced vs. still prompt discipline.

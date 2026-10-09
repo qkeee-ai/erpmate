@@ -1,6 +1,6 @@
 # Domain: mis (GL / MIS reporting, read-only)
 
-Code lives in `scripts/domains/mis.py`
+Code lives in `qkeee_erp/domains/mis.py`
 (`ALLOWED_WRITE_DOCTYPES = ()` — deliberately empty, see the
 non-negotiable below).
 

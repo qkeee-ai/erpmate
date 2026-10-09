@@ -20,12 +20,11 @@ require in-process state this module cannot reach from where it runs:
     (`tools/skills_guard.py`) — none of which exist outside a live
     `hermes-agent` process.
 
-This module's own scripts run the way every other `qkeee-erp-associate`
-script does: as a subprocess under Hermes' `execute_code`/`terminal`
-sandbox, a SEPARATE process from the agent's own tool-calling loop, with
-no `hermes-agent` package on its path. A subprocess script cannot call a
-tool that only exists as a function bound into the live agent's own LLM
-tool-calling loop.
+This module runs in the gateway, behind the `erp_discover` tool's
+`promotion_plan` action (plugins/qkeee-erp/erp_tools.py). A plugin tool
+handler is not the agent turn: `skill_manage`'s write-approval gate and
+provenance context belong to the turn that calls it, so the agent must
+issue those calls itself.
 
 So instead of calling `skill_manage` directly, this module's job is:
 **redact, format, and hand back a plan** describing the exact
@@ -36,8 +35,8 @@ single entry point; its output is a JSON-serializable list of
 direct, ready-to-issue call in the real tool's own parameter shape
 (`action`, `name`, `content`, `file_path`, `file_content`, ... for
 skill_manage; `action`, `target`, `content`, `old_text` for memory) — the
-agent reads this script's stdout and then makes those tool calls itself,
-in the same turn, rather than this script attempting to make them.
+agent reads the tool result and then makes those tool calls itself,
+in the same turn, rather than this module attempting to make them.
 
 Layout:
   qkeee-erp-learned/<env-tag>/
@@ -58,7 +57,6 @@ not a courtesy.
 
 import json
 import re
-import sys
 from datetime import datetime, timezone
 
 from .client import redact_pii, _redact_pii_deep
@@ -145,8 +143,8 @@ description: "Learned notes for ERPNext environment tag '{env_tag}' — versions
 # {name}
 
 Durable, per-environment knowledge for `qkeee-erp-associate`'s `{env_tag}`
-tag — created and updated via `skill_manage` by
-`scripts/core/memory_promote.py`'s promotion plan. This is a satellite
+tag — created and updated via `skill_manage` from the plan that
+`erp_discover` (action `promotion_plan`) returns. This is a satellite
 skill, not a copy of the associate itself: `qkeee-erp-associate` stays
 protected/externally-owned (see its own SKILL.md status note); this
 skill is the deliberately-open counterpart Hermes' background-review pass
@@ -171,7 +169,7 @@ Every entry below is appended under a `## Learned <YYYY-MM-DD>` heading —
 never edit or delete a prior entry, per the naming conventions in
 `qkeee-erp-associate/references/00-conventions.md`. All content here has
 already been through `redact_pii()`/`_redact_pii_deep()` before landing —
-see `memory_promote.py`'s module docstring for why that pass is
+see the qkeee-erp plugin's `qkeee_erp.core.memory_promote` for why that pass is
 load-bearing, not a courtesy.
 """
 
@@ -403,42 +401,3 @@ def build_promotion_plan(env_tag: str, findings: dict, *,
     })
 
     return plan
-
-
-def _cli():
-    """Manual/debug entry point: read a JSON findings document from a file
-    or stdin, print the resulting promotion plan as JSON to stdout. The
-    calling agent is expected to read this output and issue the listed
-    tool calls itself — this script never calls skill_manage/memory (see
-    module docstring for why it can't)."""
-    import argparse
-
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--env-tag", required=True)
-    p.add_argument("--findings-file", help="path to a JSON file shaped like build_promotion_plan()'s "
-                                            "findings/doctypes/custom_apps/non_erpnext_systems args; "
-                                            "reads stdin if omitted")
-    p.add_argument("--summary", help="one-line MEMORY.md breadcrumb summary")
-    p.add_argument("--skill-exists", action="store_true",
-                   help="pass if qkeee-erp-learned/<env-tag> already exists this session")
-    args = p.parse_args()
-
-    if args.findings_file:
-        with open(args.findings_file, "r", encoding="utf-8") as fh:
-            doc = json.load(fh)
-    else:
-        raw = sys.stdin.read()
-        doc = json.loads(raw) if raw.strip() else {}
-
-    plan = build_promotion_plan(
-        args.env_tag,
-        doc.get("findings", {}),
-        doctypes=doc.get("doctypes"),
-        custom_apps=doc.get("custom_apps"),
-        non_erpnext_systems=doc.get("non_erpnext_systems"),
-        one_line_summary=args.summary,
-        skill_already_exists=args.skill_exists,
-        gaps=doc.get("gaps"),
-    )
-    print(json.dumps(plan, indent=2, ensure_ascii=False))
-

@@ -6,10 +6,10 @@ looks different from what durable memory says (a version bump, an app
 that wasn't there before).
 
 This is the *procedure* — what to check, in what order. It is not the
-memory mechanism: that's `scripts/core/memory_promote.py` (redact +
+memory mechanism: that's `erp_discover promotion_plan` (redact +
 format, then hand off to Hermes' `skill_manage` tool), writing into
 `qkeee-erp-learned/<env-tag>` per step 6. Don't invent a bespoke
-file-write step — use `memory_promote.py` and Hermes' native memory
+file-write step — use `erp_discover promotion_plan` and Hermes' native memory
 tools.
 
 ## When this runs
@@ -23,7 +23,7 @@ tools.
 - **No `qkeee-erp-learned/<env-tag>` skill found.** Run the full
   procedure below before anything substantive, then promote the findings
   (step 6).
-- **Staleness mid-session.** A `discover.py apps` version that doesn't
+- **Staleness mid-session.** A `erp_discover apps` version that doesn't
   match durable memory, an app installed/removed since last cataloged, or
   a `meta` call that disagrees with what's recorded — re-run the relevant
   step and update. Live metadata always wins over a prior session's
@@ -36,16 +36,16 @@ tools.
 
 ## Procedure
 
-0. **Health and gaps.** `core/client.py --tag <tag> health` confirms
+0. **Health and gaps.** `erp_discover health` confirms
    connectivity + auth, and probes, as the bot, what discovery needs
    (`capabilities`). Show each entry of `gaps[]` with the role-gap prompt
    (`00-conventions.md`), exactly as printed, before anything else. Keep
-   the gaps: step 6 passes them to `memory_promote.py`. Report a later
+   the gaps: step 6 passes them to `erp_discover promotion_plan`. Report a later
    permission error as its own distinct failure mode, never lumped in
    with a connectivity failure. Whose permission each read needs: the
    table in `01-connectivity.md`.
-1. **Installed apps + versions.** Run `discover.py modules`, then
-   `discover.py apps` for version numbers `modules` can't derive. Both are
+1. **Installed apps + versions.** Run `erp_discover modules`, then
+   `erp_discover apps` for version numbers `modules` can't derive. Both are
    Environment Metadata (agents ADR 0001): the requester's own
    permission is not checked, so an HR user can run them. They need the
    **bot** to read `Module Def` (and get_versions to be callable). If
@@ -53,7 +53,7 @@ tools.
    not guess the app list, and carry the gap into step 6. Ask the user to
    paste the Help → About dialog only if exact versions genuinely matter.
 2. **Write readiness, before any create.** For every doctype a task will
-   create, `discover.py preflight "<DocType>" --payload '<json>'` checks
+   create, `erp_discover(action="preflight", doctype="<DocType>", payload={<json>})` checks
    mandatory and conditional fields, naming, an active workflow and the
    doctype's settings (`03-spec-driven-execution.md` step 2 pastes it into
    the spec). Not part of first-contact cataloging; listed here so the
@@ -67,10 +67,10 @@ tools.
    it or invent a twelfth domain slug.
 4. **Investigate an unfamiliar doctype or custom app** (what a seasoned
    ERPNext/Frappe SME actually does, in order):
-   a. `discover.py resolve "<DocType>"` — module, owning app,
+   a. `erp_discover resolve "<DocType>"` — module, owning app,
       submittable/custom flags. Confirms whether it's core, a companion
       app, or genuinely custom.
-   b. `discover.py meta "<DocType>"` — live field list, mandatory flags,
+   b. `erp_discover meta "<DocType>"` — live field list, mandatory flags,
       Link targets, from Frappe's merged meta (Custom Fields and Property
       Setters included — e.g. India Compliance's `gstin`/`gst_category`).
       If the output says `custom_fields_merged: false`, custom fields are
@@ -99,20 +99,19 @@ tools.
    contact. First contact is also where "is this bot account a dedicated
    service identity, not a personal login" gets its first check
    (`00-conventions.md`'s GRC baseline).
-6. **Record what was found.** Run `memory_promote.py` (or call its
-   `build_promotion_plan()` directly): redact, format, and promote
-   Frappe/ERPNext/app versions, the custom doctype catalog, and any
-   non-ERPNext system notes into `qkeee-erp-learned/<env-tag>`'s
-   references (`environment.md`, `doctypes-catalog.md`,
-   `custom-apps/<slug>.md`, `non-erpnext/<slug>.md` — see
-   `00-conventions.md`'s naming table), plus a one-line breadcrumb in
-   `<profile>/memories/MEMORY.md` naming the environment tag and pointing
-   at the full skill. `memory_promote.py` can't issue the
-   `skill_manage`/`memory` tool calls itself (it runs as a subprocess
-   script — see its own docstring); issue the calls it returns yourself,
-   in order, and stop at the first failure. Pass every gap still open
-   from step 0 (`build_promotion_plan(..., gaps=...)`, or a `gaps` key in
-   the CLI's findings JSON): the plan then writes `catalog_complete:
+6. **Record what was found.** Call
+   `erp_discover(action="promotion_plan", findings={...}, summary="...")`:
+   it redacts, formats, and plans the promotion of Frappe/ERPNext/app
+   versions, the custom doctype catalog, and any non-ERPNext system notes
+   into `qkeee-erp-learned/<env-tag>`'s references (`environment.md`,
+   `doctypes-catalog.md`, `custom-apps/<slug>.md`, `non-erpnext/<slug>.md`
+   — see `00-conventions.md`'s naming table), plus a one-line breadcrumb
+   in `<profile>/memories/MEMORY.md` naming the environment tag and
+   pointing at the full skill. The tool cannot issue the
+   `skill_manage`/`memory` calls for you (they belong to your own turn's
+   write-approval context); issue the calls it returns yourself, in
+   order, and stop at the first failure. Pass every gap still open from
+   step 0 as `findings.gaps`: the plan then writes `catalog_complete:
    false` and lists them, so the next session knows to re-assess.
 
 ## Out of scope

@@ -1,15 +1,14 @@
 # Domain: hr-payroll (HR, leave, payroll batch)
 
-Code: `scripts/domains/hr_payroll.py`
+Code: `qkeee_erp/domains/hr_payroll.py`
 (`ALLOWED_WRITE_DOCTYPES = ("Employee", "Employee Onboarding", "Employee
 Separation", "Job Offer", "Leave Application")` — see that module's
 docstring). Applies `00-conventions.md` and `01-connectivity.md` in full;
 this file adds what's specific to HR/talent-acquisition work.
 
 This domain has no unique connector logic of its own. Writes are
-operation `hr_payroll.generic` through `execute_write.py` (`--domain
-hr_payroll`); submit/cancel/delete need a rendered confirmation
-(`cli-cookbook.md`). The PII-flagging and advisory-only rules below are
+operation `hr_payroll.generic` through `erp_execute_write` (`op="hr_payroll.generic"`); submit/cancel/delete need a rendered confirmation
+(`tool-cookbook.md`). The PII-flagging and advisory-only rules below are
 prompt discipline; no script composes these drafts. Audit payloads mask
 bank/identity fields (`core.client.AUDIT_MASK_FIELDS`).
 
@@ -58,7 +57,7 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
      reminders when HR Settings enables them. Ask whether `Inactive` fits
      the task better (it always does for demo or test data — see
      `00-conventions.md`'s Demo and test data section).
-   - **Run `discover.py preflight Employee --payload '<json>'`.** It
+   - **Run `erp_discover(action="preflight", doctype="Employee", payload={...})`.** It
      covers the mandatory fields, the live-discovered conditional
      `status: "Left"` → `relieving_date` rule, and the first check below.
      Then confirm the other two:

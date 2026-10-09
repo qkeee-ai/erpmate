@@ -53,7 +53,7 @@ Defined in `SOUL.md` — direct, precise, schema-over-memory, explains the "why"
 ## Config Summary
 
 - Model / provider: `openrouter/auto-beta` via OpenRouter (`config.yaml` → `model`).
-- MCP servers: none configured (`mcp.json` → `mcpServers` is empty). ERPNext access goes through the `qkeee-erp` skills' REST connector scripts, not MCP.
+- MCP servers: none configured (`mcp.json` → `mcpServers` is empty). ERPNext access goes through the `qkeee-erp` plugin's `erp_*` tools (a REST connector in the gateway), not MCP.
 - Cron/scheduled jobs: none configured (`cron/jobs.json` → `jobs` is empty).
 
 ## Escalation

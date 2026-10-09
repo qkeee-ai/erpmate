@@ -28,8 +28,8 @@ place to land.
 | What | Pattern | Example |
 | --- | --- | --- |
 | Domain reference | `references/domains/<domain-slug>.md` | `domains/fixed-assets.md` |
-| Domain script module | `scripts/domains/<domain_slug>.py` | `domains/fixed_assets.py` |
-| Write operation | `<domain>.<name>` in `scripts/core/operations.py`'s registry | `fixed_assets.scrap`, `sales.generic` |
+| Domain script module | `qkeee_erp/domains/<domain_slug>.py` | `domains/fixed_assets.py` |
+| Write operation | `<domain>.<name>` in `qkeee_erp.core.operations`'s registry | `fixed_assets.scrap`, `sales.generic` |
 | Durable memory, per instance | `<profile>/skills/qkeee-erp-learned/<env-tag>/references/environment.md` (via `skill_manage`) | `qkeee-erp-learned/prod-in/references/environment.md` |
 | Durable memory, custom app | `.../<env-tag>/references/custom-apps/<app-slug>.md` | `custom-apps/qkeee-lending.md` |
 | Durable memory, non-ERPNext | `.../<env-tag>/references/non-erpnext/<system-slug>.md` | `non-erpnext/tally-prime.md` |
@@ -88,7 +88,7 @@ non-submittable doctype (Employee, Customer, Supplier, Item, Asset
 Category, Warehouse, ...) has no draft: docstatus 0 is its final state,
 and a save creates a live record. Say "saved" or "created" and say it is
 live. For something proposed but not yet written, say "proposed" or
-"the payload". `discover.py meta`'s `issubmittable` tells you which.
+"the payload". `erp_discover meta`'s `issubmittable` tells you which.
 Calling two live Employees "drafts" (DEMO_ERP, 2026-10-07) made the user
 read them as reversible staging.
 
@@ -101,10 +101,11 @@ naming styles diverge, deliberately; not an inconsistency to fix.
 ## Non-negotiables (code-enforced, not just prompt discipline)
 
 These hold across every domain. Writes are enforced by the one write
-pipeline in `scripts/core/operations.py` (every write is a named
-operation; `execute_write.py --list-ops` lists them), reads by
-`scripts/core/client.py` — consult their docstrings for the exact
-mechanism. `references/cli-cookbook.md` has the write flow.
+pipeline in `qkeee_erp.core.operations` (every write is a named
+operation; `erp_execute_write list_ops` lists them), reads by
+`qkeee_erp.core.client` (both in the `qkeee-erp` plugin). The calling
+rules are in `qkeee-erp:usage`; `references/tool-cookbook.md` has the
+write flow.
 
 1. **Never issue a write while `qkeee_erp.mode` is `read-only`.**
    The pipeline checks `mode` before every write and raises
@@ -126,7 +127,7 @@ mechanism. `references/cli-cookbook.md` has the write flow.
    requester's permission check; the requester must still be given and
    bound to the session.
 3. **Never write outside the active domain's `ALLOWED_WRITE_DOCTYPES`.**
-   Every `scripts/domains/<slug>.py` module declares this tuple and
+   Every `qkeee_erp/domains/<slug>.py` module declares this tuple and
    registers it via `core.client.register_domain_allowlist()`. The
    `<slug>.generic` operation raises `DoctypeNotAllowedError` for any
    doctype outside it, or for an unregistered/unknown domain name — a
@@ -137,12 +138,12 @@ mechanism. `references/cli-cookbook.md` has the write flow.
    `domains/mis.py` registers an empty tuple, so MIS can never write (see
    `domains/mis.md`).
 4. **Never propose a field, doctype, or workflow step that isn't confirmed
-   against this instance's live metadata (`discover.py`) or an explicit
+   against this instance's live metadata (`erp_discover`) or an explicit
    statement from the user.** Public docs describe the general shape of
    ERPNext; they don't confirm what a specific org's instance has
    customized, added, or removed. An honest "I don't see that field on this
    DocType" beats a guessed field name that happens to resolve.
-   Code-enforced for every `create`/`update`, not left to `discover.py`
+   Code-enforced for every `create`/`update`, not left to `erp_discover`
    being called by hand: every generic create/update runs its payload
    through `schema_mapping.map_payload_for_write()` (identically at
    render and execute, so the confirmation token covers the mapped
@@ -161,7 +162,7 @@ mechanism. `references/cli-cookbook.md` has the write flow.
    (Frappe's list endpoint silently drops child tables even when named in
    `fields`); `query_resource()` with explicit `fields` is far cheaper when
    it doesn't. `submit`/`cancel`/`delete` on every domain need a fresh
-   confirmation: render it (`core/confirm_token.py render`), show the user
+   confirmation: render it (`erp_execute_write render`), show the user
    the rendered request and its confirmation code, and execute with their
    own reply. The render binds the record's `modified`; if the record
    changed since, the submit is refused. Fixed-assets and system-admin
@@ -178,9 +179,9 @@ mechanism. `references/cli-cookbook.md` has the write flow.
    remembered across sessions.** Credentials and URLs never go into
    agent-curated memory (the `memory` tool or the `qkeee-erp-learned/*`
    skill) — they live only in `qkeee-erp.env` (see `01-connectivity.md`).
-8. **Prefer a harness-native HTTP-capable tool if one is discoverable**,
-   over shelling out to `core/client.py`. Degrade gracefully if the harness
-   exposes no discovery mechanism — never hard-fail over that.
+8. **Reach ERPNext only through the `erp_*` tools.** Never through
+   another HTTP-capable tool, the terminal or `execute_code`: only the
+   tools carry the requester gate, the audit row and the credentials.
 
 ## GRC baseline
 
@@ -200,7 +201,7 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   fallback identity like the instance admin, anything not the channel's
   own field — that is the same failure as inferring identity from
   conversation text, one turn removed, and this connector's own refusal
-  messages (`UnvalidatedProdRequesterError`, `core/client.py`) say so
+  messages (`UnvalidatedProdRequesterError`, `qkeee_erp.core.client`) say so
   explicitly. `resource_exists(tag, "User", requested_by)`/
   `check_user_permission()` validate against whatever identity is passed
   in; they cannot detect a plausible-looking but fabricated one — which
@@ -209,8 +210,7 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   (2026-10-07, after the agent passed its own bot account on dev-erp and
   the gate validated the bot against itself): `resolve_requested_by()`
   binds the requester to the gateway's `HERMES_SESSION_USER_ID` when it is
-  an email (fills it in when `--requested-by` is omitted, refuses a
-  mismatch), and `_validate_prod_requester()` refuses `requested_by` equal
+  an email (fills it in when none is given, refuses a mismatch), and `_validate_prod_requester()` refuses `requested_by` equal
   to the connector's own bot account. The gate also applies the session
   binding itself, so a direct `requested_by=` library call gets the same
   check. Since 2026-10-08 (issue 04) the agent calls ERPNext only through the
@@ -247,17 +247,17 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   corroborating signal, not a reimplementation of Frappe's permission
   engine — User Permissions and `if_owner` scoping aren't visible to it;
   see `_requester_has_role_permission()`'s own docstring in
-  `core/client.py`.
+  `qkeee_erp.core.client`.
 - **Read audit logging, always on.** Every access gets an audit row in
   `Qkeee Bot Audit Log`, reads included, unconditionally — no debug flag
-  gates this in `core/client.py`. The read-path exemption
+  gates this in `qkeee_erp.core.client`. The read-path exemption
   (`_LOG_READ_RECURSION_EXEMPT_DOCTYPES`) is narrow and purpose-keyed, not
   doctype-keyed: only a doctype/name check this connector runs on its own
   behalf (`resource_exists()`, `_fetch_doctype_role_permissions()`,
   `_bot_identity()`) skips logging, via an explicit `internal=True` —
   never a business-intent read, even of `User`/`Role`/`DocType` — contrast
   the *write* path's `AUDIT_EXEMPT_DOCTYPES`, which does exempt those
-  doctypes wholesale for `init_bot.py`'s own bootstrap reasons; read and
+  doctypes wholesale for `hermes qkeee-erp init-bot`'s own bootstrap reasons; read and
   write exemptions are deliberately different sets, don't conflate them.
 - **A denied requester-permission check is logged too, not just an
   allowed one.** `_validate_prod_requester()` writes one gate-decision
@@ -286,7 +286,7 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   target instance hasn't run `qkeee-erp-bot-init` yet, or the audit
   doctypes are unreachable for any reason, the real write still proceeds —
   logging failure never blocks or fails a user's requested action.
-  `AUDIT_EXEMPT_DOCTYPES` in `core/client.py` prevents the logger from
+  `AUDIT_EXEMPT_DOCTYPES` in `qkeee_erp.core.client` prevents the logger from
   recursively logging itself. Pass `user_approved=True` only when this
   write's confirm stage actually ran with the user first — it's a
   detection field for later scanning (did every write really get
@@ -299,19 +299,19 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   blank — `session_id` hardcoded to `""`, `channel_metadata` never built
   at all, `latest_prompt` never passed (only a paraphrased
   `prompt_summary`), even when the real platform thread id was sitting in
-  context the whole time. `execute_write.py` (`01-connectivity.md`,
-  worked examples in `cli-cookbook.md`) is the fix: it's the one write
-  entry point, and it WARNs loudly on stderr
-  before firing if any of the three is missing — use it instead of
-  hand-writing a write script, and don't route around its warning.
+  context the whole time. `erp_execute_write` (worked examples in
+  `tool-cookbook.md`) is the fix: it's the one write entry point, it
+  takes the session and channel from the gateway itself, and it refuses a
+  write that needs confirmation without `latest_prompt`. Pass
+  `prompt_summary` and `latest_prompt` on every write.
 - **`session_id` specifically — regenerate per platform session, never
   carry forward indefinitely.** A conversation resumed across a long gap
   (a day, a context-compaction event) can hand the connector a `session_id`
   that's drifted stale or malformed — unlike `requested_by`/
   `reference_doctype`, this value is never validated anywhere upstream of
   the raw Audit Log insert, so a bad one silently drops the Audit Log row
-  (real write unaffected) with nothing but a stderr WARN to show for it.
-  `core/client.py` clamps/sanitizes `session`/`domain_code`/`channel`
+  (real write unaffected) with nothing but a log warning to show for it.
+  `qkeee_erp.core.client` clamps/sanitizes `session`/`domain_code`/`channel`
   defensively before insert, but the caller-side fix is the one that
   actually matters: derive `session_id` fresh at the start of each logical
   session (new platform thread/DM, bot restart, or a context-compaction
@@ -335,7 +335,7 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   RBAC pre-check above a no-op that silently rubber-stamps any
   `requested_by`. This isn't instance-specific — stock Frappe's
   `frappe.client.has_permission` has no `user=` parameter at all; it only
-  ever answers for the calling session. `core/client.py` enforces the
+  ever answers for the calling session. `qkeee_erp.core.client` enforces the
   consequence in code: a live probe (`verify_rbac_precheck_reliable()`)
   runs per tag and, when the bot identity is privileged or the probe shows
   the check doesn't discriminate, `_requester_has_role_permission()`
@@ -361,8 +361,8 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   `rbac_precheck_reliable` field is `false`, or the user is configuring
   credentials for the first time without mentioning a dedicated bot user,
   or a write behaves oddly around `Qkeee Bot Audit Log` (a sign bot-init
-  hasn't run on this target) — say so and suggest `init_bot.py` (see
-  `references/domains/system-admin.md` and `scripts/init_bot.py`).
+  hasn't run on this target) — say so and suggest that an Operator runs
+  `hermes qkeee-erp init-bot` (see `references/domains/system-admin.md`).
 - **A "success" from a best-effort write is not proof it landed** — every
   best-effort call into the `Qkeee Bot *` doctypes swallows its own
   `ConnectorError` by design (a target instance that hasn't run bot-init
@@ -373,7 +373,7 @@ mechanism. `references/cli-cookbook.md` has the write flow.
   permission-matrix changes get a second, explicit confirmation after the
   first — state the exact before/after or financial impact, then ask
   again, one turn later at minimum. A matching `confirmation_token` proves
-  the call is byte-for-byte identical to what `confirm_token.py render` last printed
+  the call is byte-for-byte identical to what `erp_execute_write render` last returned
   and that it happened within the token's freshness window (15 minutes,
   `DEFAULT_TOKEN_TTL_SECONDS`) — it does **not** prove a human read and
   approved it. Never render a confirmation and consume its token in the
@@ -435,7 +435,7 @@ agent's own words. "The requester has no read permission on Module Def"
 (DEMO_ERP, 2026-10-07) told the user nothing about what to grant, to whom,
 or where.
 
-`client.py health` and `discover.py preflight` return `gaps[]`. Each gap
+`erp_discover health` and `erp_discover preflight` return `gaps[]`. Each gap
 has `capability`, `who` (`bot` or `requester`), `user`, `role`,
 `doctype`, `perm`, `effect`, `grant_steps`, and `prompt`: the prompt
 below, already filled in. Show `prompt` exactly as printed:
@@ -460,7 +460,7 @@ Rules:
    pipeline refuses it (agents ADR 0003). The fix is a human admin in the
    ERPNext UI.
 4. A `bot` gap is fixed on the `Qkeee Bot` role, never by giving the bot a
-   stock role. `init_bot.py` grants the two reads the bot needs for
+   stock role. `hermes qkeee-erp init-bot` grants the two reads the bot needs for
    discovery (Module Def, Workflow).
 
 ## Report-back

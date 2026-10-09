@@ -17,7 +17,10 @@ from qkeee_erp_plugin.qkeee_erp.core import client
 
 class FakeCtx:
     def __init__(self):
-        self.tools, self.hooks, self.cli = [], [], []
+        self.tools, self.hooks, self.cli, self.skills = [], [], [], {}
+
+    def register_skill(self, name, path, description="", frontmatter=None):
+        self.skills[name] = path
 
     def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
         self.cli.append(name)
@@ -60,6 +63,15 @@ class RegisterTests(unittest.TestCase):
         self.assertIn(("pre_tool_call", identity_guard.pre_tool_call), ctx.hooks)
         self.assertEqual(sorted(h for h, _ in ctx.hooks),
                          ["post_tool_call", "pre_tool_call", "pre_tool_call"])
+
+    def test_registers_the_usage_skill(self):
+        ctx = FakeCtx()
+        qkeee_erp_plugin.register(ctx)
+        self.assertEqual(list(ctx.skills), ["usage"])
+        text = ctx.skills["usage"].read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\nname: usage\n"))
+        for rule in ("prompt_summary", "latest_prompt", "gaps[].prompt", "user_confirmation_text"):
+            self.assertIn(rule, text)
 
     def test_tools_read_the_plugin_settings_section(self):
         cfg = {"plugins": {"entries": {"qkeee-erp": {"settings": {"active_env": "demo",
