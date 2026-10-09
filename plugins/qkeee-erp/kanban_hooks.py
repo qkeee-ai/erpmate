@@ -6,7 +6,7 @@
   specifier/decomposer runs and a human can review it before work starts.
   `initial_status` is reset to the default, so it cannot park the task.
 - post_tool_call: after a successful create, write the task's origin to the
-  plugin's store (core/kanban_origin.py). A gateway create takes it from the
+  plugin's store (qkeee_erp/core/kanban_origin.py). A gateway create takes it from the
   per-turn session context. A worker create copies its own task's origin.
   Tool arguments and the card text are never a source.
 
@@ -23,7 +23,7 @@ import json
 import logging
 import os
 
-from core import kanban_origin
+from .qkeee_erp.core import kanban_origin
 
 logger = logging.getLogger(__name__)
 

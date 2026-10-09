@@ -8,8 +8,8 @@ import sqlite3
 import tempfile
 import unittest
 
-import kanban_hooks
-from core import kanban_origin
+from qkeee_erp_plugin import kanban_hooks
+from qkeee_erp_plugin.qkeee_erp.core import kanban_origin
 
 GATEWAY_SESSION = {"HERMES_SESSION_PLATFORM": "google_chat", "HERMES_SESSION_USER_ID": "nikhil@org.com",
                    "HERMES_SESSION_USER_ID_ALT": "users/1234", "HERMES_SESSION_USER_NAME": "Nikhil",

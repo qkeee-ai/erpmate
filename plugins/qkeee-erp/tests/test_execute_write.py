@@ -16,11 +16,11 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import execute_write
-from core import client as core_client
-from core import confirm_token, operations
-from core.client import DOMAIN_WRITE_ALLOWLISTS
-import schema_mapping
+from qkeee_erp_plugin.qkeee_erp import execute_write
+from qkeee_erp_plugin.qkeee_erp.core import client as core_client
+from qkeee_erp_plugin.qkeee_erp.core import confirm_token, operations
+from qkeee_erp_plugin.qkeee_erp.core.client import DOMAIN_WRITE_ALLOWLISTS
+from qkeee_erp_plugin.qkeee_erp import schema_mapping
 import testsupport
 
 BASE = ["--tag", "t", "--mode", "read-write", "--requested-by", testsupport.REQ]
@@ -68,7 +68,8 @@ class DocsNameEveryOperationTests(unittest.TestCase):
     def test_every_operation_key_is_documented(self):
         import glob
         import os
-        refs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "references")
+        repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+        refs = os.path.join(repo, "skills", "qkeee-erp", "qkeee-erp-associate", "references")
         text = "".join(open(p, encoding="utf-8").read()
                        for p in glob.glob(os.path.join(refs, "**", "*.md"), recursive=True))
         for op in operations.list_operations():

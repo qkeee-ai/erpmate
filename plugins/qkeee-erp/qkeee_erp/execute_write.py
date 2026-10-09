@@ -52,16 +52,11 @@ gets the report: every step `succeeded`, `failed` or `not_attempted`.
 
 import argparse
 import json
-import os
 import sys
-
-_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
 
 # Import every domain module for its side effect: registering its allowlist
 # and its operations. manufacturing/doc_extraction have no write path.
-from domains import (  # noqa: F401
+from .domains import (  # noqa: F401
     accounts,
     fixed_assets,
     hr_payroll,
@@ -71,8 +66,8 @@ from domains import (  # noqa: F401
     sales,
     system_admin,
 )
-from core import operations
-from core.client import (
+from .core import operations
+from .core.client import (
     ConnectorError,
     GateRefusal,
     InvalidArgumentsError,
@@ -81,7 +76,7 @@ from core.client import (
     WriteRejectedError,
     resolve_requested_by,
 )
-from core.client import _parse_json_arg  # noqa: F401 -- shared JSON-flag parsing
+from .core.client import _parse_json_arg  # noqa: F401 -- shared JSON-flag parsing
 
 _DOMAIN_MODULES = {
     m.DOMAIN_NAME: m for m in (accounts, fixed_assets, hr_payroll, inventory, mis,
@@ -348,6 +343,3 @@ def main(argv=None) -> int:
     print(json.dumps(result, indent=2, default=str))
     return EXIT_OK
 
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 
-import kanban_origin as ko
+from qkeee_erp_plugin.qkeee_erp.core import kanban_origin as ko
 
 ALICE = {"platform": "google_chat", "user_id": "alice@org.com", "user_id_alt": "users/1",
          "user_name": "Alice", "chat_id": "spaces/A"}

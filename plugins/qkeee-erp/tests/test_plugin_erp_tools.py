@@ -7,8 +7,8 @@ import os
 import unittest
 from unittest.mock import patch
 
-import erp_tools
-from core import client, operations
+from qkeee_erp_plugin import erp_tools
+from qkeee_erp_plugin.qkeee_erp.core import client, operations
 
 SENDER = {"HERMES_SESSION_PLATFORM": "google_chat", "HERMES_SESSION_USER_ID": "nikhil@org.com",
           "HERMES_SESSION_ID": "sess-1", "HERMES_SESSION_CHAT_ID": "spaces/A",
@@ -105,7 +105,7 @@ class DiscoverToolTests(ToolTestCase):
         mocked.assert_not_called()
 
     def test_meta_is_gated_on_the_session_sender(self):
-        import discover
+        from qkeee_erp_plugin.qkeee_erp import discover
         with patch.object(discover, "doctype_meta", return_value={"fields": []}) as mocked:
             out = self.call(self.tools(SENDER), "erp_discover", {"action": "meta", "doctype": "Item"})
         self.assertTrue(out["ok"])

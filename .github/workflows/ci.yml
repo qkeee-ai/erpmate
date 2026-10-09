@@ -20,16 +20,3 @@ jobs:
         run: python -m pytest tests
       - name: Plugin tests
         run: python -m pytest plugins/qkeee-erp
-      - name: Run each skill's tests
-        run: |
-          set -e
-          status=0
-          for skill_dir in skills/qkeee-erp/*/; do
-            scripts_dir="${skill_dir}scripts"
-            if [ -d "$scripts_dir" ] && find "$scripts_dir" -name "test_*.py" | grep -q .; then
-              echo "::group::$skill_dir"
-              (cd "$skill_dir" && python -m pytest scripts) || status=1
-              echo "::endgroup::"
-            fi
-          done
-          exit $status

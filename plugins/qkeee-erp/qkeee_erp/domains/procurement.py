@@ -30,15 +30,9 @@ confirmed proceeding without KYC). With KYC:
   KycPartialFailureError names the Supplier left behind.
 """
 
-import os
-import sys
 
-_SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from core import client as core_client
-from core import operations
+from ..core import client as core_client
+from ..core import operations
 
 DOMAIN_NAME = "procurement"
 
@@ -126,7 +120,7 @@ def check_kyc(req, args, ctx) -> None:
             "discover.py meta \"Address\" for this instance, including the tax ID) or — only "
             "when the user has explicitly confirmed proceeding without it — "
             "kyc_waiver_confirmed=True. See references/domains/procurement.md.")
-    import schema_mapping
+    from .. import schema_mapping
 
     def live_fields(sub_doctype):
         fields, _err = schema_mapping.get_doctype_schema(ctx.tag, sub_doctype,

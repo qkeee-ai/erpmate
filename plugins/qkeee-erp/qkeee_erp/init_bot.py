@@ -69,17 +69,13 @@ import os
 import sys
 import time
 
-_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from core import client as core_client
-from core import operations
-from core.client import ConnectorError, _qkeee_env_file_path, _audit_insert, _audit_submit, _now_iso
-from core.confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECONDS
+from .core import client as core_client
+from .core import operations
+from .core.client import ConnectorError, _qkeee_env_file_path, _audit_insert, _audit_submit, _now_iso
+from .core.confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECONDS
 import urllib.parse
 
-from doctype_defs import ALL_DOCTYPES, BOT_READ_GRANTS, MIGRATABLE_FIELDS, ROLE_NAME, ROLE_PAYLOAD
+from .doctype_defs import ALL_DOCTYPES, BOT_READ_GRANTS, MIGRATABLE_FIELDS, ROLE_NAME, ROLE_PAYLOAD
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +604,3 @@ def _cli():
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
-
-if __name__ == "__main__":
-    _cli()

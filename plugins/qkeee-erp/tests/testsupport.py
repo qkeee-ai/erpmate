@@ -11,9 +11,9 @@
 
 import unittest.mock
 
-from core import operations
-import schema_mapping
-from core.confirm_token import confirmation_code
+from qkeee_erp_plugin.qkeee_erp.core import operations
+from qkeee_erp_plugin.qkeee_erp import schema_mapping
+from qkeee_erp_plugin.qkeee_erp.core.confirm_token import confirmation_code
 
 REQ = "admin@example.com"
 

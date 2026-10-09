@@ -42,14 +42,9 @@ org's instance actually has.
 
 import argparse
 import json
-import os
 import sys
 
-_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from core.client import (
+from .core.client import (
     BOT_ROLE_NAME,
     ConnectorError,
     GateRefusal,
@@ -495,6 +490,3 @@ def _cli():
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
-
-if __name__ == "__main__":
-    _cli()

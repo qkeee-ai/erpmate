@@ -79,16 +79,10 @@ discover.py's already-gated `doctype_meta()`). Everything else is a plain
 data transform, easy to unit-test without a live instance.
 """
 
-import os
 import re
-import sys
 
-_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from core.client import ConnectorError  # noqa: E402
-import discover  # noqa: E402
+from .core.client import ConnectorError  # noqa: E402
+from . import discover  # noqa: E402
 
 # Small, deliberately narrow synonym table — see module docstring's
 # "Exact/normalized match auto-applies; fuzzy/synonym matches are

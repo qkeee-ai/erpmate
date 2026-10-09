@@ -19,20 +19,11 @@ doctype is ever added to mis.ALLOWED_WRITE_DOCTYPES without a matching
 deliberate test update.
 """
 
-import os
-import sys
 import unittest
 from unittest.mock import patch
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_SCRIPTS_DIR = os.path.dirname(_THIS_DIR)
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
-
-from core import client as core_client  # noqa: E402
-from core import operations  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.core import client as core_client  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.core import operations  # noqa: E402
 import testsupport  # noqa: E402
 
 _OFFLINE = testsupport.offline_schema()
@@ -47,14 +38,14 @@ def tearDownModule():
     for p in _OFFLINE:
         p.stop()
 
-import accounts  # noqa: E402
-import fixed_assets  # noqa: E402
-import hr_payroll  # noqa: E402
-import inventory  # noqa: E402
-import mis  # noqa: E402
-import procurement  # noqa: E402
-import sales  # noqa: E402
-import system_admin  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import accounts  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import fixed_assets  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import hr_payroll  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import inventory  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import mis  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import procurement  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import sales  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import system_admin  # noqa: E402
 
 # One disallowed doctype per domain — deliberately NOT in that domain's
 # ALLOWED_WRITE_DOCTYPES, and not a doctype any other domain's allowlist

@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Regression tests for item_write_helpers.py (F6, F9 — .scratch/
-hermes-erp-bot-reliability/spec.md). Bare `import item_write_helpers`
-matches this repo's convention for a top-level scripts/ module — pytest
-inserts the file's own directory into sys.path when collecting it (no
-__init__.py there)."""
+hermes-erp-bot-reliability/spec.md)."""
 
 import unittest
 
-import item_write_helpers as iwh
+from qkeee_erp_plugin.qkeee_erp import item_write_helpers as iwh
 
 
 class PurchaseSourcedDefaultsTests(unittest.TestCase):

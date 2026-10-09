@@ -12,10 +12,10 @@ import json
 import unittest
 from unittest.mock import patch
 
-import execute_write
+from qkeee_erp_plugin.qkeee_erp import execute_write
 import testsupport
-from core import client as core_client
-from core import operations
+from qkeee_erp_plugin.qkeee_erp.core import client as core_client
+from qkeee_erp_plugin.qkeee_erp.core import operations
 
 
 def frappe_error(exc_type, exception, messages=(), status=417):

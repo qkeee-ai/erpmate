@@ -114,18 +114,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-# Dual-mode import: works whether this file is run directly as a script
-# (`python core/client.py ...` — Python puts `core/` itself on sys.path,
-# so a plain `import confirm_token` resolves) or imported as `core.client`
-# from a sibling package (a domains/*.py module that has put `scripts/` —
-# core's PARENT — on sys.path first; see domains/*.py's own import
-# preamble). Avoids hardcoding either sys.path shape.
-try:
-    from confirm_token import compute_token, confirmation_code, is_fresh
-    import kanban_origin
-except ImportError:
-    from core.confirm_token import compute_token, confirmation_code, is_fresh
-    from core import kanban_origin
+from .confirm_token import compute_token, confirmation_code, is_fresh
+from . import kanban_origin
 
 # Default attribution label for audit Comments when no domain-specific
 # label is supplied — see _do_mutate()'s `skill_label` param.
@@ -2595,6 +2585,3 @@ def _cli():
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
-
-if __name__ == "__main__":
-    _cli()

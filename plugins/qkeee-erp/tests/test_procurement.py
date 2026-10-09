@@ -12,23 +12,14 @@ despite procurement.md's own non-negotiable that this domain's KYC bar
 is stricter than ERPNext's own. That was prompt discipline alone; this
 file tests the code-level backstop."""
 
-import os
-import sys
 import unittest
 from unittest.mock import patch
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_SCRIPTS_DIR = os.path.dirname(_THIS_DIR)
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
+from qkeee_erp_plugin.qkeee_erp.core import client as core_client  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.core import operations  # noqa: E402
 
-from core import client as core_client  # noqa: E402
-from core import operations  # noqa: E402
-
-import procurement  # noqa: E402
-import schema_mapping  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp.domains import procurement  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp import schema_mapping  # noqa: E402
 import testsupport  # noqa: E402
 
 _OFFLINE = testsupport.offline_schema()
@@ -179,7 +170,7 @@ class KycTaxIdAndPrevalidationTests(unittest.TestCase):
         patches = _patched_connector()
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
              patch.object(operations, "_schema_map", side_effect=lambda ctx, dt, p, notes, **kw: dict(p)), \
-             patch("schema_mapping.get_doctype_schema", return_value=(self._CORE_ADDRESS_META, None)), \
+             patch("qkeee_erp_plugin.qkeee_erp.schema_mapping.get_doctype_schema", return_value=(self._CORE_ADDRESS_META, None)), \
              patch.object(core_client, "_do_mutate", side_effect=side_effect) as do_mutate:
             try:
                 return operations.call_generic(
@@ -292,7 +283,7 @@ class KycMappingRunsAtRenderAndExecuteTests(unittest.TestCase):
     enrich(), so render shows (and the token covers) the mapped fields."""
 
     def test_render_shows_mapped_kyc(self):
-        from core import operations
+        from qkeee_erp_plugin.qkeee_erp.core import operations
 
         def fake_map(tag, doctype, payload, **kw):
             mapped = {("gstin" if k == "GSTIN" else k): v for k, v in (payload or {}).items()}

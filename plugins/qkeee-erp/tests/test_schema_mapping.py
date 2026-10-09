@@ -13,8 +13,8 @@ uses for get_resource()."""
 import unittest
 from unittest.mock import patch
 
-import schema_mapping
-from core.client import ConnectorError
+from qkeee_erp_plugin.qkeee_erp import schema_mapping
+from qkeee_erp_plugin.qkeee_erp.core.client import ConnectorError
 
 _SUPPLIER_FIELDS = [
     {"fieldname": "supplier_name", "label": "Supplier Name", "fieldtype": "Data"},

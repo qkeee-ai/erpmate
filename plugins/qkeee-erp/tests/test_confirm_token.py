@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Regression tests for confirm_token.confirmation_code() (F5, .scratch/
-hermes-erp-bot-reliability/spec.md). Bare `import confirm_token` matches
-this repo's convention — conftest.py adds core/ to sys.path."""
+hermes-erp-bot-reliability/spec.md)."""
 
 import unittest
 
-import confirm_token as ct
+from qkeee_erp_plugin.qkeee_erp.core import confirm_token as ct
 
 
 class ConfirmationCodeTests(unittest.TestCase):

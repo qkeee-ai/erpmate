@@ -5,7 +5,7 @@ defence in depth only."""
 
 import unittest
 
-import identity_guard
+from qkeee_erp_plugin import identity_guard
 
 ALLOWED_TERMINAL = [
     "python /opt/data/skills/qkeee-erp/qkeee-erp-associate/scripts/client.py query Customer",

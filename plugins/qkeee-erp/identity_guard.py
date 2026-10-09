@@ -11,7 +11,7 @@ plain forms of that:
 - env_file          terminal / execute_code source, or a path argument of
                     any other non-erp_* tool, names qkeee-erp.env (also as a
                     glob such as qkeee*.env) or a plugin-data directory
-- core_client       execute_code imports the skill's core.client
+- core_client       execute_code imports the ERP library's core.client
 - erpnext_api       execute_code calls ERPNext REST paths directly
 
 Pattern matching only: eval, base64 or a script written to disk and run later

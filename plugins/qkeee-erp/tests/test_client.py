@@ -13,11 +13,11 @@ import unittest
 import unittest.mock
 from unittest.mock import patch
 
-import client as erp_client
-import client as ec
-from confirm_token import confirmation_code
-import operations
-import schema_mapping
+from qkeee_erp_plugin.qkeee_erp.core import client as erp_client
+from qkeee_erp_plugin.qkeee_erp.core import client as ec
+from qkeee_erp_plugin.qkeee_erp.core.confirm_token import confirmation_code
+from qkeee_erp_plugin.qkeee_erp.core import operations
+from qkeee_erp_plugin.qkeee_erp import schema_mapping
 
 
 def advisory_write_token(action, doctype, name, payload, requested_by, issued_at,
@@ -941,7 +941,7 @@ class KanbanWorkerRequesterTests(unittest.TestCase):
         import os
         import sqlite3
         import tempfile
-        import kanban_origin
+        from qkeee_erp_plugin.qkeee_erp.core import kanban_origin
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.home = tmp.name

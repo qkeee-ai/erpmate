@@ -1,8 +1,8 @@
 """ERPNext calls as gateway tools (requester identity binding, issue 04).
 
 The tools run in the Hermes gateway process, not in the agent's terminal.
-They reuse the qkeee-erp-associate skill scripts (core/client.py,
-core/operations.py, discover.py) as a library.
+They call the plugin's ERP library (qkeee_erp/: core/client.py,
+core/operations.py, discover.py).
 
 - The requester is never a tool argument. It is the gateway session's
   sender email (client.resolve_requested_by, through the session reader
@@ -22,9 +22,9 @@ hook can target them by name.
 import json
 import os
 
-import discover
-import execute_write  # imports every domain module: registers allowlists + operations
-from core import client, operations
+from .qkeee_erp import discover
+from .qkeee_erp import execute_write  # imports every domain module: registers allowlists + operations
+from .qkeee_erp.core import client, operations
 
 TOOLSET = "qkeee_erp"
 DOMAIN_CODE = "qkeee-erp-associate"

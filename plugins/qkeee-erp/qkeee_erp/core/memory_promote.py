@@ -57,16 +57,11 @@ not a courtesy.
 """
 
 import json
-import os
 import re
 import sys
 from datetime import datetime, timezone
 
-_SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from core.client import redact_pii, _redact_pii_deep
+from .client import redact_pii, _redact_pii_deep
 
 LEARNED_SKILL_PREFIX = "qkeee-erp-learned"
 
@@ -447,6 +442,3 @@ def _cli():
     )
     print(json.dumps(plan, indent=2, ensure_ascii=False))
 
-
-if __name__ == "__main__":
-    _cli()

@@ -2,9 +2,7 @@
 """Regression tests for discover.py — the resurrected schema-discovery
 script (see discover.py's own module docstring and
 .scratch/hermes-erp-bot-reliability/spec.md finding F8 for why it exists
-again). Bare `import discover` matches this repo's convention for a
-top-level scripts/ module with no __init__.py — pytest inserts the file's
-own directory (scripts/) into sys.path when collecting it.
+again).
 
 Not re-testing get_resource()/query_resource() themselves — core/
 test_client.py already covers those. These tests cover the logic
@@ -16,8 +14,8 @@ filter, and resolve_doctype()'s null-vs-error distinction for `app`.
 import unittest
 from unittest.mock import patch
 
-import discover
-from core import client as _client
+from qkeee_erp_plugin.qkeee_erp import discover
+from qkeee_erp_plugin.qkeee_erp.core import client as _client
 
 
 

@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 import testsupport
 from test_operations import connector
-from core import client as core_client
-from core import operations
-from domains import system_admin  # noqa: F401 — registers system_admin.*
+from qkeee_erp_plugin.qkeee_erp.core import client as core_client
+from qkeee_erp_plugin.qkeee_erp.core import operations
+from qkeee_erp_plugin.qkeee_erp.domains import system_admin  # noqa: F401 — registers system_admin.*
 
 BOT = {"user": "qkeee-erp-bot@example.com", "roles": ["Qkeee Bot"]}
 ADMIN = {"user": "qkeee-erp-admin@example.com", "roles": ["System Manager", "Qkeee Admin"]}

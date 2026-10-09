@@ -32,7 +32,6 @@ hardening ticket 07.)
 
 import hashlib
 import json
-import os
 import sys
 import time
 
@@ -91,12 +90,9 @@ def _cli():
     it with its confirmation token — see the module docstring."""
     import argparse
 
-    scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    import execute_write  # noqa: F401 — imports every domain module (registers operations)
-    from core import operations
-    from core.client import (ConnectorError, InvalidArgumentsError, _parse_json_arg,
+    from .. import execute_write  # noqa: F401 — imports every domain module (registers operations)
+    from . import operations
+    from .client import (ConnectorError, InvalidArgumentsError, _parse_json_arg,
                              resolve_requested_by)
 
     p = argparse.ArgumentParser(description="Render a write operation for user confirmation.")
@@ -141,6 +137,3 @@ def _cli():
                         "--user-confirmation-text '<the user's own reply>'.")
     print(json.dumps(out, indent=2, default=str))
 
-
-if __name__ == "__main__":
-    _cli()

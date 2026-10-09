@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-import init_bot
+from qkeee_erp_plugin.qkeee_erp import init_bot
 
 
 class LogRoleProvisioningTests(unittest.TestCase):
@@ -99,7 +99,7 @@ class AuditFieldMigrationTests(unittest.TestCase):
     AUDIT = "Qkeee Bot Audit Log"
 
     def _live(self, reference_type):
-        from doctype_defs import ALL_DOCTYPES
+        from qkeee_erp_plugin.qkeee_erp.doctype_defs import ALL_DOCTYPES
         fields = [dict(f, name=f"row-{i}") for i, f in
                   enumerate(next(d for d in ALL_DOCTYPES if d["name"] == self.AUDIT)["fields"])]
         for f in fields:
@@ -108,7 +108,7 @@ class AuditFieldMigrationTests(unittest.TestCase):
         return {"name": self.AUDIT, "fields": fields}
 
     def test_definition_is_data_not_dynamic_link(self):
-        from doctype_defs import ALL_DOCTYPES
+        from qkeee_erp_plugin.qkeee_erp.doctype_defs import ALL_DOCTYPES
         ref = next(f for f in next(d for d in ALL_DOCTYPES if d["name"] == self.AUDIT)["fields"]
                    if f["fieldname"] == "reference_name")
         self.assertEqual(ref["fieldtype"], "Data")
@@ -141,7 +141,7 @@ class AuditFieldMigrationTests(unittest.TestCase):
         self.assertEqual(untouched, [f for f in live["fields"] if f["fieldname"] != "reference_name"])
 
     def test_migrate_operation_refuses_anything_but_the_definition(self):
-        from core import operations
+        from qkeee_erp_plugin.qkeee_erp.core import operations
         ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
         op = operations.get_operation("provisioning.migrate_fields")
         good = self._live("Data")["fields"]
@@ -156,7 +156,7 @@ class AuditFieldMigrationTests(unittest.TestCase):
             op.prepare({"doctype_name": "User", "fields": good}, ctx)
 
     def _run_gates(self, fields, live):
-        from core import operations
+        from qkeee_erp_plugin.qkeee_erp.core import operations
         ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
         op = operations.get_operation("provisioning.migrate_fields")
         args = {"doctype_name": self.AUDIT, "fields": fields}
@@ -206,7 +206,7 @@ class BotReadGrantTests(unittest.TestCase):
             return init_bot.compute_plan("qa")
 
     def test_definitions_are_read_only_on_module_def_and_workflow(self):
-        from doctype_defs import BOT_READ_GRANTS
+        from qkeee_erp_plugin.qkeee_erp.doctype_defs import BOT_READ_GRANTS
         self.assertEqual(BOT_READ_GRANTS, ("Module Def", "Workflow"))
 
     def test_plan_lists_both_rows_when_missing(self):
@@ -244,7 +244,7 @@ class BotReadGrantTests(unittest.TestCase):
         self.assertNotEqual(a, b)
 
     def test_grant_runs_the_permission_manager_add_rpc_with_read_only(self):
-        from core import operations
+        from qkeee_erp_plugin.qkeee_erp.core import operations
         ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
         req = operations.get_operation("provisioning.grant_bot_read").prepare(
             {"doctype": "Module Def", "step": "add"}, ctx)
@@ -257,7 +257,7 @@ class BotReadGrantTests(unittest.TestCase):
                                     "ptype": "read", "value": 1, "if_owner": 0})
 
     def test_grant_refuses_any_other_doctype_or_step(self):
-        from core import operations
+        from qkeee_erp_plugin.qkeee_erp.core import operations
         ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
         op = operations.get_operation("provisioning.grant_bot_read")
         for args in ({"doctype": "Employee", "step": "add"},

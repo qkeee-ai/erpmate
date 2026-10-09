@@ -27,13 +27,14 @@ import unittest
 import urllib.error
 from unittest.mock import MagicMock, patch
 
-from core import client as core_client
-from core import operations
-from domains import fixed_assets, inventory, system_admin
+from qkeee_erp_plugin.qkeee_erp.core import client as core_client
+from qkeee_erp_plugin.qkeee_erp.core import operations
+from qkeee_erp_plugin.qkeee_erp import domains
+from qkeee_erp_plugin.qkeee_erp.domains import fixed_assets, inventory, system_admin
 import testsupport
 from testsupport import REQ
 
-_DOMAINS_DIR = os.path.dirname(os.path.abspath(__file__))
+_DOMAINS_DIR = os.path.dirname(os.path.abspath(domains.__file__))
 
 CFG = {"tag": "test", "base_url": "https://erp.example", "api_key": "k", "api_secret": "s",
        "credential": "bot"}
@@ -134,7 +135,7 @@ class RegistryTests(unittest.TestCase):
                 self.assertIn(op.key, TAMPER, "add a TAMPER entry for the new operation")
 
     def test_provisioning_ops_are_not_cli(self):
-        import init_bot  # noqa: F401 — registers provisioning.*
+        from qkeee_erp_plugin.qkeee_erp import init_bot  # noqa: F401 — registers provisioning.*
         self.assertIn("provisioning.create_role", operations.REGISTRY)
         self.assertNotIn("provisioning.create_role", {op.key for op in operations.list_operations()})
 
@@ -339,7 +340,7 @@ class PipelineOrderTests(unittest.TestCase):
         """W05: mapping/defaults happen in prepare(), so a token rendered
         over the raw args matches at execute time even when mapping
         renames keys and defaults add keys."""
-        import schema_mapping
+        from qkeee_erp_plugin.qkeee_erp import schema_mapping
         live_fields = [{"fieldname": "item_code", "label": "Item Code"},
                        {"fieldname": "item_name", "label": "Item Name"},
                        {"fieldname": "is_purchase_item", "label": "Is Purchase Item"},
@@ -365,7 +366,7 @@ class PipelineOrderTests(unittest.TestCase):
     def test_cheap_gates_run_before_any_live_read(self):
         """Mode/requester/allowlist/ownership refuse BEFORE enrich() does
         its schema read — a refused write leaves no read behind."""
-        import schema_mapping
+        from qkeee_erp_plugin.qkeee_erp import schema_mapping
         cases = [("mis.generic", {"doctype": "GL Entry", "action": "create", "payload": {"a": 1}},
                   {}, core_client.DoctypeNotAllowedError),
                  ("sales.generic", {"doctype": "Sales Order", "action": "create", "payload": {"a": 1}},
@@ -386,7 +387,7 @@ class ProvisioningOperationTests(unittest.TestCase):
     audited by the pipeline (log_role_provisioning() is the record)."""
 
     def setUp(self):
-        import init_bot
+        from qkeee_erp_plugin.qkeee_erp import init_bot
         self.init_bot = init_bot
 
     def test_only_the_defined_records(self):
@@ -408,7 +409,7 @@ class ProvisioningOperationTests(unittest.TestCase):
         self.assertEqual(result["_audit_log_status"], "exempt")
 
 
-import schema_mapping as _sm  # noqa: E402
+from qkeee_erp_plugin.qkeee_erp import schema_mapping as _sm  # noqa: E402
 _REAL_MAP = _sm.map_payload_for_write
 
 
@@ -454,7 +455,7 @@ class InvariantTests(unittest.TestCase):
         import importlib
         import inspect
         for module_name, expected in self.PUBLIC_CALLABLES.items():
-            module = importlib.import_module(f"domains.{module_name}")
+            module = importlib.import_module(f"qkeee_erp_plugin.qkeee_erp.domains.{module_name}")
             public = {n for n, obj in vars(module).items()
                       if inspect.isfunction(obj) and obj.__module__ == module.__name__
                       and not n.startswith("_")}
@@ -463,7 +464,7 @@ class InvariantTests(unittest.TestCase):
 
 
     def test_list_ops_matches_registry(self):
-        import execute_write
+        from qkeee_erp_plugin.qkeee_erp import execute_write
         listed = {o["op"] for o in execute_write.list_ops()}
         self.assertEqual(listed, {op.key for op in operations.list_operations()})
 
@@ -545,7 +546,7 @@ class OwnershipAndUnscopedTests(unittest.TestCase):
         for name in ("accounts", "sales", "hr_payroll", "inventory", "mis", "procurement",
                      "fixed_assets", "system_admin"):
             with self.subTest(module=name):
-                self.assertFalse(hasattr(importlib.import_module(f"domains.{name}"), "mutate"))
+                self.assertFalse(hasattr(importlib.import_module(f"qkeee_erp_plugin.qkeee_erp.domains.{name}"), "mutate"))
 
 
 class SystemAdminRuleTests(unittest.TestCase):

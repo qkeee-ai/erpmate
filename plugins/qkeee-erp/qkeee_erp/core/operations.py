@@ -50,7 +50,6 @@ confirmation code. `confirm_token.py render` is its CLI.
 import dataclasses
 import ipaddress
 import json
-import os
 import re
 import sys
 import time
@@ -58,12 +57,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
-_SCRIPTS_DIR = os.path.dirname(_CORE_DIR)
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from core import client as _c  # noqa: E402  (module object: patches in tests apply)
+from . import client as _c  # noqa: E402  (module object: patches in tests apply)
 
 POLICY_NONE = "none"
 POLICY_TOKEN = "token"
@@ -786,7 +780,7 @@ GENERIC_ARGS_HELP = {
 
 def _schema_map(ctx: WriteContext, doctype: str, payload: dict, notes: list,
                 staged_fields=None, confirmed_mappings=None) -> dict:
-    import schema_mapping  # scripts/ root; lazy (imports discover -> client)
+    from .. import schema_mapping  # lazy (imports discover -> client)
     mapping = schema_mapping.map_payload_for_write(
         ctx.tag, doctype, payload, requested_by=ctx.requested_by,
         staged_fields=staged_fields, confirmed_mappings=confirmed_mappings, **ctx.audit_kwargs())
@@ -852,7 +846,7 @@ def enrich_generic(req: PreparedRequest, args: dict, ctx: WriteContext) -> None:
         return
     payload = req.body or {}
     if args.get("purchase_sourced_item"):
-        from item_write_helpers import (BareStandardRateOnPurchaseSourcedItemError,
+        from ..item_write_helpers import (BareStandardRateOnPurchaseSourcedItemError,
                                         apply_purchase_sourced_item_defaults)
         try:
             payload = apply_purchase_sourced_item_defaults(payload)

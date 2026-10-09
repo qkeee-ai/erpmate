@@ -9,15 +9,9 @@ Cross-check ALLOWED_WRITE_DOCTYPES against references/domains/
 hr-payroll.md before expanding.
 """
 
-import os
-import sys
 
-_SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from core import client as core_client
-from core import operations
+from ..core import client as core_client
+from ..core import operations
 
 DOMAIN_NAME = "hr_payroll"
 

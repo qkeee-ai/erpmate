@@ -2,17 +2,18 @@
 requester origin, and a guard against identity override
 (agents/.scratch/qkeee-erp-requester-identity-binding, issues 03, 04 and 09).
 
+- qkeee_erp/: the ERP library (connector, write pipeline, domains,
+  discovery, provisioning). Runs only in the gateway process.
 - erp_tools.py: erp_query, erp_get, erp_report, erp_discover,
-  erp_execute_write. They run in the gateway process and reuse the
-  qkeee-erp-associate skill scripts as a library.
+  erp_execute_write.
 - kanban_hooks.py: kanban_create from a chat turn starts in triage; every
-  created task records its requester origin (core/kanban_origin.py).
+  created task records its requester origin (qkeee_erp/core/kanban_origin.py).
 - identity_guard.py: blocks terminal / execute_code calls that override
   HERMES_SESSION_* or reach the ERPNext credentials around the erp_* tools.
 
-Settings (`plugins.entries.qkeee-erp.settings`):
-  scripts_dir  the skill's scripts/ directory. Default:
-               <HERMES_HOME>/skills/qkeee-erp/qkeee-erp-associate/scripts
+register() never raises: Hermes rolls back every registration of a plugin
+whose register() raises. If the library cannot load, only the identity
+guard is registered and the error is logged.
 
 Enabled at boot by docker/cont-init.d/018-qkeee-erp-plugin.
 """
@@ -20,12 +21,8 @@ Enabled at boot by docker/cont-init.d/018-qkeee-erp-plugin.
 from __future__ import annotations
 
 import logging
-import os
-import sys
 
 logger = logging.getLogger(__name__)
-
-_SKILL_SCRIPTS = os.path.join("skills", "qkeee-erp", "qkeee-erp-associate", "scripts")
 
 
 def _skill_config() -> dict:
@@ -36,33 +33,21 @@ def _skill_config() -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _load_skill_library(scripts_dir: str) -> None:
-    """Put the skill scripts on sys.path and check that `core` resolves to
-    them, not to some other installed package of the same name."""
-    if not os.path.isdir(scripts_dir):
-        raise FileNotFoundError(f"qkeee-erp-associate scripts not found at {scripts_dir}")
-    if scripts_dir not in sys.path:
-        sys.path.append(scripts_dir)
-    import core.client
-    found = os.path.dirname(os.path.dirname(os.path.abspath(core.client.__file__)))
-    if os.path.normcase(found) != os.path.normcase(os.path.abspath(scripts_dir)):
-        raise ImportError(f"`core` resolved to {found}, not the skill scripts at {scripts_dir}")
-
-
 def register(ctx) -> None:
-    from hermes_constants import get_hermes_home
-    from gateway.session_context import get_session_env
+    from . import identity_guard
 
-    scripts_dir = ctx.get_config("scripts_dir") or os.path.join(str(get_hermes_home()), _SKILL_SCRIPTS)
+    # The guard protects; it grants nothing, so it registers first and always.
+    ctx.register_hook("pre_tool_call", identity_guard.pre_tool_call)
+
     try:
-        _load_skill_library(scripts_dir)
-    except Exception as e:
-        # Fail visibly: without the library there are no ERPNext tools at all.
-        logger.error("qkeee-erp plugin not loaded: %s", e)
-        raise
+        from hermes_constants import get_hermes_home
+        from gateway.session_context import get_session_env
 
-    from core import client, kanban_origin
-    from . import erp_tools, identity_guard, kanban_hooks
+        from . import erp_tools, kanban_hooks
+        from .qkeee_erp.core import client, kanban_origin
+    except Exception as e:
+        logger.error("qkeee-erp plugin: ERP library not loaded, no erp_* tools: %s", e)
+        return
 
     client.set_session_env_reader(get_session_env)
     client.set_hermes_home_reader(lambda: str(get_hermes_home()))
@@ -71,8 +56,6 @@ def register(ctx) -> None:
     for name, schema in erp_tools.SCHEMAS.items():
         ctx.register_tool(name=name, toolset=erp_tools.TOOLSET, schema=schema,
                           handler=tools.handler(name), emoji="📒")
-
-    ctx.register_hook("pre_tool_call", identity_guard.pre_tool_call)
 
     hooks = kanban_hooks.KanbanOriginHooks(
         session_env=get_session_env,

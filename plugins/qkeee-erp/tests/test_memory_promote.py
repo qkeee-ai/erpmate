@@ -7,7 +7,7 @@ dict formatting and the redaction pass."""
 import json
 import unittest
 
-import memory_promote as mp
+from qkeee_erp_plugin.qkeee_erp.core import memory_promote as mp
 
 
 class SkillNameSanitizationTests(unittest.TestCase):
