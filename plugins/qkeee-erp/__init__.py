@@ -17,7 +17,9 @@ requester origin, and a guard against identity override
 - settings.py: the plugin's own settings (plugins.entries.qkeee-erp.settings).
 - setup_steps.py: `hermes qkeee-erp setup`. Until every setup item is done
   for this plugin version, no erp_* tools register; the hooks, the CLI and
-  the usage skill always register.
+  the usage skill always register. Setup items I2/I1 (qkeee_erp/isolation.py)
+  require proven Isolation whose fingerprint equals the live terminal config
+  (agents ADR 0006).
 
 register() never raises: Hermes rolls back every registration of a plugin
 whose register() raises. If the library cannot load, only the identity

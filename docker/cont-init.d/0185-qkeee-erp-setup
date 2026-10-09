@@ -5,10 +5,17 @@
 # Idempotent: each item checks whether its result is already there. It moves
 # a legacy qkeee-erp.env into plugin-data/qkeee-erp/ (S1), moves the legacy
 # skills.config.qkeee_erp settings into the plugin's own section (S2), sets
-# the erpmate toolsets and ssh terminal (P1, P2) and checks the terminal key
-# (S3). Until every item is done the plugin registers no erp_* tools; the
-# Operator sees why with `hermes -p <profile> qkeee-erp setup status`.
-# (agents/.scratch/qkeee-erp-plugin-profile-split, issue 07)
+# the erpmate toolsets and ssh terminal (P1, P2), checks the terminal key
+# (S3), refuses a terminal target another profile already uses (I2) and
+# probes Isolation through the sidecar (I1). Until every item is done the
+# plugin registers no erp_* tools; the Operator sees why with
+# `hermes -p <profile> qkeee-erp setup status`.
+# (agents/.scratch/qkeee-erp-plugin-profile-split, issues 07 and 10)
+#
+# The sidecar may still be starting when this runs (no depends_on), and an
+# unreachable sidecar means "Isolation not proven". So while setup is not
+# complete, it runs again up to QKEEE_ERP_SETUP_ATTEMPTS times (default 3),
+# 5 s apart. Each run is idempotent.
 #
 # Runs after 0157-terminal-ssh (the key), 016-profile-install (the profile)
 # and 018-qkeee-erp-plugin (plugin enabled). Non-fatal. Set
@@ -29,7 +36,15 @@ fi
 
 run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
 
-run hermes -p "$NAME" qkeee-erp setup --apply-profile-fixes 2>&1 | sed "s/^/[qkeee-erp-setup:$NAME] /"
+ATTEMPTS="${QKEEE_ERP_SETUP_ATTEMPTS:-3}"
+i=1
+while :; do
+    run hermes -p "$NAME" qkeee-erp setup --apply-profile-fixes 2>&1 | sed "s/^/[qkeee-erp-setup:$NAME] /"
+    run hermes -p "$NAME" qkeee-erp setup status >/dev/null 2>&1 && break
+    [ "$i" -ge "$ATTEMPTS" ] && break
+    i=$((i + 1))
+    sleep 5
+done
 if ! run hermes -p "$NAME" qkeee-erp setup status >/dev/null 2>&1; then
     echo "[qkeee-erp-setup:$NAME] WARNING: setup not complete; no ERPNext tools until it is." >&2
     echo "[qkeee-erp-setup:$NAME]   See: hermes -p $NAME qkeee-erp setup status" >&2

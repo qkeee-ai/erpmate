@@ -12,6 +12,7 @@ import unittest
 import yaml
 
 from qkeee_erp_plugin import setup_steps as setup
+from testsupport import FakeBackend
 
 VERSION = "0.2.0"
 
@@ -144,7 +145,8 @@ class SetupTestCase(unittest.TestCase):
 
         values = dict(hermes_home=self.home, read_config=self.read, write_config=write,
                       version=VERSION, in_container=self.in_container, keygen=keygen,
-                      docker_terminal=dict(setup.DOCKER_TERMINAL, ssh_key=self.docker_key))
+                      docker_terminal=dict(setup.DOCKER_TERMINAL, ssh_key=self.docker_key),
+                      environ={}, run_probe=FakeBackend())  # every probe read fails: Isolated
         values.update(kw)
         return setup.SetupEnv(**values)
 
@@ -164,7 +166,7 @@ class FreshInstallTests(SetupTestCase):
         before = self.raw()
         report = setup.run(self.env())
         self.assertEqual(set(self.statuses(report).values()), {setup.DONE})
-        self.assertEqual(report["changes"], [])
+        self.assertEqual([c for c in report["changes"] if not c.startswith("I1")], [])
         self.assertEqual(self.raw(), before)
         self.assertEqual(self.backups(), [])
 
@@ -276,7 +278,7 @@ class HalfDoneTests(SetupTestCase):
         self.credentials()
         report = setup.run(self.env(), apply_profile_fixes=True)
         self.assertEqual(set(self.statuses(report).values()), {setup.DONE})
-        self.assertTrue(all(c.startswith(("P2", "S3")) for c in report["changes"]), report["changes"])
+        self.assertTrue(all(c.startswith(("P2", "S3", "I1")) for c in report["changes"]), report["changes"])
 
 
 class CommentHeavyTests(SetupTestCase):
@@ -505,7 +507,7 @@ class OperatorCliTests(SetupTestCase):
         before = self.raw()
         code, out, _ = self.cli(["setup", "status"])
         self.assertEqual(code, 1)
-        for key in ("S1", "S2", "P1", "P2", "S3"):
+        for key in ("S1", "S2", "P1", "P2", "S3", "I2", "I1"):
             self.assertIn(key, out)
         self.assertIn("pending", out)
         self.assertEqual(self.raw(), before)

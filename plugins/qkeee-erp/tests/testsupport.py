@@ -9,12 +9,15 @@
   render path the CLI uses, so tests exercise render -> execute for real.
 - `run_operator_cli()`: one `hermes qkeee-erp <command>` run (cli.py),
   without Hermes: returns (exit code, stdout, stderr).
+- `FakeBackend`: the terminal backend for the Isolation probe
+  (qkeee_erp/isolation.py); reads fail unless a test makes them succeed.
 """
 
 import argparse
 import contextlib
 import copy
 import io
+import re
 import unittest.mock
 
 from qkeee_erp_plugin.qkeee_erp.core import operations
@@ -101,3 +104,25 @@ def run_operator_cli(argv, config=None, setup_env=None):
         except SystemExit as e:
             code = e.code
     return code, out.getvalue(), err.getvalue()
+
+
+class FakeBackend:
+    """Runs the probe command 'remotely': each path read succeeds if the
+    test lists it as readable. `error` makes the backend raise instead."""
+
+    def __init__(self, readable=(), error=None, output=None):
+        self.readable, self.error, self.output = set(readable), error, output
+        self.calls = []
+
+    def __call__(self, fingerprint, command):
+        self.calls.append((dict(fingerprint), command))
+        if self.error:
+            raise self.error
+        if self.output is not None:
+            return {"output": self.output, "returncode": 0}
+        lines = []
+        for m in re.finditer(r"if cat -- '([^']*)' >/dev/null 2>&1; then echo '(\S+) (\d+) readable'",
+                             command):
+            path, nonce, index = m.groups()
+            lines.append(f"{nonce} {index} {'readable' if path in self.readable else 'denied'}")
+        return {"output": "\n".join(lines) + "\n", "returncode": 0}

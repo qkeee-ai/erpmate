@@ -12,10 +12,13 @@ is already present; only a missing result is applied.
 | P1 toolsets | prerequisite | google_chat has `qkeee_erp`; no ERP chat platform (google_chat, or any but cli listing `qkeee_erp`) has `code_execution`; `known_plugin_toolsets` lists `qkeee_erp` for cli, discord and google_chat |
 | P2 terminal | prerequisite | `terminal.backend` is `ssh` with host, user and key set |
 | S3 terminal key | step | the `terminal.ssh_key` file exists (created if missing) |
+| I2 exclusive target | step | no other Profile under the Hermes root records proven Isolation for the same `ssh_user@ssh_host` |
+| I1 Isolation probe | step | `isolation.json` proves Isolation and its fingerprint equals the live terminal config (a missing or stale record is re-probed) |
 
 S3 runs after P2 so that `--apply-profile-fixes` can switch the backend
-and then create its key in one run. Issue 10 appends the Isolation items
-(I1 probe, I2 exclusive target).
+and then create its key in one run. I2 runs before I1 so that a shared
+terminal target is never probed or recorded as Isolated (issue 10; ADR
+0006). Isolation logic lives in qkeee_erp/isolation.py.
 
 - Steps (S*) write without a flag. Prerequisites (P*) change Profile
   settings: they only report, unless `apply_profile_fixes`.
@@ -34,8 +37,9 @@ and then create its key in one run. Issue 10 appends the Isolation items
   run for this plugin version (so a Profile update that brings a new
   plugin version needs setup again). It never writes.
 
-No Hermes or ERP library import at load time: the Operator CLI reaches
-this module even when the library cannot load.
+No Hermes or ERP library import at load time (qkeee_erp/isolation.py is
+stdlib only): the Operator CLI reaches this module even when the library
+cannot load.
 """
 
 from __future__ import annotations
@@ -47,9 +51,10 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Mapping
 
 from . import settings
+from .qkeee_erp import isolation
 
 DONE, PENDING, FAILED = "done", "pending", "failed"
 STEP, PREREQUISITE = "step", "prerequisite"
@@ -77,6 +82,11 @@ class SetupEnv:
     - `read_config()`: the profile's config.yaml as written (no defaults).
     - `write_config(cfg)`: write it back (production: hermes_cli.config).
     - `keygen(path)`: create an ssh key pair at path / path + ".pub".
+    - `environ`: the env the terminal tool reads TERMINAL_* from.
+    - `run_probe(fingerprint, command)`: run one command through the
+      terminal backend (production: isolation.hermes_probe).
+    - `hermes_root`: where the other Profiles live (default: derived from
+      `hermes_home`, as hermes_constants.get_default_hermes_root does).
     """
     hermes_home: str
     read_config: Callable[[], dict]
@@ -87,6 +97,16 @@ class SetupEnv:
     docker_terminal: dict = field(default_factory=lambda: dict(DOCKER_TERMINAL))
     now: Callable[[], _dt.datetime] = field(
         default=lambda: _dt.datetime.now(_dt.timezone.utc))
+    environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
+    run_probe: Callable[[dict, str], dict] | None = None
+    hermes_root: str | None = None
+
+    @property
+    def root(self) -> str:
+        if self.hermes_root:
+            return self.hermes_root
+        parent = os.path.dirname(os.path.normpath(self.hermes_home))
+        return os.path.dirname(parent) if os.path.basename(parent) == "profiles" else self.hermes_home
 
     @property
     def config_path(self) -> str:
@@ -103,6 +123,14 @@ class SetupEnv:
     @property
     def legacy_credentials_path(self) -> str:
         return os.path.join(self.hermes_home, "qkeee-erp.env")
+
+    @property
+    def dotenv_path(self) -> str:
+        return os.path.join(self.hermes_home, ".env")
+
+    def secret_paths(self) -> list[str]:
+        """The gateway files the terminal must not read, as they exist now."""
+        return [p for p in (self.credentials_path, self.dotenv_path) if os.path.exists(p)]
 
     def terminal_defaults(self) -> dict:
         if self.in_container:
@@ -301,7 +329,74 @@ class _TerminalKey(_Item):
                 f"{term.get('ssh_host')}'s authorized_keys (root step)"]
 
 
-ITEMS = (_Credentials(), _Config(), _Toolsets(), _Terminal(), _TerminalKey())
+def _terminal_target(cfg, env) -> tuple[dict, str | None, str | None]:
+    """(live fingerprint, terminal target, why I2/I1 must wait for P2)."""
+    fp = isolation.live_terminal(cfg, env.environ)
+    if fp["backend"] == "local":
+        return fp, None, ("terminal.backend is 'local', the Operator's trusted shell: never "
+                          "Isolated (ADR 0006); waits for P2")
+    tgt = isolation.target(fp)
+    return fp, tgt, None if tgt else "waits for P2 (an ssh terminal with host and user)"
+
+
+class _ExclusiveTarget(_Item):
+    key, label, kind = "I2", "exclusive terminal target", STEP
+
+    def check(self, cfg, env):
+        _, tgt, wait = _terminal_target(cfg, env)
+        if wait:
+            return wait
+        others = isolation.claims(env.root, env.hermes_home, tgt)
+        if others:
+            return (f"terminal target {tgt} is already Isolated for {', '.join(others)}; one "
+                    f"ERP-enabled Profile per terminal target (ADR 0006): give this Profile its "
+                    f"own terminal user, or remove the other Profile's {isolation.RECORD}")
+        return None
+
+    def apply(self, cfg, env, dry=False):
+        return []  # the Operator must act; check() says how
+
+
+class _IsolationProbe(_Item):
+    """Runs after I2 (ITEMS order), so a refused target is never probed."""
+    key, label, kind = "I1", "Isolation probe", STEP
+
+    def _blocked(self, cfg, env, fp) -> str | None:
+        """Why no probe may run now (the result would be refused anyway)."""
+        if _ExclusiveTarget().check(cfg, env):
+            return "waits for I2 (exclusive terminal target)"
+        if not os.path.exists(env.credentials_path):
+            return "waits for S1: no credentials file to probe"
+        leaked = isolation.leaks(fp, env.secret_paths())
+        if leaked:
+            return (f"not Isolated: {'; '.join(leaked)} into every terminal session; remove it "
+                    f"from config.yaml, then run setup again")
+        return None
+
+    def check(self, cfg, env):
+        fp, _, wait = _terminal_target(cfg, env)
+        return wait or self._blocked(cfg, env, fp) or isolation.check(
+            isolation.read_record(env.hermes_home), fp, env.secret_paths())
+
+    def apply(self, cfg, env, dry=False):
+        fp, _, wait = _terminal_target(cfg, env)
+        if wait and fp["backend"] != "local":
+            return []
+        if not wait and self._blocked(cfg, env, fp):
+            return []  # check() says what blocks the probe
+        # A local terminal falls through: probe() records "not Isolated"
+        # without running anything.
+        paths = env.secret_paths()
+        if dry:
+            return [f"probe Isolation of {', '.join(paths) or 'nothing'} through "
+                    f"{isolation.target(fp) or fp['backend']}"]
+        ok, reason = isolation.probe(fp, paths, env.run_probe)
+        isolation.write_record(env.hermes_home, fp, ok, reason, env.now(), paths)
+        return [("Isolated: " if ok else "not Isolated: ") + reason]
+
+
+ITEMS = (_Credentials(), _Config(), _Toolsets(), _Terminal(), _TerminalKey(), _ExclusiveTarget(),
+         _IsolationProbe())
 
 
 # -- state -------------------------------------------------------------------
@@ -462,7 +557,8 @@ def in_container() -> bool:
 def production_env() -> SetupEnv:
     """The env for the running profile: Hermes reads and writes config.yaml."""
     from hermes_cli.config import read_user_config_raw, save_config
-    from hermes_constants import get_hermes_home
+    from hermes_constants import get_default_hermes_root, get_hermes_home
     return SetupEnv(hermes_home=str(get_hermes_home()), read_config=read_user_config_raw,
                     write_config=save_config, version=plugin_version(),
-                    in_container=in_container(), keygen=_ssh_keygen)
+                    in_container=in_container(), keygen=_ssh_keygen,
+                    run_probe=isolation.hermes_probe, hermes_root=str(get_default_hermes_root()))
