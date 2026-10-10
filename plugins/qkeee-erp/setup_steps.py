@@ -10,7 +10,7 @@ is already present; only a missing result is applied.
 | S1 credentials | step | `plugin-data/qkeee-erp/qkeee-erp.env` exists and no legacy `<profile>/qkeee-erp.env` remains (a lone legacy file is moved, mode 600) |
 | S2 config | step | no legacy `skills.config.qkeee_erp` section and no `scripts_dir` setting (settings.migrate_legacy_config) |
 | P1 toolsets | prerequisite | google_chat has `qkeee_erp`; no ERP chat platform (google_chat, or any but cli listing `qkeee_erp`) has `code_execution`; `known_plugin_toolsets` lists `qkeee_erp` for cli, discord and google_chat |
-| P2 terminal | prerequisite | `terminal.backend` is `ssh` with host, user and key set |
+| P2 terminal | prerequisite | `terminal.backend` is `ssh` with host, user and key set; on a host install, none of host, user, key or cwd still holds the Docker sidecar value that the shipped config.yaml carries |
 | S3 terminal key | step | the `terminal.ssh_key` file exists (created if missing) |
 | I2 exclusive target | step | no other Profile under the Hermes root records proven Isolation for the same `ssh_user@ssh_host` |
 | I1 Isolation probe | step | `isolation.json` proves Isolation and its fingerprint equals the live terminal config (a missing or stale record is re-probed) |
@@ -71,7 +71,9 @@ OPERATOR_PLATFORM = "cli"  # Kanban workers and the Operator: may keep code_exec
 TOOLSET = "qkeee_erp"
 DOCKER_TERMINAL = {"ssh_host": "terminal", "ssh_user": "hermes", "ssh_port": 22,
                    "ssh_key": "/opt/data/.terminal-ssh/id_ed25519"}
+DOCKER_CWD = "/opt/cwd"
 HOST_TERMINAL_USER = "hermes-terminal"
+HOST_CWD = "~"  # the ssh backend expands it in the terminal user's home
 CONTAINER_ENV = "QKEEE_ERP_IN_CONTAINER"  # set to 1 by the Dockerfile
 
 
@@ -137,6 +139,15 @@ class SetupEnv:
             return dict(self.docker_terminal)
         return {"ssh_host": "localhost", "ssh_user": HOST_TERMINAL_USER, "ssh_port": 22,
                 "ssh_key": os.path.join(self.hermes_home, ".terminal-ssh", "id_ed25519")}
+
+    def sidecar_values_on_host(self, term: dict) -> list[str]:
+        """terminal.* keys that still hold the Docker sidecar value (from the
+        shipped config.yaml) on a host install, where no sidecar exists. The
+        port (22 in both) is left alone."""
+        if self.in_container:
+            return []
+        shipped = dict(DOCKER_TERMINAL, cwd=DOCKER_CWD)
+        return [k for k in ("ssh_host", "ssh_user", "ssh_key", "cwd") if term.get(k) == shipped[k]]
 
 
 def state_path(hermes_home: str) -> str:
@@ -292,6 +303,10 @@ class _Terminal(_Item):
         missing = [k for k in ("ssh_host", "ssh_user", "ssh_key") if not term.get(k)]
         if missing:
             return f"terminal.{', terminal.'.join(missing)} not set"
+        stale = env.sidecar_values_on_host(term)
+        if stale:
+            return (f"Docker sidecar values in terminal.{', terminal.'.join(stale)}: a host "
+                    f"install has no sidecar")
         return None
 
     def apply(self, cfg, env, dry=False):
@@ -300,6 +315,10 @@ class _Terminal(_Item):
         if term.get("backend") != "ssh":
             term["backend"] = "ssh"
             changes.append("terminal.backend = 'ssh'")
+        host_values = dict(env.terminal_defaults(), cwd=HOST_CWD)
+        for k in env.sidecar_values_on_host(term):
+            term[k] = host_values[k]
+            changes.append(f"terminal.{k} = {host_values[k]!r} (was the Docker sidecar value)")
         for k, v in env.terminal_defaults().items():
             if not term.get(k):
                 term[k] = v

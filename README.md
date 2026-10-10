@@ -118,9 +118,102 @@ hermes profile list               # all local profiles, distribution source colu
 
 `hermes profile update` only ever touches what `distribution.yaml`'s `distribution_owned` lists — currently `SOUL.md`, `skills/`, `cron/jobs.json`, `config.yaml`, `mcp.json`. Runtime state (`.env`, `qkeee-erp.env`, `memories/`, `sessions/`, etc.) is never touched by install/update.
 
-**ERP plugin on a host install:** after `profile install` or `profile update`, enable the plugin and run its setup: `hermes -p <profile> plugins enable qkeee-erp`, then `hermes -p <profile> qkeee-erp setup` (add `--apply-profile-fixes` to let it set the toolsets and the ssh terminal; `--dry-run` shows the plan). Until `hermes -p <profile> qkeee-erp setup status` shows every item done, the plugin registers no ERP tools. Run `setup` again after every `profile update`. Every Deployment gets ERP tools only with proven Isolation (agents ADR 0006): `setup` probes, through the configured ssh terminal, whether the agent's terminal can read `plugin-data/qkeee-erp/qkeee-erp.env` and the profile `.env`, and records the result with a terminal-config fingerprint in `plugin-data/qkeee-erp/isolation.json`. A changed terminal config, or a terminal target that another profile already uses, means no ERP tools until `setup` runs again. The host runbook is pending (agents `.scratch/qkeee-erp-plugin-profile-split`, issue 12).
+**ERP plugin on a host install:** after `profile install` or `profile update`, enable the plugin and run its setup: `hermes -p <profile> plugins enable qkeee-erp`, then `hermes -p <profile> qkeee-erp setup` (add `--apply-profile-fixes` to let it set the toolsets and the ssh terminal; `--dry-run` shows the plan). Until `hermes -p <profile> qkeee-erp setup status` shows every item done, the plugin registers no ERP tools. Run `setup` again after every `profile update`. Every Deployment gets ERP tools only with proven Isolation (agents ADR 0006): `setup` probes, through the configured ssh terminal, whether the agent's terminal can read `plugin-data/qkeee-erp/qkeee-erp.env` and the profile `.env`, and records the result with a terminal-config fingerprint in `plugin-data/qkeee-erp/isolation.json`. A changed terminal config, or a terminal target that another profile already uses, means no ERP tools until `setup` runs again. Host steps: [Host install (Linux/macOS)](#host-install-linuxmacos).
 
 Other profile commands (not specific to this repo, general Hermes usage): `hermes profile create`, `hermes profile show`, `hermes profile rename`, `hermes profile delete`, `hermes profile use <name>` (set default), `hermes profile export` / `hermes profile import` (tar.gz, for one-off sharing without git).
+
+## Host install (Linux/macOS)
+
+A host (non-Docker) install gets ERPNext access only with proven Isolation (agents ADR 0006). The agent's terminal must run as a separate OS user. That user must not be able to read the gateway's files. Docker gets this from the terminal sidecar. On a host, root sets it up once. **Without these steps a host install has no ERPNext access**, not even to DEMO_ERP: the plugin registers no `erp_*` tools. The profile itself (chat, skills, cron) works either way. Windows hosts are not supported yet.
+
+Names below: the gateway runs as your own user (`$USER`). `HERMES_HOME` is `~/.hermes`. The profile is `<p>`, so the profile home is `~/.hermes/profiles/<p>`. The terminal user is `hermes-terminal`; `setup` writes this name into `config.yaml`. The terminal user runs commands with the host's own tools (`bash`, `python3`), not the gateway's Hermes venv.
+
+**0. Your user: get this repo** (steps 1 and 5 use files from it):
+
+```sh
+git clone https://github.com/qkeee-ai/erpmate.git && cd erpmate
+```
+
+**1. Root, once per machine: the terminal user and sshd.**
+
+Linux:
+```sh
+sudo useradd --create-home --shell /bin/bash hermes-terminal
+sudo usermod -p '*' hermes-terminal   # no password, not locked: key login works with UsePAM no too
+sudo install -m 644 host/hermes-terminal.sshd.conf /etc/ssh/sshd_config.d/10-hermes-terminal.conf
+sudo sshd -t && sudo systemctl reload-or-restart ssh   # the unit is `sshd` on RHEL/Fedora/Arch
+```
+
+macOS:
+```sh
+sudo sysadminctl -addUser hermes-terminal -shell /bin/bash -password "$(openssl rand -base64 24)"
+sudo createhomedir -c -u hermes-terminal
+sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist   # Remote Login on; or System Settings > General > Sharing
+sudo dseditgroup -o edit -a hermes-terminal -t user com.apple.access_ssh   # only if Remote Login is limited to some users
+sudo install -m 644 host/hermes-terminal.sshd.conf /etc/ssh/sshd_config.d/10-hermes-terminal.conf
+sudo sshd -t   # launchd starts sshd per connection: no reload needed
+```
+
+The drop-in ([host/hermes-terminal.sshd.conf](host/hermes-terminal.sshd.conf)) applies the sidecar's login and forwarding rules to `hermes-terminal` (and `hermes-terminal-*`) only: key login, no forwarding. It needs `Include /etc/ssh/sshd_config.d/*` in `/etc/ssh/sshd_config` (default on Debian/Ubuntu, Fedora and macOS 13+). Without that line, append the file's content to the end of `sshd_config`. If `sshd_config` has an `AllowUsers` line, add `hermes-terminal` to it. Check that the drop-in applies to `hermes-terminal` and leaves your own user alone:
+
+```sh
+sudo sshd -T -C user=hermes-terminal,host=localhost,addr=127.0.0.1 | grep -Ei '^(authenticationmethods|allowtcpforwarding|x11forwarding|permittty)'
+sudo sshd -T -C user=$USER,host=localhost,addr=127.0.0.1 | grep -Ei '^(authenticationmethods|permittty)'
+```
+
+**2. Your user: install the profile and lock down `HERMES_HOME`.** Other users must not be able to read anything under `~/.hermes`. The Isolation probe checks exactly this.
+
+```sh
+hermes profile install github.com/qkeee-ai/erpmate --name <p>
+chmod 700 ~/.hermes
+```
+
+**3. Your user: enable the plugin and run setup.**
+
+```sh
+hermes -p <p> plugins enable qkeee-erp
+hermes -p <p> qkeee-erp setup --apply-profile-fixes
+```
+
+`--apply-profile-fixes` sets the chat toolsets. It also points the terminal at the host user: `terminal.backend: ssh`, `ssh_host: localhost`, `ssh_user: hermes-terminal`, `cwd: ~`. The shipped `config.yaml` points at the Docker sidecar. Setup replaces each sidecar value and keeps other values that you set by hand. Before it changes `config.yaml`, it writes `config.yaml.bak-<UTC>`. It creates the gateway's ssh key `~/.hermes/profiles/<p>/.terminal-ssh/id_ed25519`. S1 (credentials) and I1 (Isolation) stay pending until steps 4 and 5.
+
+**4. Root: authorize the gateway key** for `hermes-terminal`, from this machine only (`restrict` also turns off forwarding and the pty):
+
+```sh
+PUB=~/.hermes/profiles/<p>/.terminal-ssh/id_ed25519.pub
+TH=~hermes-terminal
+LINE="restrict,from=\"127.0.0.1,::1\" $(cat "$PUB")"
+sudo install -d -m 700 -o hermes-terminal "$TH/.ssh"
+sudo touch "$TH/.ssh/authorized_keys"
+sudo grep -qxF "$LINE" "$TH/.ssh/authorized_keys" || echo "$LINE" | sudo tee -a "$TH/.ssh/authorized_keys" >/dev/null
+sudo chown hermes-terminal "$TH/.ssh/authorized_keys" && sudo chmod 600 "$TH/.ssh/authorized_keys"
+```
+
+**5. Your user: credentials, setup, check.**
+
+```sh
+mkdir -p -m 700 ~/.hermes/profiles/<p>/plugin-data/qkeee-erp
+install -m 600 skills/qkeee-erp/qkeee-erp-associate/qkeee-erp-associate.env.example ~/.hermes/profiles/<p>/plugin-data/qkeee-erp/qkeee-erp.env
+hermes -p <p> qkeee-erp setup
+hermes -p <p> qkeee-erp setup status
+```
+
+Fill in `qkeee-erp.env` before you run `setup` (see [ERPNext credentials](#erpnext-credentials-qkeee-erpenv-not-env)). `setup status` exits 0 and shows every item `done`. I1 reads "Isolated: the terminal hermes-terminal@localhost cannot read …". For a new ERPNext Instance, provision the bot account first: `hermes -p <p> qkeee-erp init-bot --dry-run --requested-by <email>`, then run it again with the printed token. Restart the gateway: the plugin registers the `erp_*` tools when it loads.
+
+**After `hermes profile update <p>`:** run `hermes -p <p> qkeee-erp setup` again. Until then the plugin registers no `erp_*` tools and logs why.
+
+**Self-check (proves the probe, not just the config):** set `terminal.ssh_user` to your own user and authorize the key for it; `hermes -p <p> qkeee-erp setup` then reports I1 "not Isolated: the terminal … can read …" and the gateway registers no `erp_*` tools. Set it back to `hermes-terminal` and run `setup` again.
+
+| `setup status` says | Fix |
+|---|---|
+| I1 `not Isolated: the terminal … can read …` | `chmod 700 ~/.hermes` (step 2); check that `hermes-terminal` is not your user and has no sudo |
+| I1 `probe could not run … Permission denied (publickey)` | step 4 not done, the `from=` address does not match, an `AllowUsers` line leaves out `hermes-terminal`, or the drop-in is not loaded (`sshd -T` above) |
+| I1 `probe could not run … Connection refused` | sshd not running (Linux: `systemctl status ssh`; macOS: Remote Login off) |
+| I1 `not Isolated: terminal.env_passthrough forwards QKEEE_ERP_…` | remove that name from `terminal.env_passthrough` |
+| I2 `terminal target hermes-terminal@localhost is already Isolated for …` | one ERP-enabled profile per terminal user: create `hermes-terminal-<p>` (steps 1 and 4), set `terminal.ssh_user`, run `setup` |
+| P2 `Docker sidecar values in terminal.…` | run `setup --apply-profile-fixes`, or set `terminal.*` by hand |
+
+Isolation covers the gateway's secrets only. Uploaded documents and large tool results from every session still reach the terminal (`cache/`); separating one Requester's data from another's is an open problem.
 
 ## Deployment: Docker
 

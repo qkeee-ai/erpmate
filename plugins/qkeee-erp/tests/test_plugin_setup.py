@@ -317,6 +317,47 @@ class HostInstallTests(SetupTestCase):
         self.assertTrue(term["ssh_key"].replace("\\", "/").startswith(self.home.replace("\\", "/")))
         self.assertEqual(self.keygen_calls, [term["ssh_key"]])
 
+    def copy_shipped_config(self):
+        repo = os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        shutil.copy(os.path.join(repo, "config.yaml"), self.config_path)
+
+    def test_shipped_sidecar_values_are_pending_on_a_host(self):
+        """`profile install` copies the shipped config, whose terminal points
+        at the Docker sidecar; on a host that target does not exist."""
+        self.copy_shipped_config()
+        self.credentials()
+        report = setup.run(self.env())
+        p2 = next(i for i in report["items"] if i["key"] == "P2")
+        self.assertEqual(p2["status"], setup.PENDING)
+        self.assertIn("sidecar", p2["reason"])
+
+    def test_with_the_flag_sidecar_values_become_host_values(self):
+        self.copy_shipped_config()
+        self.credentials()
+        report = setup.run(self.env(), apply_profile_fixes=True)
+        term = self.read()["terminal"]
+        self.assertEqual((term["ssh_host"], term["ssh_user"], term["cwd"]),
+                         ("localhost", "hermes-terminal", "~"))
+        self.assertTrue(term["ssh_key"].replace("\\", "/").startswith(self.home.replace("\\", "/")))
+        self.assertEqual(self.keygen_calls, [term["ssh_key"]])
+        self.assertEqual(self.statuses(report)["P2"], setup.DONE)
+
+    def test_host_values_set_by_hand_are_kept(self):
+        self.config(FRESH.replace("ssh_host: terminal", "ssh_host: 10.0.0.5")
+                    .replace("cwd: /opt/cwd", "cwd: /srv/work"))
+        self.credentials()
+        self.make_key()
+        report = setup.run(self.env(), apply_profile_fixes=True)
+        self.assertEqual(self.statuses(report)["P2"], setup.DONE)
+        term = self.read()["terminal"]
+        self.assertEqual((term["ssh_host"], term["cwd"]), ("10.0.0.5", "/srv/work"))
+
+    def test_in_a_container_the_sidecar_values_are_right(self):
+        self.copy_shipped_config()
+        self.credentials()
+        report = setup.run(self.env(in_container=True))
+        self.assertEqual(self.statuses(report)["P2"], setup.DONE)
+
 
 class UnmetTests(SetupTestCase):
     """What register() checks: every item done and setup run for this
@@ -493,6 +534,7 @@ class ShippedValuesTests(unittest.TestCase):
                          sorted(setup.SHIPPED_GOOGLE_CHAT))
         for key, value in setup.DOCKER_TERMINAL.items():
             self.assertEqual(shipped["terminal"][key], value, key)
+        self.assertEqual(shipped["terminal"]["cwd"], setup.DOCKER_CWD)
 
 
 class OperatorCliTests(SetupTestCase):
