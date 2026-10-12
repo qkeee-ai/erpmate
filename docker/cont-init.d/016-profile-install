@@ -17,6 +17,20 @@
 #                              drifted once (this hook still pointed at a repo
 #                              that had been renamed), which would have
 #                              installed nothing outside compose.
+#   HERMES_PROFILE_BRANCH      branch of the git source; empty = the repo's
+#                              default branch. Ignored in local mode. Hermes
+#                              clones only the default branch, so this hook
+#                              shallow-clones the branch into
+#                              $HERMES_HOME/.profile-src/<name> and installs or
+#                              updates from that tree. If the branch cannot be
+#                              fetched, the hook installs/updates nothing (it
+#                              never falls back to the default branch).
+#
+# The configured source wins on update: `hermes profile update` re-pulls the
+# source recorded at install time, so before an update this hook rewrites the
+# profile's recorded `source:` to the configured one (log line "recorded
+# source: <old> -> <new>"). Otherwise a changed HERMES_PROFILE_SOURCE,
+# _LOCAL_PATH or _BRANCH would be silently ignored.
 #
 # Private git URL auth (never written to disk or into the URL):
 #   HTTPS: HERMES_PROFILE_GIT_TOKEN or HERMES_PROFILE_GIT_TOKEN_FILE
@@ -82,6 +96,48 @@ fi
 # Hand the resolved name to later hooks (/run is tmpfs, so rewritten every boot).
 printf '%s' "$NAME" > /run/hermes-profile-name
 
+BRANCH="${HERMES_PROFILE_BRANCH:-}"
+if [ -n "$BRANCH" ] && [ "$MODE" = local ]; then
+    echo "[profile-install] HERMES_PROFILE_BRANCH=$BRANCH ignored: HERMES_PROFILE_LOCAL_PATH is set" >&2
+    BRANCH=""
+fi
+INSTALL_SOURCE="$SOURCE"   # what hermes installs/updates from; fetch_branch changes it
+BRANCH_DIR="$HERMES_HOME/.profile-src/$NAME"
+
+# Shallow-clone $BRANCH of $SOURCE into $BRANCH_DIR (no .git: Hermes copies a
+# local source as it is). Auth env (GIT_CONFIG_* / GIT_SSH_COMMAND) was
+# exported above.
+fetch_branch() {
+    _tmp="$BRANCH_DIR.tmp"
+    rm -rf "$_tmp"
+    mkdir -p "$(dirname "$BRANCH_DIR")"
+    if ! git clone --depth 1 --single-branch --branch "$BRANCH" --quiet "$SOURCE" "$_tmp"; then
+        rm -rf "$_tmp"
+        echo "[profile-install] WARNING: cannot fetch branch $BRANCH of $SOURCE; installing/updating nothing" >&2
+        return 1
+    fi
+    echo "[profile-install] $SOURCE branch $BRANCH at $(git -C "$_tmp" rev-parse --short HEAD)"
+    rm -rf "$_tmp/.git" "$BRANCH_DIR"
+    mv "$_tmp" "$BRANCH_DIR"
+    chown -R hermes:hermes "$BRANCH_DIR" 2>/dev/null || true
+    INSTALL_SOURCE="$BRANCH_DIR"
+}
+
+# Make the profile's recorded source the configured one (see the header).
+point_source() {
+    _mf="$HERMES_HOME/profiles/$NAME/distribution.yaml"
+    [ -f "$_mf" ] || return 0
+    _old="$(sed -n 's/^source:[[:space:]]*//p' "$_mf" | head -n 1 | sed -e "s/^[\"']//" -e "s/[\"']\$//")"
+    [ "$_old" = "$INSTALL_SOURCE" ] && return 0
+    if grep -q '^source:' "$_mf"; then
+        sed -i "s#^source:.*#source: $INSTALL_SOURCE#" "$_mf"
+    else
+        printf 'source: %s\n' "$INSTALL_SOURCE" >> "$_mf"
+    fi
+    chown hermes:hermes "$_mf" 2>/dev/null || true
+    echo "[profile-install] recorded source: ${_old:-none} -> $INSTALL_SOURCE"
+}
+
 # Record which skills the DISTRIBUTION owns, as paths relative to <root>/skills.
 # 0197-skills-lockdown needs this to tell a distribution skill apart from a
 # bundled skill seeded into the same tree: it cannot infer the difference from
@@ -119,9 +175,10 @@ list_tree_skills() {  # $1 = root containing skills/
 # Tree listing only: --filter=blob:none --no-checkout fetches no file contents,
 # so this costs one small request even on a large repo. Auth env (GIT_CONFIG_*
 # / GIT_SSH_COMMAND) was already exported above for git sources.
-list_git_skills() {  # $1 = git source
+list_git_skills() {  # $1 = git source; reads $BRANCH
     _t="$(mktemp -d 2>/dev/null)" || return 1
-    if git clone --depth 1 --filter=blob:none --no-checkout --quiet "$1" "$_t/src" 2>/dev/null; then
+    if [ -n "$BRANCH" ]; then set -- "$1" --branch "$BRANCH"; fi
+    if git clone --depth 1 --filter=blob:none --no-checkout --quiet "$@" "$_t/src" 2>/dev/null; then
         git -C "$_t/src" ls-tree -r --name-only HEAD \
             | sed -n 's|^skills/\(.*\)/SKILL\.md$|\1|p'
         rm -rf "$_t"
@@ -133,8 +190,8 @@ list_git_skills() {  # $1 = git source
 
 # Rebuild the record from whatever view of the distribution we can still reach.
 record_from_source() {
-    if [ "$MODE" = local ]; then
-        list_tree_skills "$SOURCE" | install_skill_record && return 0
+    if [ -d "$INSTALL_SOURCE" ]; then   # local mode, or a fetched branch
+        list_tree_skills "$INSTALL_SOURCE" | install_skill_record && return 0
     else
         list_git_skills "$SOURCE" | install_skill_record && return 0
     fi
@@ -145,6 +202,8 @@ record_from_source() {
 
 if [ -d "$HERMES_HOME/profiles/$NAME" ]; then
     if [ "${HERMES_PROFILE_AUTO_UPDATE:-0}" = "1" ]; then
+        if [ -n "$BRANCH" ]; then fetch_branch || exit 0; fi
+        point_source
         if run hermes profile update "$NAME" --yes; then
             echo "[profile-install] $NAME updated"
             record_from_source   # the update may have changed the skill set
@@ -160,12 +219,13 @@ if [ -d "$HERMES_HOME/profiles/$NAME" ]; then
     exit 0
 fi
 
-if run hermes profile install "$SOURCE" --name "$NAME" --alias --yes; then
-    echo "[profile-install] $NAME installed from $MODE source $SOURCE"
+if [ -n "$BRANCH" ]; then fetch_branch || exit 0; fi
+if run hermes profile install "$INSTALL_SOURCE" --name "$NAME" --alias --yes; then
+    echo "[profile-install] $NAME installed from $MODE source $SOURCE${BRANCH:+ (branch $BRANCH)}"
     # The freshly installed profile tree is exactly the distribution payload.
     list_tree_skills "$HERMES_HOME/profiles/$NAME" | install_skill_record \
         || echo "[profile-install] WARNING: no skills found in the installed profile" >&2
 else
-    echo "[profile-install] WARNING: install of $NAME from $SOURCE failed; continuing" >&2
+    echo "[profile-install] WARNING: install of $NAME from $INSTALL_SOURCE failed; continuing" >&2
 fi
 exit 0

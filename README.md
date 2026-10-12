@@ -384,9 +384,10 @@ There is no unauthenticated public-dashboard option. For local-only use set `HER
 |---|---|
 | `HERMES_PROFILE_SOURCE` | Git URL to install from. Empty **string** skips the install entirely. |
 | `HERMES_PROFILE_LOCAL_PATH` | In-container path of a mounted clone (must hold `distribution.yaml` at its root); takes precedence over the URL. |
+| `HERMES_PROFILE_BRANCH` | Branch of the git source; empty = default branch; ignored with `HERMES_PROFILE_LOCAL_PATH`. Hermes cannot clone a branch, so `016` shallow-clones it into `$HERMES_HOME/.profile-src/<name>` and installs from there. If the branch cannot be fetched, nothing is installed or updated. |
 | `HERMES_PROFILE_GIT_TOKEN` / `_TOKEN_FILE` | HTTPS auth, sent as an `Authorization` header for the source's host only — never written to disk or into the URL. |
 | `HERMES_PROFILE_SSH_KEY_FILE` | For `git@host:org/repo` sources. |
-| `HERMES_PROFILE_AUTO_UPDATE` | `1` runs `hermes profile update` every boot. User data is preserved; distribution-owned files are overwritten. |
+| `HERMES_PROFILE_AUTO_UPDATE` | `1` runs `hermes profile update` every boot. User data is preserved; distribution-owned files are overwritten. Before the update, `016` sets the profile's recorded source to the configured one (`_SOURCE`, `_LOCAL_PATH` or `_BRANCH`), so a changed source takes effect. |
 | `GATEWAY_PROMOTE_ENABLE` / `_PROFILE` | First boot only: which profile `02-reconcile-profiles` starts. `0` leaves `default` running. |
 
 ### Cost controls

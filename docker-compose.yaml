@@ -108,6 +108,7 @@ services:
       - HERMES_PROFILE_NAME=${HERMES_PROFILE_NAME:-}
       - HERMES_PROFILE_SOURCE=${HERMES_PROFILE_SOURCE-https://github.com/qkeee-ai/erpmate.git}
       - HERMES_PROFILE_LOCAL_PATH=${HERMES_PROFILE_LOCAL_PATH:-}
+      - HERMES_PROFILE_BRANCH=${HERMES_PROFILE_BRANCH:-}   # git source branch; empty = default branch
       # Private repo auth (put the values in .env, not here):
       - HERMES_PROFILE_GIT_TOKEN=${HERMES_PROFILE_GIT_TOKEN:-}
       - HERMES_PROFILE_GIT_TOKEN_FILE=${HERMES_PROFILE_GIT_TOKEN_FILE:-}   # e.g. /run/secrets/gh_token
