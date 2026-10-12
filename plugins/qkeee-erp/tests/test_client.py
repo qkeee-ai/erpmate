@@ -1430,7 +1430,7 @@ class HealthCapabilityProbeTests(unittest.TestCase):
         def fake_request(cfg, method, path, params=None, payload=None):
             for marker in failing:
                 if marker in path or marker in json.dumps(params or {}):
-                    raise ec.ConnectorError(f"ERPNext API error (403) on GET {path}: PermissionError")
+                    raise ec.ERPNextAPIError(403, "GET", path, cfg, "frappe.exceptions.PermissionError")
             return {"message": "qkeee-erp-bot@org.com", "data": [], "docs": [{"name": "User"}]}
         with patch.object(ec, "get_env_config",
                           return_value={"tag": "DEMO_ERP", "base_url": "https://demo.example.com"}), \
@@ -1445,13 +1445,15 @@ class HealthCapabilityProbeTests(unittest.TestCase):
                          {"module_def_read", "installed_apps", "merged_meta", "workflow_read"})
         self.assertTrue(all(result["capabilities"].values()))
         paths = [c.args[2] for c in req.call_args_list]
-        self.assertIn("/api/resource/Module Def", paths)
+        self.assertIn("/api/resource/Module%20Def", paths)
+        # urllib rejects a raw space in a URL (http.client.InvalidURL).
+        self.assertFalse([p for p in paths if " " in p], paths)
         self.assertIn("/api/resource/Workflow", paths)
         self.assertIn("/api/method/frappe.utils.change_log.get_versions", paths)
 
     def test_each_probe_failure_maps_to_one_complete_gap(self):
         for marker, capability, doctype in (
-                ("/api/resource/Module Def", "module_def_read", "Module Def"),
+                ("/api/resource/Module%20Def", "module_def_read", "Module Def"),
                 ("get_versions", "installed_apps", "frappe.utils.change_log.get_versions"),
                 ("getdoctype", "merged_meta", "frappe.desk.form.load.getdoctype"),
                 ("/api/resource/Workflow", "workflow_read", "Workflow")):
@@ -1468,13 +1470,32 @@ class HealthCapabilityProbeTests(unittest.TestCase):
                 self.assertEqual(gap["doctype"], doctype)
 
     def test_module_def_gap_renders_the_prompt(self):
-        result, _ = self._health(failing=("/api/resource/Module Def",))
+        result, _ = self._health(failing=("/api/resource/Module%20Def",))
         prompt = result["gaps"][0]["prompt"]
         self.assertIn("Environment catalog incomplete on DEMO_ERP (https://demo.example.com).", prompt)
         self.assertIn('Missing: read on "Module Def" for bot qkeee-erp-bot@org.com '
                       '(role "Qkeee Bot").', prompt)
         self.assertIn('Role Permission Manager → Document Type "Module Def"', prompt)
         self.assertIn("Then reply RECHECK ENV.", prompt)
+
+    def test_a_non_permission_failure_names_no_role_grant(self):
+        """A transport, URL or server error is not a missing role: the gap
+        must not send the admin to Role Permission Manager."""
+        for error in (ec.ConnectorError("Connection to 'DEMO_ERP' failed: InvalidURL"),
+                      ec.TransportTimeoutError("timed out"),
+                      ec.ERPNextAPIError(500, "GET", "/api/resource/Workflow", {}, "boom")):
+            with self.subTest(error=type(error).__name__):
+                def fake_request(cfg, method, path, params=None, payload=None, _e=error):
+                    if "/api/resource/Workflow" in path:
+                        raise _e
+                    return {"message": "qkeee-erp-bot@org.com", "data": [], "docs": [{"name": "User"}]}
+                with patch.object(ec, "get_env_config",
+                                  return_value={"tag": "DEMO_ERP", "base_url": "https://demo.example.com"}),                         patch.object(ec, "_request", side_effect=fake_request),                         patch.object(ec, "verify_rbac_precheck_reliable", return_value=dict(self.TRUST)):
+                    result = ec.health_check("DEMO_ERP")
+                gap = result["gaps"][0]
+                self.assertFalse(result["capabilities"]["workflow_read"])
+                self.assertNotIn("Role Permission Manager", gap["grant_steps"])
+                self.assertIn("not a permission", gap["grant_steps"])
 
 
 class RequesterRoleFallbackTests(unittest.TestCase):

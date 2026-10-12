@@ -1510,7 +1510,8 @@ BOT_ROLE_NAME = "Qkeee Bot"
 # What `health` probes, as the bot, before any task: (capability, path,
 # params, doctype, perm, effect when missing). Each failure becomes one gap.
 _CAPABILITY_PROBES = (
-    ("module_def_read", "/api/resource/Module Def",
+    # Paths are sent as written: quote them (urllib rejects a raw space).
+    ("module_def_read", "/api/resource/Module%20Def",
      {"fields": '["name"]', "limit_page_length": 1}, "Module Def", "read",
      "erp_discover modules/resolve cannot map a DocType to its app; the environment "
      "catalog stays partial"),
@@ -1562,7 +1563,11 @@ def probe_capabilities(tag: str, cfg: dict, bot_user: str) -> tuple:
         except ConnectorError as e:
             capabilities[capability] = False
             steps = None
-            if perm == "call":
+            if not (isinstance(e, ERPNextAPIError) and e.status in (401, 403)):
+                # Transport, URL or server error: no role grant fixes it.
+                steps = (f"not a permission error ({type(e).__name__}); no role grant fixes it. "
+                         f"Check connectivity and the ERPNext server log, then reply RECHECK ENV.")
+            elif perm == "call":
                 # Whitelisted for any logged-in user on stock Frappe: a
                 # failure is instance policy, an app override or version,
                 # not a missing role.
