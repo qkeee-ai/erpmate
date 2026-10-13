@@ -533,10 +533,10 @@ def compute_plan(tag: str, domains=None, strip_stock_roles: bool = False) -> dic
     re-run fresh on every dry-run AND every real run, so a real run's
     token check always compares against current target state, not a
     cached plan."""
-    role_needed = not core_client.resource_exists(tag, "Role", ROLE_NAME)
+    role_needed = not core_client.resource_exists(tag, "Role", ROLE_NAME, credential="admin")
     doctypes_needed = [
         d["name"] for d in ALL_DOCTYPES
-        if not core_client.resource_exists(tag, "DocType", d["name"])
+        if not core_client.resource_exists(tag, "DocType", d["name"], credential="admin")
     ]
     fields_to_migrate = []
     for name, fieldnames in sorted(MIGRATABLE_FIELDS.items()):
@@ -633,7 +633,7 @@ def migrate_fields(tag: str, requested_by: str, approval_note: str) -> list:
 
 def ensure_role(tag: str, requested_by: str, approval_note: str) -> bool:
     """Returns True if the role was created, False if it already existed."""
-    if core_client.resource_exists(tag, "Role", ROLE_NAME):
+    if core_client.resource_exists(tag, "Role", ROLE_NAME, credential="admin"):
         print(f"Role '{ROLE_NAME}' already exists — skipping.")
         return False
     operations.run_operation("provisioning.create_role", {"role": ROLE_NAME}, operations.WriteContext(
@@ -645,7 +645,7 @@ def ensure_role(tag: str, requested_by: str, approval_note: str) -> bool:
 
 def ensure_doctype(tag: str, doctype_def: dict, requested_by: str, approval_note: str) -> bool:
     name = doctype_def["name"]
-    if core_client.resource_exists(tag, "DocType", name):
+    if core_client.resource_exists(tag, "DocType", name, credential="admin"):
         print(f"DocType '{name}' already exists — skipping.")
         return False
     operations.run_operation("provisioning.create_doctype", {"doctype_name": name},

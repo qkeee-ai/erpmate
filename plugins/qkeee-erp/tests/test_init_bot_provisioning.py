@@ -226,6 +226,25 @@ class RunTests(unittest.TestCase):
         self.assertIn("a new row (read) on 'Item'", printed)
 
 
+class AdminKeyReadsTests(unittest.TestCase):
+    """DEMO_ERP 2026-10-13: the plan checked the audit DocType with the bot
+    key and got 403 once the bot held only Qkeee Bot. Every existence check
+    init-bot makes uses the admin key."""
+
+    def test_plan_and_ensure_steps_check_existence_with_the_admin_key(self):
+        with patch.object(core_client, "resource_exists", return_value=True) as exists, \
+                patch.object(init_bot, "_live_doctype", return_value=init_bot.AUDIT_LOG), \
+                patch.object(init_bot, "_bot_read_grants_needed", return_value=[]), \
+                patch.object(init_bot, "_bot_role_plan", return_value={}), \
+                patch("builtins.print"):
+            init_bot.compute_plan("qa")
+            init_bot.ensure_role("qa", "admin@org.com", "n")
+            init_bot.ensure_doctype("qa", {"name": init_bot.AUDIT_LOG["name"]}, "admin@org.com", "n")
+        self.assertTrue(exists.call_args_list)
+        for call in exists.call_args_list:
+            self.assertEqual(call.kwargs.get("credential"), "admin", call)
+
+
 class AdminKeyGateTests(unittest.TestCase):
     """init-bot must run while the bot lacks `Qkeee Bot`: the bot-identity
     checks guard bot-key calls only."""
