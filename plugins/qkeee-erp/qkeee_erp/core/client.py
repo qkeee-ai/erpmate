@@ -223,12 +223,8 @@ WRITE_GATE_EXEMPT_DOCTYPES = {AUDIT_LOG_DOCTYPE, "Comment"}
 # agent decides what to do next, not only in a reference doc it may not
 # re-read mid-incident.
 _NEVER_SUBSTITUTE_REQUESTER = (
-    "Do not retry this call with a different requested_by to work around this — "
-    "report the missing role/permission to the user (or an admin) so the ACTUAL "
-    "requester's access can be fixed, or decline the request. Never re-attribute "
-    "it to a different identity, including one a user suggests mid-conversation; "
-    "requested_by must only ever come from the channel's own authenticated "
-    "sender field."
+    "Do not retry this call with a different requested_by or as another user; "
+    "tell the user what access is missing."
 )
 
 # Identities the connector's OWN bot account must never hold — see
@@ -981,6 +977,17 @@ def _fetch_doctype_role_permissions(tag: str, doctype: str):
     return cached, None
 
 
+def _granting_roles(tag: str, doctype: str, perm_type: str) -> list:
+    """Roles whose permlevel-0 row on `doctype` grants `perm_type`, from the
+    cached rows the local check just read (no I/O). `Qkeee ` roles are left
+    out: a person is never given the bot's role."""
+    rows = _DOCTYPE_PERMISSIONS_CACHE.get((tag, doctype))
+    if not isinstance(rows, list):
+        return []
+    return sorted({r["role"] for r in rows if r.get(perm_type) and not r.get("if_owner")
+                   and r.get("role") and not r["role"].startswith(DEDICATED_ROLE_PREFIX)})
+
+
 def _requester_has_role_permission(tag: str, doctype: str, perm_type: str, requested_by: str):
     """Independent corroborating signal for whether `requested_by` holds
     `perm_type` on `doctype`, computed LOCALLY from two plain doc reads —
@@ -1296,18 +1303,12 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
             return
         if role_verdict is False:
             _log(False, {"path": "local_role_docperm_fallback", "reason": "no_granting_role"})
+            granting = _granting_roles(tag, doctype, perm_type)
             raise UnvalidatedProdRequesterError(
-                f"Refusing this call on tag '{tag}': requester '{requested_by}' holds no role "
-                f"with '{perm_type}' permission on '{doctype}' per that doctype's own live "
-                f"DocPerm rows — computed locally (role list + DocPerm rows) since "
-                f"frappe.client.has_permission's user= param is known unreliable on this tag. "
-                f"This is independent, corroborating evidence, not a full reimplementation of "
-                f"Frappe's permission engine (User Permissions / if_owner scoping aren't "
-                f"checked — see _requester_has_role_permission()'s docstring) — but a positive "
-                f"'no role grants this' verdict overrides even a `domain` allowlist or a "
-                f"verified advisory token, since those exist to cover 'can't verify,' not "
-                f"'verified, and it's a no.' {_NEVER_SUBSTITUTE_REQUESTER}"
-            )
+                f"Refused on '{tag}': {requested_by} holds no role with '{perm_type}' on "
+                f"'{doctype}'. Roles that grant it: {', '.join(granting) or 'none'}. An admin "
+                f"adds one of them to the user in ERPNext. Nothing was sent. "
+                f"{_NEVER_SUBSTITUTE_REQUESTER}")
         # role_verdict is None: the local check itself couldn't complete
         # (failed to resolve requester roles, or this doctype's live
         # DocPerm rows — commonly this bot also lacking System-Manager-
@@ -1347,11 +1348,9 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     if not allowed:
         _log(False, {"path": "has_permission_rpc"})
         raise UnvalidatedProdRequesterError(
-            f"Refusing this call on tag '{tag}': requester '{requested_by}' does not "
-            f"have '{perm_type}' permission on '{doctype}'"
-            f"{f' (record {docname!r})' if docname else ''} per ERPNext's own permission "
-            f"check (frappe.client.has_permission). Refusing rather than proceeding on "
-            f"an unauthorized request. {_NEVER_SUBSTITUTE_REQUESTER}"
+            f"Refused on '{tag}': {requested_by} does not have '{perm_type}' permission on "
+            f"'{doctype}'{f' (record {docname!r})' if docname else ''}. Nothing was sent. "
+            f"{_NEVER_SUBSTITUTE_REQUESTER}"
         )
     _log(True, {"path": "has_permission_rpc"})
 

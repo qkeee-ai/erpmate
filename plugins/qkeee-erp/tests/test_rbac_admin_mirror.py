@@ -172,6 +172,19 @@ class RequesterCheckTests(MirrorTestCase):
         with a, b:
             ec._validate_prod_requester(TAG, REQ, "Sales Order", "read")
 
+    def test_denial_is_short_and_names_the_roles_that_grant(self):
+        perms = {"Item Group": [{"role": "Stock User", "read": 1}, {"role": "Purchase User", "read": 1},
+                                {"role": "Qkeee Bot", "read": 1}, {"role": "Item Manager", "write": 1}]}
+        fake = FakeErp({BOT: {"roles": roles("Qkeee Bot")}, REQ: {"roles": roles("System Manager")}},
+                       perms)
+        a, b = self.run_with(fake)
+        with a, b, self.assertRaises(ec.UnvalidatedProdRequesterError) as ctx:
+            ec._validate_prod_requester(TAG, REQ, "Item Group", "read")
+        msg = str(ctx.exception)
+        self.assertIn("Roles that grant it: Purchase User, Stock User.", msg)
+        self.assertNotIn("Qkeee Bot", msg)
+        self.assertLess(len(msg), 320, msg)
+
     def test_failed_requester_lookup_is_a_logged_refusal_with_a_gap(self):
         fake = FakeErp({BOT: {"roles": roles("Qkeee Bot")}})
         with patch.object(ec, "resource_exists",
