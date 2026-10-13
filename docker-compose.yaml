@@ -26,7 +26,7 @@ services:
     # 02-reconcile-profiles from each profile's desired_state, so the CMD only
     # has to keep /init alive. With GATEWAY_PROMOTE_ENABLE=0 that is the default
     # profile; otherwise the installed custom profile.
-    command: ["sleep", "infinity"]
+    command: [ "sleep", "infinity" ]
     # No host port pinned: Docker allocates a free ephemeral host port per
     # container, so multiple agent containers on the same host never clash on
     # startup. Look up the assigned port with:
@@ -108,12 +108,12 @@ services:
       - HERMES_PROFILE_NAME=${HERMES_PROFILE_NAME:-}
       - HERMES_PROFILE_SOURCE=${HERMES_PROFILE_SOURCE-https://github.com/qkeee-ai/erpmate.git}
       - HERMES_PROFILE_LOCAL_PATH=${HERMES_PROFILE_LOCAL_PATH:-}
-      - HERMES_PROFILE_BRANCH=${HERMES_PROFILE_BRANCH:-}   # git source branch; empty = default branch
+      - HERMES_PROFILE_BRANCH=${HERMES_PROFILE_BRANCH:-} # git source branch; empty = default branch
       # Private repo auth (put the values in .env, not here):
       - HERMES_PROFILE_GIT_TOKEN=${HERMES_PROFILE_GIT_TOKEN:-}
-      - HERMES_PROFILE_GIT_TOKEN_FILE=${HERMES_PROFILE_GIT_TOKEN_FILE:-}   # e.g. /run/secrets/gh_token
-      - HERMES_PROFILE_SSH_KEY_FILE=${HERMES_PROFILE_SSH_KEY_FILE:-}   # for git@github.com:... sources
-      - HERMES_PROFILE_AUTO_UPDATE=${HERMES_PROFILE_AUTO_UPDATE:-0}   # 1 = `hermes profile update` every boot
+      - HERMES_PROFILE_GIT_TOKEN_FILE=${HERMES_PROFILE_GIT_TOKEN_FILE:-} # e.g. /run/secrets/gh_token
+      - HERMES_PROFILE_SSH_KEY_FILE=${HERMES_PROFILE_SSH_KEY_FILE:-} # for git@github.com:... sources
+      - HERMES_PROFILE_AUTO_UPDATE=${HERMES_PROFILE_AUTO_UPDATE:-0} # 1 = `hermes profile update` every boot
       # jev first-boot init (models suggest --write, doctor, /jev routing).
       # Routing is only enabled once the key is present (doctor passes).
       - TYPESAFE_API_KEY=${TYPESAFE_API_KEY:-}
@@ -123,13 +123,13 @@ services:
       # must say so explicitly here AND have a key stored for it:
       #   docker compose exec hermes /opt/data/bin/jev setup-key --provider openrouter
       # Honored only when that provider actually has a stored key.
-      - JEV_PROVIDER=${JEV_PROVIDER:-}   # empty = typesafe | openrouter | venice | zen
+      - JEV_PROVIDER=${JEV_PROVIDER:-} # empty = typesafe | openrouter | venice | zen
       # Every jev toggle defaults to OFF, so a fresh profile routes nothing even
       # with pools configured and a key present until these are set — 019-jev-init
       # writes them so `/jev routing on` + `/jev skills on` are not a manual step.
       # An operator's later `/jev ...` choice is never overridden.
-      - JEV_ROUTING_MODE=${JEV_ROUTING_MODE:-on}   # on | shadow | off
-      - JEV_SKILLS_MODE=${JEV_SKILLS_MODE:-on}   # on | off (jev-driven skill selection)
+      - JEV_ROUTING_MODE=${JEV_ROUTING_MODE:-on} # on | shadow | off
+      - JEV_SKILLS_MODE=${JEV_SKILLS_MODE:-on} # on | off (jev-driven skill selection)
       # 0 = the curated pools in docker/defaults/jev/routing.json win (they are
       # validated against the catalog and know this agent's workload).
       # 1 = let `jev models suggest --write` pick pools from the live catalog
@@ -137,9 +137,9 @@ services:
       - JEV_ROUTING_PREFER_SUGGEST=${JEV_ROUTING_PREFER_SUGGEST:-0}
       # Seed routing.json from a host file instead of the baked default
       # (mount it, then point at the in-container path; never overwrites):
-      - JEV_ROUTING_FILE=${JEV_ROUTING_FILE:-}   # e.g. /opt/routing.json + volume ./routing.json:/opt/routing.json:ro
-      - JEV_INIT_PROFILES=${JEV_INIT_PROFILES:-}   # space-separated; empty = the installed profile
-      - JEV_INIT_ENABLE=${JEV_INIT_ENABLE:-1}   # 0 = skip jev init
+      - JEV_ROUTING_FILE=${JEV_ROUTING_FILE:-} # e.g. /opt/routing.json + volume ./routing.json:/opt/routing.json:ro
+      - JEV_INIT_PROFILES=${JEV_INIT_PROFILES:-} # space-separated; empty = the installed profile
+      - JEV_INIT_ENABLE=${JEV_INIT_ENABLE:-1} # 0 = skip jev init
       # 0 = skip enabling hermes-lcm (context.engine=lcm) at boot:
       - HERMES_LCM_ENABLE=${HERMES_LCM_ENABLE:-1}
       # 1 = register the /lcm slash command (/lcm doctor, /lcm doctor repair
@@ -149,18 +149,18 @@ services:
       # default desired_state=stopped, so 02-reconcile-profiles starts the
       # custom one instead of default. Runs once; later boots / a manual
       # `hermes gateway start|stop` are left alone.
-      - GATEWAY_PROMOTE_ENABLE=${GATEWAY_PROMOTE_ENABLE:-1}   # 0 = leave default running
-      - GATEWAY_PROMOTE_PROFILE=${GATEWAY_PROMOTE_PROFILE:-}   # empty = the installed profile
+      - GATEWAY_PROMOTE_ENABLE=${GATEWAY_PROMOTE_ENABLE:-1} # 0 = leave default running
+      - GATEWAY_PROMOTE_PROFILE=${GATEWAY_PROMOTE_PROFILE:-} # empty = the installed profile
       # Skill lockdown (0197-skills-lockdown). A new profile otherwise inherits
       # the base image's whole bundled skill library on top of the ~25 skills
       # this distribution ships. The hook writes the .no-bundled-skills marker,
       # deletes pristine bundled copies, and recomputes skills.disabled from
       # what is actually installed — every boot, so it survives
       # HERMES_PROFILE_AUTO_UPDATE=1 rewriting config.yaml.
-      - HERMES_SKILLS_LOCKDOWN=${HERMES_SKILLS_LOCKDOWN:-1}   # 0 = keep all builtin skills
-      - HERMES_SKILLS_LOCKDOWN_PROFILES=${HERMES_SKILLS_LOCKDOWN_PROFILES:-}   # empty = the installed profile
-      - HERMES_SKILLS_LOCKDOWN_PRUNE=${HERMES_SKILLS_LOCKDOWN_PRUNE:-1}   # 0 = disable on disk, don't delete
-      - HERMES_SKILLS_KEEP=${HERMES_SKILLS_KEEP:-}   # extra skill names to keep enabled
+      - HERMES_SKILLS_LOCKDOWN=${HERMES_SKILLS_LOCKDOWN:-1} # 0 = keep all builtin skills
+      - HERMES_SKILLS_LOCKDOWN_PROFILES=${HERMES_SKILLS_LOCKDOWN_PROFILES:-} # empty = the installed profile
+      - HERMES_SKILLS_LOCKDOWN_PRUNE=${HERMES_SKILLS_LOCKDOWN_PRUNE:-1} # 0 = disable on disk, don't delete
+      - HERMES_SKILLS_KEEP=${HERMES_SKILLS_KEEP:-} # extra skill names to keep enabled
       # Uncomment to forward specific env vars instead of using .env file:
       # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       # - OPENAI_API_KEY=${OPENAI_API_KEY}
