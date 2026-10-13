@@ -1272,16 +1272,10 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
         if tag not in _PRECHECK_WARNED_TAGS:
             _PRECHECK_WARNED_TAGS.add(tag)
             print(
-                f"WARN: RBAC pre-check is NOT reliable on tag '{tag}' — bot identity "
-                f"{trust['bot_user']!r} is privileged ({trust['privileged_identity']}) "
-                f"and/or the live has_permission probe didn't discriminate a bogus user "
-                f"({not trust['precheck_discriminates']}). Per-requester permission is "
-                f"verified locally instead (role list + doctype DocPerm rows) — a "
-                f"confirmed grant is required to proceed; a `domain` allowlist or a verified "
-                f"advisory token does not rescue this on their own (see "
-                f"_requester_has_role_permission()'s docstring). Provision a narrow-role "
-                f"dedicated bot account and re-run health() to restore the has_permission RPC "
-                f"itself instead of depending on this fallback.",
+                f"NOTE: tag '{tag}': frappe.client.has_permission cannot check another user "
+                f"(discriminates={trust['precheck_discriminates']}), so the requester's "
+                f"permission is checked locally (roles + DocPerm rows, read with the Admin "
+                f"Account) and needs a confirmed grant. This is the normal path.",
                 file=sys.stderr,
             )
         # has_permission's user= param is known unreliable here, so ask
