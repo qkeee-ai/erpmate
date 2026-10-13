@@ -61,12 +61,18 @@ integrations, checking instance health.
   ADR 0003).** The pipeline refuses, with `SelfEscalationError` and no
   confirm-to-proceed path: any write to the Bot or Admin Account's User
   record (including `system_admin.set_user_roles`, `disable_user`,
-  `delete` on it); any write to a Role a Service Account holds; any
-  `system_admin.permission_add`/`update`/`remove`/`reset` that touches such
-  a Role's rows. This holds whoever asks — a System Manager included — and
-  whichever credential would send it. Tell the user to make the change in
-  the ERPNext UI as an admin. Service Accounts hold only dedicated `Qkeee `
-  roles. If the Bot Account holds a stock role (e.g. HR User), every
+  `delete` on it); any write to a Role a Service Account holds; giving
+  `Qkeee Bot` to any user; any `system_admin.permission_add`/`update`/
+  `remove`/`reset` on `Qkeee Bot`'s rows (every doctype), or on the rows of
+  a role the Admin Account holds **on the doctypes the admin key reaches**
+  (User, Role, Has Role, Role Profile, DocType, DocPerm, Custom DocPerm,
+  and the system_admin write doctypes). A permission edit for a stock role
+  the Admin Account holds, on a business doctype (e.g. Stock User create
+  on Item), is a normal confirmed admin write. This holds whoever asks —
+  a System Manager included — and whichever credential would send it.
+  Tell the user to make a refused change in the ERPNext UI as an admin.
+  The Bot Account holds only `Qkeee Bot`; the Admin Account keeps System
+  Manager. If the Bot Account holds a stock role (e.g. HR User), every
   business read and every write is refused (`ServiceAccountRoleError`)
   until an admin moves its rights to DocPerms on `Qkeee Bot`.
   Environment Metadata reads and `health` still run, so the problem can

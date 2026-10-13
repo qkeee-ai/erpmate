@@ -232,18 +232,19 @@ write flow.
   non-discriminating `has_permission`), `_requester_has_role_permission()`
   takes over: a second, independent, RPC-free check computed locally
   from the requester's own live role list and the doctype's own live
-  DocPerm rows. Only a `True` verdict (a locally-confirmed grant) lets
-  the call through. A `False` verdict (positive evidence of no
-  permission) or an inconclusive `None` (a live read failed — commonly
-  the same System-Manager-level DocType read this skill already flags as
-  a real gap on a correctly least-privileged bot) both refuse the call
-  outright, for read and write alike — a `domain` allowlist or a
+  DocPerm rows. Both reads use the **Admin Account** (agents ADR 0003
+  amendment, 2026-10-13), as does the bot's own role read; the bot needs
+  no read on User or DocType. Only a `True` verdict (a locally-confirmed
+  grant) lets the call through. A `False` verdict (positive evidence of
+  no permission) or an inconclusive `None` (an Admin Account read
+  failed) both refuse the call outright, for read and write alike, with
+  a role gap — a `domain` allowlist or a
   verified confirmation token no longer rescues either case, since those
   attest a write's *shape* was reviewed ahead of time, never that
-  `requested_by` specifically can do it. Trade-off, stated plainly: this
-  makes System-Manager-level DocType read a hard requirement for ANY
-  write once precheck is unreliable — availability loss, in exchange for
-  never proceeding without positive, locally-confirmed evidence. A
+  `requested_by` specifically can do it. Trade-off, stated plainly: the
+  Admin Account key pair is a hard requirement for ANY business call —
+  availability loss, in exchange for never proceeding without positive,
+  locally-confirmed evidence. A
   corroborating signal, not a reimplementation of Frappe's permission
   engine — User Permissions and `if_owner` scoping aren't visible to it;
   see `_requester_has_role_permission()`'s own docstring in
@@ -345,15 +346,16 @@ write flow.
   (`True`) lets the write through on a warning. Neither a `domain=`
   allowlist nor a verified confirmation token rescues
   an inconclusive or negative local verdict — both `False` (confirmed no
-  granting role) and `None` (the local check itself couldn't complete, e.g.
-  this bot also lacks System-Manager-level DocType read) are refused
+  granting role) and `None` (the local check itself couldn't complete: the
+  Admin Account read failed) are refused
   outright with `UnvalidatedProdRequesterError`, the same exception type
   the RBAC pre-check raises for every other denial. (`PrivilegedBotAccountError`
   is no longer raised anywhere — kept defined only for any external code
-  still catching it specifically.) This makes System-Manager-level DocType
-  read a hard requirement for any write once `has_permission` is
-  unreliable, including a domain-scoped one — an explicit
-  availability-for-safety trade-off, not an oversight. Either way this is a
+  still catching it specifically.) This makes the Admin Account key pair a
+  hard requirement for every business call, including a domain-scoped one
+  — an explicit availability-for-safety trade-off, not an oversight. The
+  bot's own roles are read the same way: unread roles, or a bot without
+  `Qkeee Bot`, refuse every call (`ServiceAccountRoleError`, with a gap). Either way this is a
   blocker/warning enforced in code, not a courtesy, and is a **different**
   failure mode than the "not a personal login" check above, which is only
   a recommendation. Check both proactively: if a `health` check's
@@ -461,7 +463,11 @@ Rules:
    ERPNext UI.
 4. A `bot` gap is fixed on the `Qkeee Bot` role, never by giving the bot a
    stock role. `hermes qkeee-erp init-bot` grants the two reads the bot needs for
-   discovery (Module Def, Workflow).
+   discovery (Module Def, Workflow). The bot needs no read on User or
+   DocType: the Admin Account does the permission check's reads. An
+   `admin` gap (`rbac_mirror`) is fixed by an Operator or an admin, never
+   by widening the bot.
+5. A refusal can carry `gaps[]` too. Show each `prompt` the same way.
 
 ## Report-back
 
@@ -489,7 +495,24 @@ in its closing message once — this section exists so that doesn't repeat.
    without having checked it against live schema first — an unconfirmed
    claim is one sentence away from being wrong in a way the user will act
    on.
-6. **Done when:** the reply's first line states outcome and scope, every
+6. **Answer the question asked, in its shape.** "List X" gets a list or
+   table, not paragraphs. Each fact appears once. Leave out pipeline
+   internals (allowlists, `has_permission`, gate mechanics, the
+   Requester's own DocPerms) unless the user asked about them. One
+   caveat line at most; an incomplete read is a warning (rule 3), not a
+   narrative. Target: a reader gets the answer from the first 5 lines.
+   DEMO_ERP 2026-10-13: "list the bot's mandatory roles" came back as six
+   paragraphs, System Manager forbidden three times, 25 doctypes in one
+   sentence.
+7. **Bot-permission questions come from the tools, not recall.** The bot
+   holds one role, `Qkeee Bot` (rule 4 of the role-gap prompt).
+   `erp_discover bot_permissions` lists what it needs; `health` shows
+   what it holds (`bot_roles`) and what is missing (`gaps[]`);
+   `preflight` checks one DocType. Quote those results. Do not
+   reconstruct a permission matrix from memory. An empty `roles` result
+   means "could not see", never "holds no role"; `health` `bot_roles` is
+   `null` when unread.
+8. **Done when:** the reply's first line states outcome and scope, every
    touched record appears in a table, every warning precedes the
-   narrative detail, and no remediation claim in it is unlabelled as
-   verified or guessed.
+   narrative detail, no fact repeats, and no remediation claim in it is
+   unlabelled as verified or guessed.

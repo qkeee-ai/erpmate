@@ -102,8 +102,8 @@ def connector(send_error=None, accounts=None):
         _p(core_client, "get_env_config", side_effect=lambda tag, credential="bot": dict(CFG, credential=credential))
         _p(core_client, "_validate_prod_requester")
         _p(core_client, "service_account_identities", return_value=accounts or [
-            {"user": "qkeee-erp-bot@example.com", "roles": {"Qkeee Bot"}},
-            {"user": "qkeee-erp-admin@example.com", "roles": {"System Manager"}}])
+            {"label": "Bot", "user": "qkeee-erp-bot@example.com", "roles": {"Qkeee Bot"}},
+            {"label": "Admin", "user": "qkeee-erp-admin@example.com", "roles": {"System Manager"}}])
         _p(core_client, "fetch_permission_rows", return_value=[])
         _p(core_client, "record_audit_log_start", return_value="LOG-1")
         _p(core_client, "record_audit_log_finish", return_value=True)
@@ -849,6 +849,12 @@ class AuditRedactionTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class WriteGateExemptionTests(unittest.TestCase):
+
+    def setUp(self):
+        # A confirmed bot identity, so these reach the requester checks.
+        p = patch.object(core_client, "verify_rbac_precheck_reliable", return_value={"reliable": True})
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_user_role_doctype_writes_are_not_exempt(self):
         for doctype in ("User", "Role", "DocType"):

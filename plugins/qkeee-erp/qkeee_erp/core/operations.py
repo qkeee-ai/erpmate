@@ -373,32 +373,70 @@ def _check_ownership(op: Operation, req: PreparedRequest) -> None:
 
 _PERMISSION_DOCTYPES = frozenset({"Custom DocPerm", "DocPerm"})
 
+# What the Admin Account key can reach (agents ADR 0003 amendment
+# 2026-10-13, option b): the permission and identity doctypes, plus every
+# doctype the system_admin domain writes (read from its allowlist at call
+# time, so a new admin doctype is covered without editing this list).
+_ADMIN_KEY_BASE_DOCTYPES = frozenset({
+    "User", "Role", "Has Role", "Role Profile", "DocType", "DocPerm", "Custom DocPerm",
+})
+
+
+def admin_key_doctypes() -> frozenset:
+    return _ADMIN_KEY_BASE_DOCTYPES | frozenset(_c.DOMAIN_WRITE_ALLOWLISTS.get("system_admin", ()))
+
 
 def _self_escalation_target(req: PreparedRequest, ctx: WriteContext) -> Optional[str]:
-    """What this request would change about a Service Account, or None."""
+    """What this request would change about a Service Account, or None.
+
+    Every Service Account's User record and role assignment is protected,
+    and so is every Role record it holds. Permission rows differ by
+    account (agents ADR 0003, amended 2026-10-13):
+    - a role the Bot Account (or an unlabelled account) holds: protected
+      on every doctype — it is what the agent does business with;
+    - a role only the Admin Account holds: protected only on the doctypes
+      the admin key reaches (admin_key_doctypes()). A rule on Sales
+      Invoice for System Manager gives the agent nothing: it never writes
+      Sales Invoice with the admin key."""
     accounts = _c.service_account_identities(ctx.tag)
     users = {a["user"].lower() for a in accounts}
-    roles = set().union(*(a["roles"] for a in accounts)) - _c.AUTOMATIC_ROLES
+    full = set().union(set(), *(a["roles"] for a in accounts if a.get("label") != "Admin"))
+    full -= _c.AUTOMATIC_ROLES
+    admin_only = set().union(set(), *(a["roles"] for a in accounts if a.get("label") == "Admin"))
+    admin_only -= _c.AUTOMATIC_ROLES | full
+    held = full | admin_only
     body = req.body or {}
     if req.doctype == "User":
         target = (req.name or body.get("email") or body.get("name") or "").lower()
         if target in users:
             return f"Service Account user {target!r}"
+        # The same rule as Has Role below, for create_user / set_user_roles:
+        # handing the Bot's role to a person hands them the agent's rights.
+        bound = req.bound or {}
+        added = (set(bound["added"]) if "added" in bound
+                 else {r.get("role") for r in body.get("roles") or [] if isinstance(r, dict)})
+        if added & full:
+            return f"role(s) {sorted(added & full)}, held by the Bot Account, given to {target!r}"
     if req.doctype == "Role":
         role = req.name or body.get("role_name") or body.get("name")
-        if role in roles:
+        if role in held:
             return f"role {role!r}, which a Service Account holds"
     if req.doctype == "Has Role":
-        if (body.get("parent") or "").lower() in users or body.get("role") in roles:
+        # Granting the Bot's role to someone else is still refused; granting
+        # a stock role the Admin Account also holds is a normal admin task.
+        if (body.get("parent") or "").lower() in users or body.get("role") in full:
             return "a Service Account's role assignment"
     if req.doctype in _PERMISSION_DOCTYPES:
+        target_doctype = body.get("doctype") or body.get("parent")
+        guarded = full | (admin_only if target_doctype in admin_key_doctypes() else set())
         if body.get("role"):
-            touched = {body["role"]} & roles
+            touched = {body["role"]} & guarded
         else:  # a reset: every custom row on the doctype goes
             touched = {r.get("role") for r in _c.fetch_permission_rows(
-                ctx.tag, body.get("doctype") or body.get("parent"))} & roles
+                ctx.tag, target_doctype)} & guarded
         if touched:
-            return f"permission rows of role(s) {sorted(touched)}, held by a Service Account"
+            return (f"permission rows of role(s) {sorted(touched)} on '{target_doctype}', held by "
+                    f"a Service Account")
     return None
 
 

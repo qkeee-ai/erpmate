@@ -41,6 +41,8 @@ org's instance actually has.
 """
 
 
+from . import doctype_defs
+from .core import client as _client
 from .core.client import (
     BOT_ROLE_NAME,
     ConnectorError,
@@ -282,6 +284,48 @@ def resolve_doctype(tag: str, doctype: str, *, requested_by: str = None, session
 _CORE_APPS = {"frappe", "erpnext"}
 
 
+def bot_permissions() -> dict:
+    """What the Bot Account needs on ERPNext, from the code (no network):
+    the answer to "which roles/permissions does the bot need". Rows go on
+    `Qkeee Bot` only (agents ADR 0003). The Admin Account reads User and
+    DocType meta for the permission check, so the bot needs neither."""
+    from .core import operations
+    by_domain = {}
+    for op in operations.REGISTRY.values():
+        if op.domain:
+            by_domain.setdefault(op.domain, set()).add(op.credential)
+    bot_writes, admin_writes = {}, {}
+    for domain, doctypes in sorted(_client.DOMAIN_WRITE_ALLOWLISTS.items()):
+        if not doctypes:
+            continue
+        target = admin_writes if by_domain.get(domain) == {"admin"} else bot_writes
+        target[domain] = sorted(doctypes)
+    return {
+        "bot_role": BOT_ROLE_NAME,
+        "role_rule": f"The bot user holds {BOT_ROLE_NAME!r} only. Any other role (System Manager, "
+                     f"Stock User, ...) refuses every business call (agents ADR 0003).",
+        "provisioned_by_init_bot": {
+            **{d: ["read"] for d in doctype_defs.BOT_READ_GRANTS},
+            doctype_defs.AUDIT_LOG["name"]: [
+                k for row in doctype_defs.AUDIT_LOG["permissions"] if row["role"] == BOT_ROLE_NAME
+                for k in ("read", "write", "create", "submit", "cancel", "delete") if row.get(k)],
+        },
+        "not_needed_on_bot": {
+            "User": "the Admin Account reads requester and bot roles",
+            "DocType": "the Admin Account reads permission rows",
+        },
+        "admin_account_needs": "System Manager; its key pair in QKEEE_ERP_<TAG>_ADMIN_API_KEY/"
+                               "_ADMIN_API_SECRET. Without it every business call is refused.",
+        "bot_write_doctypes": bot_writes,
+        "admin_write_doctypes": admin_writes,
+        "per_doctype_grants": "On each bot write doctype the user will use: read, plus create / "
+                              "write / submit / cancel for the operations used, plus read on its "
+                              "Link targets. A doctype outside every list (e.g. Item) goes "
+                              "through unscoped.generic and needs the same rows. Run "
+                              "erp_discover preflight <DocType> to confirm one doctype.",
+    }
+
+
 def _employee_settings_check(tag: str, payload, read_ctx: dict, gap_for) -> tuple:
     """HR Settings `emp_created_by`: "Employee Number" names each Employee
     by its employee_number, so that field becomes mandatory."""
@@ -325,6 +369,11 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
        fails, or cannot be read.
     6. Permission gaps use the `health` gap shape (client.make_gap()). A
        gap that stops a rule from running is also a blocker.
+    7. The requester's create permission, checked the way the gate checks
+       it (client.requester_permission_readiness(), no audit row): not
+       confirmed is a blocker. The gate still runs at render and execute.
+    8. The bot's read on each mandatory Link field's target doctype: a gap
+       per target it cannot read, never a blocker.
 
     Preflight cannot see server scripts or custom-app validate hooks; they
     run only on save. execute_write.py's structured failure covers those.
@@ -390,6 +439,32 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
                             "preflight cannot list installed custom apps, whose validation "
                             "this create may meet"))
 
+    # The gate's permission half, run dry: without it, preflight said
+    # ready while every call was refused (DEMO_ERP 2026-10-13).
+    requester_ready = None
+    if requested_by:
+        try:
+            readiness = _client.requester_permission_readiness(tag, doctype, "create", requested_by)
+        except ConnectorError as e:
+            readiness = {"ready": None, "reason": f"the requester check failed: {e}"[:300],
+                         "gaps": []}
+        requester_ready = readiness["ready"]
+        if requester_ready is not True:
+            blockers.append(f"Requester permission: {readiness['reason']}.")
+        gaps += readiness["gaps"]
+
+    # Rule 8: the bot's read on each mandatory Link target. A gap, not a
+    # blocker: Frappe checks a Link value without the user's read.
+    links = {}
+    for f in meta.get("fields", []):
+        if f.get("reqd") and f.get("fieldtype") == "Link" and f.get("options"):
+            links.setdefault(f["options"], []).append(f["fieldname"])
+    try:
+        gaps += _client.probe_bot_link_reads(tag, doctype, links)
+    except ConnectorError as e:
+        gaps.append(gap_for(e, "(link targets)", "read", BOT_ROLE_NAME,
+                            "preflight could not check the bot's read on mandatory Link targets"))
+
     settings_rule = None
     check = _SETTINGS_CHECKS.get(doctype)
     if check:
@@ -410,6 +485,7 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
                    "series_options": meta.get("naming_series_options"),
                    "settings_rule": settings_rule},
         "workflow_active": workflow_active,
+        "requester_ready": requester_ready,
         "ready": not blockers,
         "blockers": blockers,
         "gaps": gaps,

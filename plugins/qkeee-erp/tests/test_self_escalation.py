@@ -13,8 +13,9 @@ from qkeee_erp_plugin.qkeee_erp.core import client as core_client
 from qkeee_erp_plugin.qkeee_erp.core import operations
 from qkeee_erp_plugin.qkeee_erp.domains import system_admin  # noqa: F401 — registers system_admin.*
 
-BOT = {"user": "qkeee-erp-bot@example.com", "roles": ["Qkeee Bot"]}
-ADMIN = {"user": "qkeee-erp-admin@example.com", "roles": ["System Manager", "Qkeee Admin"]}
+BOT = {"label": "Bot", "user": "qkeee-erp-bot@example.com", "roles": ["Qkeee Bot"]}
+ADMIN = {"label": "Admin", "user": "qkeee-erp-admin@example.com",
+         "roles": ["System Manager", "Stock User", "Qkeee Admin"]}
 
 
 def render_and_run(key, args):
@@ -101,6 +102,66 @@ class SelfEscalationRefusedTests(unittest.TestCase):
             with self.assertRaises(core_client.SelfEscalationError):
                 testsupport.render("system_admin.permission_add",
                                    {"doctype": "Employee", "role": "HR User", "reason": "x"})
+
+
+class AdminAccountScopeTests(SelfEscalationRefusedTests.__base__):
+    """ADR 0003 amendment 2026-10-13 (option b): a role only the Admin
+    Account holds is protected on the doctypes the admin key reaches, not
+    on business doctypes the agent never writes with that key."""
+
+    assertRefused = SelfEscalationRefusedTests.assertRefused
+
+    def assertAllowed(self, key, args, permission_rows=None):
+        with connector(accounts=[BOT, ADMIN]) as m:
+            if permission_rows is not None:
+                m["fetch_permission_rows"].return_value = permission_rows
+            testsupport.render(key, dict(args))
+
+    def test_system_manager_rule_on_a_business_doctype_is_allowed(self):
+        self.assertAllowed("system_admin.permission_add",
+                           {"doctype": "Sales Invoice", "role": "System Manager", "reason": "x"})
+
+    def test_stock_role_the_admin_also_holds_is_editable_on_business_doctypes(self):
+        self.assertAllowed("system_admin.permission_update",
+                           {"doctype": "Item", "role": "Stock User", "ptype": "create",
+                            "value": 1, "reason": "x", "current_value": 0})
+        self.assertAllowed("system_admin.permission_reset", {"doctype": "Item", "reason": "x"},
+                           permission_rows=[{"role": "System Manager", "permlevel": 0}])
+
+    def test_admin_role_rules_on_admin_key_doctypes_are_refused(self):
+        for doctype in ("Custom DocPerm", "User", "Role", "Webhook", "Workflow"):
+            with self.subTest(doctype=doctype):
+                self.assertRefused("system_admin.permission_remove",
+                                   {"doctype": doctype, "role": "System Manager", "reason": "x"})
+        self.assertRefused("system_admin.permission_reset", {"doctype": "User", "reason": "x"},
+                           permission_rows=[{"role": "System Manager", "permlevel": 0}])
+
+    def test_bot_role_rules_stay_protected_on_every_doctype(self):
+        self.assertRefused("system_admin.permission_add",
+                           {"doctype": "Sales Invoice", "role": "Qkeee Bot", "reason": "x"})
+
+    def test_role_records_the_admin_holds_stay_protected(self):
+        self.assertRefused("system_admin.delete",
+                           {"doctype": "Role", "name": "Stock User", "reason": "x"})
+
+    def test_giving_a_person_the_bot_role_is_refused(self):
+        self.assertRefused("system_admin.set_user_roles",
+                           {"name": "staff@example.com", "roles": ["Qkeee Bot"], "reason": "x",
+                            "roles_before": ["Accounts User"]})
+        self.assertRefused("system_admin.create_user",
+                           {"email": "new@example.com", "first_name": "N", "roles": ["Qkeee Bot"]})
+
+    def test_giving_a_person_a_stock_role_the_admin_holds_is_allowed(self):
+        self.assertAllowed("system_admin.set_user_roles",
+                           {"name": "staff@example.com", "roles": ["Stock User"], "reason": "x",
+                            "roles_before": ["Accounts User"]})
+
+    def test_an_unlabelled_account_gets_full_protection(self):
+        unlabelled = {"user": "other@example.com", "roles": ["Stock User"]}
+        with connector(accounts=[BOT, unlabelled]):
+            with self.assertRaises(core_client.SelfEscalationError):
+                testsupport.render("system_admin.permission_add",
+                                   {"doctype": "Item", "role": "Stock User", "reason": "x"})
 
 
 class ServiceAccountIdentityTests(unittest.TestCase):

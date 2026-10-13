@@ -52,10 +52,10 @@ _requester_has_role_permission(). This script runs under a DIFFERENT
 (elevated) identity than that steady-state account and has no way to
 provision or verify the steady-state account's own key directly (no
 --bot-email path exists here yet). Once that account's credentials are
-configured in qkeee-erp.env, run `health` under THEM (not under this
-script's elevated key) and confirm the output's `rbac_precheck_reliable`
-is `true` before treating the environment as ready for real writes —
-see run_real()'s final step below for the exact reminder printed.
+configured in qkeee-erp.env, run `health` and confirm `bot_roles` is
+exactly `["Qkeee Bot"]` and `gaps` is empty before treating the
+environment as ready — see run_real()'s final step below for the exact
+reminder printed.
 
 Usage:
     python init_bot.py --tag qa --requested-by admin@org.com --dry-run
@@ -571,12 +571,13 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         "  1. Confirm the steady-state QKEEE_ERP_<TAG>_API_KEY/SECRET in "
         "qkeee-erp.env belong to a dedicated bot user that is NOT Administrator "
         "and does NOT hold System Manager.\n"
-        "  2. Run `erp_discover health` on tag " + tag + " under THOSE "
-        "credentials and confirm the output's rbac_precheck_reliable is true. "
-        "If it's false, most writes on this tag will now be refused outright "
-        "(UnvalidatedProdRequesterError) unless the requester's own live roles "
-        "happen to positively confirm the exact permission needed — see "
-        "core/client.py's _requester_has_role_permission() — until the bot "
-        "account's roles are fixed."
+        "  2. Give that bot user the '" + ROLE_NAME + "' role and no "
+        "other role (agents ADR 0003).\n"
+        "  3. Keep QKEEE_ERP_<TAG>_ADMIN_API_KEY/SECRET set: the Admin Account "
+        "reads the bot's and the requester's roles for every business call.\n"
+        "  4. Run `erp_discover health` on tag " + tag + " and confirm "
+        "bot_roles is ['" + ROLE_NAME + "'] and gaps is []. "
+        "`erp_discover bot_permissions` lists the business DocPerms to add on "
+        "the role."
     )
     return summary

@@ -72,15 +72,18 @@ SCHEMAS = {
         "erp_discover",
         "ERPNext connectivity and live metadata. health: the active Instance's tag and base URL, the "
         "write mode, connectivity, auth and role gaps; show each gaps[].prompt exactly as returned, once per "
-        "session, and never grant the bot a role yourself. whoami: the requester this turn is bound "
-        "to (no network). roles: a user's roles. apps / modules: installed apps. meta / resolve: one "
+        "session, and never grant the bot a role yourself. health also returns the bot's roles "
+        "(bot_roles). whoami: the requester this turn is bound to (no network). roles: a user's "
+        "roles. bot_permissions: what the bot needs on ERPNext (no network); answer \"which "
+        "roles/permissions does the bot need\" from it. apps / modules: installed apps. meta / resolve: one "
         "DocType's live schema / module and app. preflight: write-readiness check for one create "
         "(needs doctype and payload). promotion_plan: turn environment findings into Instance Notes "
         "(redacted) as an ordered list of skill_manage/memory calls for you to issue (no network).",
         {"action": {"type": "string", "enum": ["health", "whoami", "roles", "apps", "modules", "meta",
-                                                "resolve", "preflight", "promotion_plan"]},
+                                                "resolve", "preflight", "promotion_plan",
+                                                "bot_permissions"]},
          "doctype": {"type": "string"}, "payload": {"type": "object"},
-         "user": {"type": "string", "description": "roles: the user to look up; omit for the bot account."},
+         "user": {"type": "string", "description": "roles: the user to look up. For the bot's own roles use health bot_roles."},
          "findings": {"type": "object",
                       "description": "promotion_plan: {findings, doctypes, custom_apps, "
                                      "non_erpnext_systems, gaps}; pass raw values, they are redacted."},
@@ -156,7 +159,8 @@ class ErpTools:
         try:
             return impl(args)
         except (Refused, client.GateRefusal) as e:
-            return _fail(str(e), refused=True)
+            gaps = getattr(e, "gaps", None)
+            return _fail(str(e), refused=True, **({"gaps": gaps} if gaps else {}))
         except client.WriteRejectedError as e:
             return _fail(f"ERPNext rejected the write: {e.failure.get('message')} — {_STOP_AND_ASK}",
                          write_failure=e.failure)
@@ -238,6 +242,8 @@ class ErpTools:
             return _ok(client.session_identity())
         if action == "health":
             return _ok({**client.health_check(self.tag(args)), "mode": self._mode()})
+        if action == "bot_permissions":
+            return _ok(discover.bot_permissions())
         if action == "promotion_plan":
             doc = args.get("findings") or {}
             return _ok(memory_promote.build_promotion_plan(

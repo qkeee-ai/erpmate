@@ -228,7 +228,7 @@ class EnvironmentMetadataExemptTests(unittest.TestCase):
 
     def test_module_def_write_is_still_gated(self):
         self.assertNotIn("Module Def", _client.WRITE_GATE_EXEMPT_DOCTYPES)
-        with patch.object(_client, "resource_exists", return_value=False):
+        with patch.object(_client, "resource_exists", return_value=False),                 patch.object(_client, "verify_rbac_precheck_reliable", return_value={"reliable": True}):
             with self.assertRaises(_client.UnvalidatedProdRequesterError):
                 _client._validate_prod_requester(
                     "DEMO_ERP", self.REQ, "Module Def", "write", for_write=True)
@@ -422,8 +422,10 @@ class PreflightTests(unittest.TestCase):
         base.update(over)
         return base
 
+    READY = {"ready": True, "reason": None, "gaps": []}
+
     def run_preflight(self, meta=None, payload=None, modules=None, hr_settings=None,
-                      app="erpnext", doctype="Employee"):
+                      app="erpnext", doctype="Employee", readiness=None, link_reads=None):
         meta = meta or self.meta()
 
         def fake_get_resource(tag, dt, name, **kw):
@@ -445,10 +447,44 @@ class PreflightTests(unittest.TestCase):
                 patch.object(discover, "list_modules", side_effect=fake_modules), \
                 patch.object(discover, "get_resource", side_effect=fake_get_resource), \
                 patch.object(discover, "get_env_config",
-                             return_value={"tag": "DEMO_ERP", "base_url": "https://demo.example.com"}):
+                             return_value={"tag": "DEMO_ERP", "base_url": "https://demo.example.com"}),                 patch.object(discover._client, "requester_permission_readiness",
+                             return_value=readiness or self.READY),                 patch.object(discover._client, "probe_bot_link_reads",
+                             side_effect=link_reads or (lambda tag, dt, links: [])) as probe:
+            self.link_probe = probe
             return discover.preflight("DEMO_ERP", doctype, payload=payload, requested_by=self.REQ)
 
     FULL = {"first_name": "Demo", "gender": "Female", "company": "Demo Co"}
+
+    def test_rule7_unverifiable_requester_is_a_blocker_with_its_gap(self):
+        # DEMO_ERP 2026-10-13: preflight said ready while the gate refused
+        # every business call (the requester check could not run).
+        gap = _client.rbac_mirror_gap("DEMO_ERP", "Employee", "403")
+        result = self.run_preflight(payload=self.FULL, readiness={
+            "ready": None, "reason": "the requester's 'create' permission could not be checked",
+            "gaps": [gap]})
+        self.assertFalse(result["ready"])
+        self.assertIsNone(result["requester_ready"])
+        self.assertIn("Requester permission", result["blockers"][0])
+        self.assertEqual(result["gaps"], [gap])
+
+    def test_rule8_probes_only_mandatory_link_targets(self):
+        self.run_preflight(payload=self.FULL)
+        _tag, dt, links = self.link_probe.call_args.args
+        self.assertEqual((dt, links), ("Employee", {"Gender": ["gender"]}))
+
+    def test_rule8_unreadable_link_target_is_a_gap_not_a_blocker(self):
+        gap = _client.make_gap(tag="DEMO_ERP", base_url="", capability="link_read:Employee.Gender",
+                               who="bot", user="bot@org.com", role="Qkeee Bot", doctype="Gender",
+                               perm="read", effect="x")
+        result = self.run_preflight(payload=self.FULL, link_reads=lambda tag, dt, links: [gap])
+        self.assertTrue(result["ready"], result["blockers"])
+        self.assertEqual(result["gaps"], [gap])
+
+    def test_rule7_requester_without_create_is_a_blocker(self):
+        result = self.run_preflight(payload=self.FULL, readiness={
+            "ready": False, "reason": "requester holds no role with 'create'", "gaps": []})
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["requester_ready"])
 
     def test_clean_payload_is_ready(self):
         result = self.run_preflight(payload=self.FULL)

@@ -15,7 +15,7 @@ every agent that has the tools.
 | `erp_query` | List records of one DocType. |
 | `erp_get` | Read one record with its child tables. |
 | `erp_report` | Run a built-in query report. |
-| `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight`, `promotion_plan`. |
+| `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight`, `promotion_plan`, `bot_permissions`. |
 | `erp_execute_write` | `list_ops`, `render`, `execute` (one `op`, or a `batch`). The only write path. |
 
 ## 1. Never reach ERPNext another way
@@ -56,9 +56,15 @@ every agent that has the tools.
 
 ## 5. Show role gaps exactly
 
-- When `health` or `preflight` returns `gaps[]`, show each
+- When `health`, `preflight` or a refusal returns `gaps[]`, show each
   `gaps[].prompt` exactly as returned, once per session, before any write.
   Do not paraphrase or shorten it.
+- The bot's roles are `health` `bot_roles` (`null` = could not be read,
+  never "no roles"). What the bot needs is `erp_discover`
+  `bot_permissions`. Answer bot-permission questions from those two.
+- The Admin Account reads the roles for the permission check. When an
+  `admin` gap appears, every business call is refused until an Operator
+  or admin fixes it; the bot needs no read on User or DocType.
 - Never grant the bot account a role or a permission, and never ask the
   user to let you do it. Changes to the bot's own rights are always
   refused. An administrator makes them in the ERPNext UI.

@@ -284,7 +284,15 @@ class GateRefusal(ConnectorError):
     a transport failure or an error ERPNext itself returned. A refusal
     always happens before the write is sent. execute_write.py maps this to
     its own exit code so an agent can tell "refused, nothing happened"
-    apart from "ERPNext rejected it" or "outcome unknown"."""
+    apart from "ERPNext rejected it" or "outcome unknown".
+
+    `gaps`: role gaps (make_gap() shape) that explain the refusal, when an
+    admin grant or an Operator setting fixes it. The tools return them so
+    the agent shows each `prompt` as is."""
+
+    def __init__(self, message: str = "", gaps: list = None):
+        super().__init__(message)
+        self.gaps = list(gaps or [])
 
 
 class ReadOnlyModeError(GateRefusal):
@@ -747,17 +755,39 @@ _RBAC_PROBE_BOGUS_USER = "qkeee-erp-rbac-probe-nonexistent-user@invalid.example"
 
 def _bot_identity(tag: str) -> dict:
     """Resolve + cache the CONNECTOR'S OWN authenticated identity for this
-    tag (username + roles) — not requested_by. One extra HTTP round trip
-    per tag per process. A lookup failure is cached as an unknown identity
-    (empty user, empty roles) rather than retried every call — treated as
-    privileged/untrusted by verify_rbac_precheck_reliable() below, since an
-    identity this connector can't even resolve can't be confirmed safe."""
+    tag (username + roles) — not requested_by. The user name comes from the
+    bot key; the roles are read with the Admin Account (agents ADR 0003
+    amendment, 2026-10-13): Frappe hides a User's `roles` table from a
+    user without User permlevel-1 read, so a narrow bot reading itself got
+    `[]` and the stock-role check passed a bot that held System Manager.
+
+    Only a complete identity is cached. A failure returns `roles_error`
+    and is retried on the next call, so a fixed credential or grant shows
+    at once. verify_rbac_precheck_reliable() turns `roles_error` into
+    `bot_identity_error`, and the gate refuses on it."""
     if tag not in _BOT_IDENTITY_CACHE:
+        user = ""
         try:
-            _BOT_IDENTITY_CACHE[tag] = get_user_roles(tag, internal=True)
-        except ConnectorError:
-            _BOT_IDENTITY_CACHE[tag] = {"user": "", "roles": []}
+            user = (_request(get_env_config(tag), "GET", "/api/method/frappe.auth.get_logged_user")
+                    .get("message") or "").strip()
+            if not user:
+                raise ConnectorError("frappe.auth.get_logged_user returned no user for the bot key")
+            identity = get_user_roles(tag, user, internal=True, credential="admin")
+        except ConnectorError as e:
+            return {"user": user, "roles": [], "roles_error": str(e)[:300]}
+        _BOT_IDENTITY_CACHE[tag] = identity
     return _BOT_IDENTITY_CACHE[tag]
+
+
+def reset_identity_caches(tag: str) -> None:
+    """Forget everything cached about `tag`'s identities and permission rows.
+    `health` calls it first, so "RECHECK ENV" after an admin fix sees the
+    live state instead of a value cached before the fix."""
+    for cache in (_BOT_IDENTITY_CACHE, _ADMIN_IDENTITY_CACHE, _RBAC_PRECHECK_TRUST_CACHE):
+        cache.pop(tag, None)
+    for key in [k for k in _DOCTYPE_PERMISSIONS_CACHE if k[0] == tag]:
+        del _DOCTYPE_PERMISSIONS_CACHE[key]
+    _PRECHECK_WARNED_TAGS.discard(tag)
 
 
 # Service Accounts hold only dedicated roles (agents ADR 0003): a role
@@ -806,12 +836,14 @@ def service_account_identities(tag: str) -> list:
         if identity is None:
             continue
         user = (identity.get("user") or "").strip()
-        if not user:
+        # Unknown roles fail closed too: "a Role a Service Account holds"
+        # can't be checked against an empty set that only means "unread".
+        if not user or identity.get("roles_error"):
             raise SelfEscalationError(
                 f"Refusing: the {label} Account's identity on tag '{tag}' could not be resolved, so "
                 f"this write can't be checked for self-escalation (agents ADR 0003). Nothing was "
                 f"sent. Check `erp_discover health` (tag {tag}), or make the change in the ERPNext UI.")
-        accounts.append({"user": user, "roles": set(identity.get("roles") or [])})
+        accounts.append({"label": label, "user": user, "roles": set(identity.get("roles") or [])})
     return accounts
 
 
@@ -863,13 +895,28 @@ def verify_rbac_precheck_reliable(tag: str) -> dict:
     identity = _bot_identity(tag)
     bot_user = (identity.get("user") or "").strip()
     bot_roles = set(identity.get("roles") or [])
-    privileged_identity = (not bot_user) or bot_user.lower() == "administrator" or bool(bot_roles & _BOT_FORBIDDEN_ROLES)
+    roles_error = identity.get("roles_error")
+    # Unread roles are not "no roles": an unconfirmed identity counts as
+    # privileged, and `bot_identity_error` makes the gate refuse.
+    privileged_identity = ((not bot_user) or bool(roles_error) or bot_user.lower() == "administrator"
+                           or bool(bot_roles & _BOT_FORBIDDEN_ROLES))
+    if roles_error or not bot_user:
+        bot_identity_problem = "roles_unread"
+        bot_identity_error = (f"the Bot Account's roles could not be read with the Admin Account: "
+                              f"{roles_error or 'bot user unresolved'}")
+    elif BOT_ROLE_NAME not in bot_roles:
+        bot_identity_problem = "role_missing"
+        bot_identity_error = f"the Bot Account {bot_user!r} does not hold the {BOT_ROLE_NAME!r} role"
+    else:
+        bot_identity_problem = bot_identity_error = None
     precheck_discriminates = _probe_rbac_precheck_discriminates(tag)
     return {
         "reliable": (not privileged_identity) and precheck_discriminates,
         "bot_user": bot_user,
         "bot_roles": sorted(bot_roles),
         "bot_stock_roles": stock_roles(bot_roles),
+        "bot_identity_error": bot_identity_error,
+        "bot_identity_problem": bot_identity_problem,
         "privileged_identity": privileged_identity,
         "precheck_discriminates": precheck_discriminates,
     }
@@ -895,8 +942,11 @@ def _fetch_merged_meta(tag: str, doctype: str) -> dict:
     """Frappe's merged meta for `doctype` (base + Custom Fields + Property
     Setters, and the EFFECTIVE permission rows: Custom DocPerm replaces
     DocPerm once a doctype has any). Internal: no gate, no read log — used
-    from inside the requester gate itself (W39)."""
-    result = _request(get_env_config(tag), "GET", _MERGED_META_PATH, params={"doctype": doctype})
+    from inside the requester gate itself (W39). Read with the Admin
+    Account, like the requester's roles (agents ADR 0003 amendment): the
+    bot holds no read on the business doctypes it checks for others."""
+    result = _request(get_env_config(tag, credential="admin"), "GET", _MERGED_META_PATH,
+                      params={"doctype": doctype})
     doc = next((d for d in result.get("docs") or [] if d.get("name") == doctype), None)
     if doc is None:
         raise ConnectorError(f"getdoctype returned no meta for {doctype!r}")
@@ -945,13 +995,14 @@ def _requester_has_role_permission(tag: str, doctype: str, perm_type: str, reque
     authoritative, fully-Frappe-native answer; this is a narrower
     approximation, not a strictly better check).
 
-    Returns `True`/`False` when both reads succeed and a verdict can
-    actually be reached; `None` when either read fails — e.g. this bot
-    also lacks the System-Manager-level DocType read, a common gap on a
-    correctly least-privileged bot — or when
-    `get_user_roles()`'s own result is empty (its own docstring: an empty
-    roles list is ambiguous, never a confirmed "holds nothing"). Callers
-    must treat `None` as "couldn't check," never as either verdict.
+    Both reads use the Admin Account (agents ADR 0003 amendment,
+    2026-10-13), so the Bot Account needs no read on User or on the
+    checked doctype's meta. A disabled requester is `False`.
+
+    Returns `True`/`False` when both reads succeed; `None` when either
+    read fails (no admin key pair configured, or the Admin Account can't
+    read). Callers must treat `None` as "couldn't check," never as either
+    verdict.
 
     Known, deliberate limitations — a corroborating signal, not a
     reimplementation of Frappe's permission engine:
@@ -967,12 +1018,21 @@ def _requester_has_role_permission(tag: str, doctype: str, perm_type: str, reque
       (falls through to `False` here only if no OTHER, unconditional row
       matches; never silently upgraded to a confirmed grant)."""
     try:
-        roles_result = get_user_roles(tag, requested_by, internal=True)
+        roles_result = get_user_roles(tag, requested_by, internal=True, credential="admin")
     except ConnectorError:
         return None
-    requester_roles = set(roles_result.get("roles") or [])
-    if not requester_roles:
-        return None
+    if roles_result.get("enabled") == 0:
+        return False
+    # frappe.permissions: Administrator holds every permission.
+    if (roles_result.get("user") or requested_by) == "Administrator":
+        return True
+    # Read with the Admin Account, the roles table is complete: an empty one
+    # means the user holds no assigned role. Frappe also gives every user
+    # "All" and "Guest", and every System User "Desk User"
+    # (frappe.get_roles()); DocPerm rows on those roles grant to everyone.
+    requester_roles = set(roles_result.get("roles") or []) | {"All", "Guest"}
+    if roles_result.get("user_type") == "System User":
+        requester_roles.add("Desk User")
 
     perm_rows, _fetch_error = _fetch_doctype_role_permissions(tag, doctype)
     if perm_rows is None:
@@ -1147,14 +1207,6 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
         return
 
     _require_bound_requester(tag, requested_by, doctype, _log)
-    if not resource_exists(tag, "User", requested_by):
-        _log(False, {"reason": "requester_not_a_known_user"})
-        raise UnvalidatedProdRequesterError(
-            f"Refusing this call against '{doctype}' on tag '{tag}': requester "
-            f"'{requested_by}' is not a known ERPNext User. Never proceed with an "
-            f"unvalidated channel identity — confirm the real ERPNext user id/email "
-            f"before retrying."
-        )
     trust = verify_rbac_precheck_reliable(tag)
     # Service Accounts hold only dedicated roles (agents ADR 0003). A bot
     # holding a stock role is refused outright, failing closed: otherwise
@@ -1169,11 +1221,38 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
             f"only dedicated roles (agents ADR 0003). Nothing was sent. Tell an admin: move the "
             f"bot's rights to DocPerms on '{BOT_ROLE_NAME}' and remove {bot_stock} from the bot "
             f"user, in the ERPNext UI. The agent never makes this change itself.")
+    # An unconfirmed bot identity fails closed too: unread roles are not
+    # "no stock roles" (DEMO_ERP 2026-10-13: a bot holding System Manager
+    # passed the check above because its roles table read back empty).
+    if trust.get("bot_identity_error"):
+        _log(False, {"reason": "bot_identity_unconfirmed", "detail": trust["bot_identity_error"]})
+        raise ServiceAccountRoleError(
+            f"Refusing this call on tag '{tag}': {trust['bot_identity_error']}. The Bot Account "
+            f"must hold '{BOT_ROLE_NAME}' and nothing else (agents ADR 0003), and the connector "
+            f"must be able to confirm that. Nothing was sent. Show the gap prompt below.",
+            gaps=bot_identity_gaps(tag, trust))
+    # The requester's User record is read with the Admin Account, like the
+    # rest of the local permission check: the bot holds no User read.
+    try:
+        known = resource_exists(tag, "User", requested_by, credential="admin")
+    except ConnectorError as e:
+        _log(False, {"reason": "requester_lookup_failed"})
+        raise UnvalidatedProdRequesterError(
+            f"Refusing this call against '{doctype}' on tag '{tag}': requester "
+            f"'{requested_by}' could not be looked up with the Admin Account ({e}). Nothing "
+            f"was sent. Show the gap prompt below.",
+            gaps=[rbac_mirror_gap(tag, "User", str(e))]) from e
+    if not known:
+        _log(False, {"reason": "requester_not_a_known_user"})
+        raise UnvalidatedProdRequesterError(
+            f"Refusing this call against '{doctype}' on tag '{tag}': requester "
+            f"'{requested_by}' is not a known ERPNext User. Never proceed with an "
+            f"unvalidated channel identity — confirm the real ERPNext user id/email "
+            f"before retrying."
+        )
     # Self-attribution guard, using the bot identity the trust check above
-    # already resolved (cached, no extra round trip). A lookup failure
-    # leaves bot_user empty and skips this — that case is already treated
-    # as privileged/untrusted, so the requester still has to pass the local
-    # role/DocPerm check below on its own.
+    # already resolved (cached, no extra round trip). An unresolved bot
+    # identity never gets here: the identity check above refuses it.
     bot_user = (trust.get("bot_user") or "").strip().lower()
     if bot_user and requested_by.strip().lower() == bot_user:
         _log(False, {"reason": "requester_is_bot_identity"})
@@ -1258,17 +1337,13 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
         _log(False, {"path": "local_role_docperm_fallback", "reason": "inconclusive"})
         raise UnvalidatedProdRequesterError(
             f"Refusing this call on tag '{tag}': requester '{requested_by}''s '{perm_type}' "
-            f"permission on '{doctype}' could not be verified at all — this connector's own "
-            f"bot identity ({trust['bot_user']!r}) makes frappe.client.has_permission's user= "
-            f"param unreliable on this tag, AND the local role/DocPerm fallback check couldn't "
-            f"complete (failed to resolve requester '{requested_by}''s live roles, or this "
-            f"doctype's live DocPerm rows). A `domain` allowlist or a verified advisory token "
-            f"attests this write's shape was reviewed ahead of time, never that "
-            f"'{requested_by}' can actually do it — neither is trusted to rescue an "
-            f"unverifiable requester permission by itself. Provision a bot account that can "
-            f"read User/DocType metadata (see `hermes qkeee-erp init-bot` / 00-conventions.md), or restore a "
-            f"working has_permission RPC, to unblock writes on this tag. {_NEVER_SUBSTITUTE_REQUESTER}"
-        )
+            f"permission on '{doctype}' could not be verified. frappe.client.has_permission "
+            f"can't check another user on this tag (bot identity {trust['bot_user']!r}), and "
+            f"the local check (the requester's roles "
+            f"and the doctype's permission rows, both read with the Admin Account) could not "
+            f"complete. Nothing was sent. An allowlist or a confirmation token never rescues an "
+            f"unverified requester. Show the gap prompt below. {_NEVER_SUBSTITUTE_REQUESTER}",
+            gaps=[rbac_mirror_gap(tag, doctype, fetch_error)])
     allowed = check_user_permission(tag, doctype, perm_type, requested_by, docname)
     if not allowed:
         _log(False, {"path": "has_permission_rpc"})
@@ -1553,32 +1628,137 @@ def make_gap(*, tag: str, base_url: str, capability: str, who: str, user: str, r
     return gap
 
 
+def _base_url(tag: str) -> str:
+    try:
+        return get_env_config(tag).get("base_url", "")
+    except ConnectorError:
+        return ""
+
+
+def _admin_credential_steps(tag: str) -> str:
+    return (f"Operator: set {_tag_env_var(tag, 'ADMIN_API_KEY')} and "
+            f"{_tag_env_var(tag, 'ADMIN_API_SECRET')} in {_qkeee_env_file_path()} to the key pair "
+            f"of a System Manager account (the Admin Account), not the bot's.")
+
+
+def rbac_mirror_gap(tag: str, doctype: str, error: str = "") -> dict:
+    """The gap for a local permission check that could not complete: the
+    Admin Account could not read the requester's roles or `doctype`'s
+    permission rows (agents ADR 0003 amendment)."""
+    return make_gap(
+        tag=tag, base_url=_base_url(tag), capability="rbac_mirror", who="admin",
+        user="(the Admin Account)", role="System Manager", doctype=doctype, perm="read",
+        effect="the requester's permission cannot be checked, so every business read and "
+               "write on this tag is refused",
+        grant_steps=(f"{_admin_credential_steps(tag)} If it is set, confirm that account "
+                     f"holds System Manager and can open User and DocType \"{doctype}\"."),
+        error=(error or None) and error[:300])
+
+
+def bot_identity_gaps(tag: str, trust: dict) -> list:
+    """Gaps for trust["bot_identity_error"]: the bot's roles could not be
+    read with the Admin Account, or the bot does not hold `Qkeee Bot`."""
+    if not trust.get("bot_identity_error"):
+        return []
+    if trust.get("bot_identity_problem") != "role_missing":
+        return [rbac_mirror_gap(tag, "User", trust["bot_identity_error"])]
+    bot_user = trust.get("bot_user") or "(the bot account)"
+    return [make_gap(
+        tag=tag, base_url=_base_url(tag), capability="bot_role", who="bot", user=bot_user,
+        role=BOT_ROLE_NAME, doctype="User", perm="role",
+        effect="the bot holds none of the connector's rights; every business read and write "
+               "is refused",
+        grant_steps=(f"User \"{bot_user}\" → Roles → tick \"{BOT_ROLE_NAME}\" (and no other "
+                     f"role) → Save. If the role does not exist, an Operator runs "
+                     f"`hermes qkeee-erp init-bot` first."))]
+
+
+def requester_permission_readiness(tag: str, doctype: str, perm_type: str,
+                                   requested_by: str) -> dict:
+    """Dry run of the gate's permission half for `preflight`: no audit row,
+    nothing sent but reads. Returns {"ready": bool|None, "reason", "gaps"}.
+    `ready` None means the check itself could not run. Never a substitute
+    for the gate, which runs again at render and execute."""
+    trust = verify_rbac_precheck_reliable(tag)
+    if trust.get("bot_stock_roles"):
+        return {"ready": False, "gaps": [],
+                "reason": f"the Bot Account holds stock role(s) {trust['bot_stock_roles']}; "
+                          f"every business call is refused (agents ADR 0003)"}
+    if trust.get("bot_identity_error"):
+        return {"ready": None, "reason": trust["bot_identity_error"],
+                "gaps": bot_identity_gaps(tag, trust)}
+    if trust["reliable"]:
+        verdict = check_user_permission(tag, doctype, perm_type, requested_by)
+    else:
+        verdict = _requester_has_role_permission(tag, doctype, perm_type, requested_by)
+    if verdict is None:
+        cached = _DOCTYPE_PERMISSIONS_CACHE.get((tag, doctype))
+        error = cached[1] if isinstance(cached, tuple) and cached and cached[0] == "__error__" else ""
+        return {"ready": None, "gaps": [rbac_mirror_gap(tag, doctype, error)],
+                "reason": f"the requester's '{perm_type}' permission on '{doctype}' could not "
+                          f"be checked"}
+    if not verdict:
+        return {"ready": False, "gaps": [],
+                "reason": f"requester {requested_by!r} holds no role with '{perm_type}' on "
+                          f"'{doctype}'"}
+    return {"ready": True, "reason": None, "gaps": []}
+
+
+def _probe_gap(tag: str, cfg: dict, bot_user: str, capability: str, path: str, params,
+               doctype: str, perm: str, effect: str):
+    """One read as the bot: None when it works, else its gap."""
+    try:
+        _request(cfg, "GET", path, params=params)
+        return None
+    except ConnectorError as e:
+        steps = None
+        if not (isinstance(e, ERPNextAPIError) and e.status in (401, 403)):
+            # Transport, URL or server error: no role grant fixes it.
+            steps = (f"not a permission error ({type(e).__name__}); no role grant fixes it. "
+                     f"Check connectivity and the ERPNext server log, then reply RECHECK ENV.")
+        elif perm == "call":
+            # Whitelisted for any logged-in user on stock Frappe: a
+            # failure is instance policy, an app override or version,
+            # not a missing role.
+            steps = (f"ask the ERPNext admin whether this instance blocks {doctype} "
+                     f"(whitelist policy, an app override, or Frappe version). No known "
+                     f"role grant fixes it.")
+        return make_gap(tag=tag, base_url=cfg.get("base_url", ""), capability=capability,
+                        who="bot", user=bot_user or "(unknown bot user)",
+                        role=BOT_ROLE_NAME, doctype=doctype, perm=perm, effect=effect,
+                        grant_steps=steps, error=str(e)[:300])
+
+
 def probe_capabilities(tag: str, cfg: dict, bot_user: str) -> tuple:
     """Run _CAPABILITY_PROBES as the bot. Returns ({capability: bool}, gaps)."""
     capabilities, gaps = {}, []
     for capability, path, params, doctype, perm, effect in _CAPABILITY_PROBES:
-        try:
-            _request(cfg, "GET", path, params=params)
-            capabilities[capability] = True
-        except ConnectorError as e:
-            capabilities[capability] = False
-            steps = None
-            if not (isinstance(e, ERPNextAPIError) and e.status in (401, 403)):
-                # Transport, URL or server error: no role grant fixes it.
-                steps = (f"not a permission error ({type(e).__name__}); no role grant fixes it. "
-                         f"Check connectivity and the ERPNext server log, then reply RECHECK ENV.")
-            elif perm == "call":
-                # Whitelisted for any logged-in user on stock Frappe: a
-                # failure is instance policy, an app override or version,
-                # not a missing role.
-                steps = (f"ask the ERPNext admin whether this instance blocks {doctype} "
-                         f"(whitelist policy, an app override, or Frappe version). No known "
-                         f"role grant fixes it.")
-            gaps.append(make_gap(tag=tag, base_url=cfg.get("base_url", ""), capability=capability,
-                                 who="bot", user=bot_user or "(unknown bot user)",
-                                 role=BOT_ROLE_NAME, doctype=doctype, perm=perm, effect=effect,
-                                 grant_steps=steps, error=str(e)[:300]))
+        gap = _probe_gap(tag, cfg, bot_user, capability, path, params, doctype, perm, effect)
+        capabilities[capability] = gap is None
+        if gap:
+            gaps.append(gap)
     return capabilities, gaps
+
+
+def probe_bot_link_reads(tag: str, doctype: str, links: dict) -> list:
+    """Gaps for the Link targets the bot cannot read. `links`: {target
+    doctype: [fieldname, ...]} — preflight passes the mandatory Link fields
+    of `doctype`. Frappe checks a Link value without the user's read, so a
+    missing read does not stop the create; it stops the agent listing or
+    checking valid values for the field. One list read per target."""
+    cfg = get_env_config(tag)
+    bot_user = _bot_identity(tag).get("user") or ""
+    gaps = []
+    for target in sorted(links):
+        gap = _probe_gap(
+            tag, cfg, bot_user, f"link_read:{doctype}.{target}",
+            f"/api/resource/{urllib.parse.quote(target)}",
+            {"fields": '["name"]', "limit_page_length": 1}, target, "read",
+            f"the agent cannot list or check valid values for {doctype} field(s) "
+            f"{', '.join(sorted(links[target]))}")
+        if gap:
+            gaps.append(gap)
+    return gaps
 
 
 def health_check(tag: str = "default") -> dict:
@@ -1600,17 +1780,31 @@ def health_check(tag: str = "default") -> dict:
     discovery and preflight need (_CAPABILITY_PROBES). Each failure is one
     gap (make_gap()) with a filled-in role-gap `prompt`. A clean bot
     returns `gaps: []`. Gaps never fail the health check either.
+
+    Clears the tag's identity caches first (reset_identity_caches()), so
+    "RECHECK ENV" sees an admin's fix. `bot_roles` is read with the Admin
+    Account; `capabilities["rbac_identity"]` is False, with a gap, when that
+    read fails or the bot lacks `Qkeee Bot` — the gate then refuses every
+    business call.
     """
     cfg = get_env_config(tag)
     result = _request(cfg, "GET", "/api/method/frappe.auth.get_logged_user")
+    reset_identity_caches(tag)
     trust = verify_rbac_precheck_reliable(tag)
     capabilities, gaps = probe_capabilities(tag, cfg, trust.get("bot_user") or result.get("message"))
+    # The gate's own preconditions (agents ADR 0003 amendment): the Admin
+    # Account reads the bot's roles, and the bot holds `Qkeee Bot`.
+    identity_gaps = bot_identity_gaps(tag, trust)
+    capabilities["rbac_identity"] = not identity_gaps
     out = {
         "tag": tag, "base_url": cfg["base_url"], "status": "ok",
         "logged_in_as": result.get("message"),
+        # None, never [], when unread: [] would read as "holds no role".
+        "bot_roles": (None if trust.get("bot_identity_problem") == "roles_unread"
+                      else trust.get("bot_roles")),
         "rbac_precheck_reliable": trust["reliable"],
         "capabilities": capabilities,
-        "gaps": gaps,
+        "gaps": identity_gaps + gaps,
     }
     if trust.get("bot_stock_roles"):
         out["service_account_warning"] = (
@@ -1620,16 +1814,12 @@ def health_check(tag: str = "default") -> dict:
             f"'{BOT_ROLE_NAME}' and remove those roles, in the ERPNext UI.")
     if not trust["reliable"]:
         out["rbac_precheck_warning"] = (
-            f"This tag's RBAC pre-check cannot be trusted: bot identity "
-            f"{trust['bot_user']!r} is privileged={trust['privileged_identity']} "
-            f"and the live has_permission probe discriminates="
-            f"{trust['precheck_discriminates']}. frappe.client.has_permission can't verify "
-            f"the requester on this tag, so every read and write falls back to a local check "
-            f"(the requester's live roles against the doctype's DocPerm rows) and proceeds "
-            f"only on a confirmed grant — an allowlist or a confirmation token never rescues "
-            f"an unverified requester. The fallback can't see User Permissions or if_owner "
-            f"rows. Provision a narrow-role dedicated bot account to restore the real check — "
-            f"see `hermes qkeee-erp init-bot` / 00-conventions.md."
+            f"frappe.client.has_permission cannot check another user on this tag "
+            f"(discriminates={trust['precheck_discriminates']}; stock Frappe ignores `user=`). "
+            f"Every read and write uses the local check instead: the requester's roles against "
+            f"the doctype's permission rows, both read with the Admin Account. It proceeds only "
+            f"on a confirmed grant and cannot see User Permissions or if_owner rows. This is "
+            f"the normal path, not a fault; the bot needs no extra role for it."
         )
     return out
 
@@ -1833,7 +2023,7 @@ def get_user_roles(tag: str, user: str = "", *, requested_by: str = None,
                     session_id: str = None, domain_code: str = None,
                     channel: str = None, channel_metadata: dict = None,
                     prompt_summary: str = None, latest_prompt: str = None,
-                    internal: bool = False) -> dict:
+                    internal: bool = False, credential: str = "bot") -> dict:
     """Fetch a user's assigned roles — the standard (heuristic, not
     guaranteed) signal for whether the acting user plausibly holds
     authority for a given write, when no ERPNext Workflow doctype is
@@ -1863,7 +2053,11 @@ def get_user_roles(tag: str, user: str = "", *, requested_by: str = None,
         who = _request(cfg, "GET", "/api/method/frappe.auth.get_logged_user")
         target = who.get("message", "")
     path = f"/api/resource/User/{urllib.parse.quote(target)}"
-    result = _request(cfg, "GET", path)
+    # credential="admin": internal RBAC plumbing only (_bot_identity(),
+    # _requester_has_role_permission()). A user without User permlevel-1
+    # read gets the record with its `roles` table hidden.
+    read_cfg = cfg if credential == "bot" else get_env_config(tag, credential=credential)
+    result = _request(read_cfg, "GET", path)
     doc = result.get("data", {})
     roles = [r.get("role") for r in doc.get("roles", []) if r.get("role")]
     # An empty roles list is ambiguous: it could mean "confirmed, this user
@@ -1875,15 +2069,17 @@ def get_user_roles(tag: str, user: str = "", *, requested_by: str = None,
         "No roles returned for this user — could mean the user genuinely "
         "holds no relevant role, or that the lookup didn't resolve "
         "correctly (wrong username, or this API key lacks permission to "
-        "read User.roles). Treat as 'authority not confirmed' either way, "
-        "but corroborate with the user rather than assuming the former."
+        "read User.roles: Frappe hides the roles table without User "
+        "permlevel-1 read). Treat as 'authority not confirmed' either way. "
+        "For the Bot Account's own roles use erp_discover health `bot_roles`."
         if not roles else ""
     )
     if not internal:
         _log_read(cfg, "User", target, requested_by, session_id, domain_code, channel, channel_metadata,
                    response_payload={"user": target, "roles": roles},
                    prompt_summary=prompt_summary, latest_prompt=latest_prompt)
-    return {"user": target, "roles": roles, "warning": warning}
+    return {"user": target, "roles": roles, "warning": warning,
+            "enabled": doc.get("enabled"), "user_type": doc.get("user_type")}
 
 
 # qkeee-erp:write-path

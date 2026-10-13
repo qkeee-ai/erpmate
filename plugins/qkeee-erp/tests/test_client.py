@@ -680,11 +680,12 @@ class ValidateProdRequesterTests(unittest.TestCase):
         with self.assertRaises(ec.UnvalidatedProdRequesterError):
             ec._validate_prod_requester("prod", "", "Sales Order", "read")
 
+    @patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True})
     @patch.object(ec, "resource_exists", return_value=False)
-    def test_refuses_unknown_user(self, mocked_exists):
+    def test_refuses_unknown_user(self, mocked_exists, _trust):
         with self.assertRaises(ec.UnvalidatedProdRequesterError) as ctx:
             ec._validate_prod_requester("prod", "nobody@org.com", "Sales Order", "read")
-        mocked_exists.assert_called_once_with("prod", "User", "nobody@org.com")
+        mocked_exists.assert_called_once_with("prod", "User", "nobody@org.com", credential="admin")
         self.assertIn("not a known ERPNext User", str(ctx.exception))
 
     @patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True})
@@ -720,11 +721,12 @@ class UniversalRequesterValidationTests(unittest.TestCase):
         with self.assertRaises(ec.UnvalidatedProdRequesterError):
             ec._validate_prod_requester("qa", None, "Sales Order", "read")
 
+    @patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True})
     @patch.object(ec, "resource_exists", return_value=False)
-    def test_non_prod_refuses_unknown_user(self, mocked_exists):
+    def test_non_prod_refuses_unknown_user(self, mocked_exists, _trust):
         with self.assertRaises(ec.UnvalidatedProdRequesterError) as ctx:
             ec._validate_prod_requester("qa", "nobody@org.com", "Sales Order", "read")
-        mocked_exists.assert_called_once_with("qa", "User", "nobody@org.com")
+        mocked_exists.assert_called_once_with("qa", "User", "nobody@org.com", credential="admin")
         self.assertIn("not a known ERPNext User", str(ctx.exception))
 
     @patch.object(ec, "verify_rbac_precheck_reliable", return_value={"reliable": True})
@@ -1158,14 +1160,14 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
             ec._probe_rbac_precheck_discriminates("tag-d")
         mocked_perm.assert_called_once()
 
-    @patch.object(ec, "get_user_roles", return_value={"user": "Administrator", "roles": []})
+    @patch.object(ec, "_bot_identity", return_value={"user": "Administrator", "roles": []})
     def test_identity_administrator_is_privileged(self, mocked_roles):
         with patch.object(ec, "check_user_permission", return_value=False):
             trust = ec.verify_rbac_precheck_reliable("tag-e")
         self.assertTrue(trust["privileged_identity"])
         self.assertFalse(trust["reliable"])
 
-    @patch.object(ec, "get_user_roles",
+    @patch.object(ec, "_bot_identity",
                    return_value={"user": "qkeee-erp-bot@org.com", "roles": ["Accounts User", "System Manager"]})
     def test_identity_holding_system_manager_is_privileged(self, mocked_roles):
         with patch.object(ec, "check_user_permission", return_value=False):
@@ -1173,7 +1175,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
         self.assertTrue(trust["privileged_identity"])
         self.assertFalse(trust["reliable"])
 
-    @patch.object(ec, "get_user_roles",
+    @patch.object(ec, "_bot_identity",
                    return_value={"user": "qkeee-erp-bot@org.com", "roles": ["Accounts User"]})
     def test_narrow_role_identity_plus_discriminating_probe_is_reliable(self, mocked_roles):
         with patch.object(ec, "check_user_permission", return_value=False):
@@ -1182,7 +1184,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
         self.assertTrue(trust["precheck_discriminates"])
         self.assertTrue(trust["reliable"])
 
-    @patch.object(ec, "get_user_roles",
+    @patch.object(ec, "_bot_identity",
                    return_value={"user": "qkeee-erp-bot@org.com", "roles": ["Accounts User"]})
     def test_narrow_role_identity_but_broken_probe_is_unreliable(self, mocked_roles):
         # A non-privileged identity doesn't save you if the instance's own
@@ -1396,7 +1398,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
             operations.call_generic(f'{fake_domain}.generic', 'tagkk2', 'Sales Order', 'create', payload={'x': 1}, mode='read-write', requested_by='priya@org.com')  # no raise
         mocked_perm.assert_not_called()
 
-    @patch.object(ec, "get_user_roles",
+    @patch.object(ec, "_bot_identity",
                    return_value={"user": "qkeee-erp-bot@org.com", "roles": ["Accounts User"]})
     def test_health_check_surfaces_reliability(self, mocked_roles):
         with patch.object(ec, "check_user_permission", return_value=False), \
@@ -1406,7 +1408,7 @@ class RbacPrecheckReliabilityTests(unittest.TestCase):
         self.assertTrue(result["rbac_precheck_reliable"])
         self.assertNotIn("rbac_precheck_warning", result)
 
-    @patch.object(ec, "get_user_roles", return_value={"user": "Administrator", "roles": []})
+    @patch.object(ec, "_bot_identity", return_value={"user": "Administrator", "roles": []})
     def test_health_check_warns_when_unreliable(self, mocked_roles):
         with patch.object(ec, "check_user_permission", return_value=False), \
                 patch.object(ec, "get_env_config", return_value={"tag": "tag-m", "base_url": "https://example.com"}), \
@@ -1442,7 +1444,8 @@ class HealthCapabilityProbeTests(unittest.TestCase):
         result, req = self._health()
         self.assertEqual(result["gaps"], [])
         self.assertEqual(set(result["capabilities"]),
-                         {"module_def_read", "installed_apps", "merged_meta", "workflow_read"})
+                         {"module_def_read", "installed_apps", "merged_meta", "workflow_read",
+                          "rbac_identity"})
         self.assertTrue(all(result["capabilities"].values()))
         paths = [c.args[2] for c in req.call_args_list]
         self.assertIn("/api/resource/Module%20Def", paths)
@@ -2090,18 +2093,23 @@ class GetUserRolesAuditLoggingTests(unittest.TestCase):
         ec.get_user_roles("default", internal=True)
         mocked_log_read.assert_not_called()
 
+    @patch.object(ec, "get_env_config", return_value={"tag": "some-tag"})
+    @patch.object(ec, "_request", return_value={"message": "bot@org.com"})
     @patch.object(ec, "get_user_roles", return_value={"user": "bot@org.com", "roles": []})
-    def test_bot_identity_resolution_passes_internal_true(self, mocked_roles):
+    def test_bot_identity_resolution_passes_internal_true(self, mocked_roles, _req, _cfg):
         ec._BOT_IDENTITY_CACHE.clear()
         self.addCleanup(ec._BOT_IDENTITY_CACHE.clear)
         ec._bot_identity("some-tag")
-        mocked_roles.assert_called_once_with("some-tag", internal=True)
+        # Roles are read with the Admin Account (agents ADR 0003 amendment).
+        mocked_roles.assert_called_once_with("some-tag", "bot@org.com", internal=True,
+                                             credential="admin")
 
     @patch.object(ec, "_fetch_doctype_role_permissions", return_value=([], None))
     @patch.object(ec, "get_user_roles", return_value={"user": "priya@org.com", "roles": ["Sales User"]})
     def test_requester_role_fallback_passes_internal_true(self, mocked_roles, mocked_perms):
         ec._requester_has_role_permission("some-tag", "Quotation", "write", "priya@org.com")
-        mocked_roles.assert_called_once_with("some-tag", "priya@org.com", internal=True)
+        mocked_roles.assert_called_once_with("some-tag", "priya@org.com", internal=True,
+                                             credential="admin")
 
 
 if __name__ == "__main__":
