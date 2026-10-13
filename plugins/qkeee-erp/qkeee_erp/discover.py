@@ -321,8 +321,9 @@ def bot_permissions() -> dict:
         "per_doctype_grants": "On each bot write doctype the user will use: read, plus create / "
                               "write / submit / cancel for the operations used, plus read on its "
                               "Link targets. A doctype outside every list (e.g. Item) goes "
-                              "through unscoped.generic and needs the same rows. Run "
-                              "erp_discover preflight <DocType> to confirm one doctype.",
+                              "through unscoped.generic and needs the same rows. An Operator "
+                              "grants all of it with `hermes qkeee-erp init-bot --domains "
+                              "<list>`; erp_discover preflight <DocType> checks one doctype.",
     }
 
 

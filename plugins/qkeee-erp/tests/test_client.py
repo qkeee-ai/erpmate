@@ -1770,6 +1770,7 @@ class ProdGateWiringTests(unittest.TestCase):
             operations.call_generic('sales.generic', 'prod', 'Sales Order', 'submit', name='SO-0001', mode='read-write', requested_by='priya@org.com', expected_modified='M1', confirmation_token=token, issued_at=issued_at, user_confirmation_text=f'yes {confirmation_code(token)}')
         mocked_gate.assert_called_once_with("prod", "priya@org.com", "Sales Order", "submit",
                                              docname="SO-0001", for_write=True, domain="sales",
+                                             credential="bot",
                                              session_id=None, domain_code=None,
                                              channel=None, channel_metadata=None,
                                              prompt_summary=None, latest_prompt=None)

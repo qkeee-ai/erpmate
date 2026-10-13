@@ -1116,7 +1116,8 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
                               advisory_token_verified: bool = False,
                               session_id: str = None, domain_code: str = None,
                               channel: str = None, channel_metadata: dict = None,
-                              prompt_summary: str = None, latest_prompt: str = None) -> None:
+                              prompt_summary: str = None, latest_prompt: str = None,
+                              credential: str = "bot") -> None:
     """The requester-validation gate — RBAC pre-check, every environment.
     (Name reflects a narrower PROD-only origin; the check itself is
     universal.)
@@ -1212,8 +1213,12 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     # holding a stock role is refused outright, failing closed: otherwise
     # the self-escalation rule either blocks normal admin edits to that
     # stock role, or those edits silently widen the bot.
+    # The Bot Account checks guard calls the bot key sends. An admin-key
+    # operation (init-bot, system_admin.*) does not depend on the bot's
+    # state, and init-bot is how a missing `Qkeee Bot` gets assigned.
+    bot_sends = credential == "bot"
     bot_stock = trust.get("bot_stock_roles") or []
-    if bot_stock:
+    if bot_sends and bot_stock:
         _log(False, {"reason": "bot_holds_stock_roles", "roles": bot_stock})
         raise ServiceAccountRoleError(
             f"Refusing this call on tag '{tag}': the Bot Account "
@@ -1224,7 +1229,7 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
     # An unconfirmed bot identity fails closed too: unread roles are not
     # "no stock roles" (DEMO_ERP 2026-10-13: a bot holding System Manager
     # passed the check above because its roles table read back empty).
-    if trust.get("bot_identity_error"):
+    if bot_sends and trust.get("bot_identity_error"):
         _log(False, {"reason": "bot_identity_unconfirmed", "detail": trust["bot_identity_error"]})
         raise ServiceAccountRoleError(
             f"Refusing this call on tag '{tag}': {trust['bot_identity_error']}. The Bot Account "

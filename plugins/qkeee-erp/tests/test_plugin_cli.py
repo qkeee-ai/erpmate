@@ -141,9 +141,10 @@ class SameCodePathTests(CliTestCase):
         with patch.object(init_bot, "run_dry_run", return_value={}) as dry, \
                 patch.object(init_bot, "run_real", return_value={}) as real:
             self.run_cli(["init-bot", "--dry-run", "--requested-by", REQ])
-            self.run_cli(["init-bot", "--confirm-token", "t", "--issued-at", "9", "--requested-by", REQ])
-        dry.assert_called_once_with("dev", REQ)
-        real.assert_called_once_with("dev", REQ, "t", 9)
+            self.run_cli(["init-bot", "--confirm-token", "t", "--issued-at", "9", "--requested-by", REQ,
+                          "--domains", "procurement, inventory", "--strip-stock-roles"])
+        dry.assert_called_once_with("dev", REQ, [], False)
+        real.assert_called_once_with("dev", REQ, "t", 9, ["procurement", "inventory"], True)
 
 
 class SetupPendingTests(CliTestCase):

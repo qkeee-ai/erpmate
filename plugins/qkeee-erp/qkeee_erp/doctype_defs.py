@@ -133,6 +133,16 @@ ALL_DOCTYPES = [AUDIT_LOG]
 # setup_custom_perms()), so System Manager keeps its access.
 BOT_READ_GRANTS = ("Module Def", "Workflow")
 
+# `init-bot --domains` (agents ADR 0003 amendment 2026-10-13): the rights
+# init-bot may put on ROLE_NAME for business work. Never delete; never a
+# privileged doctype (operations.admin_key_doctypes() / UNSCOPED_DENY).
+# submit/cancel only on a submittable doctype.
+PROVISION_PTYPES = ("read", "create", "write", "submit", "cancel")
+
+# Master doctypes the agent writes through `unscoped.generic` (no domain
+# owns them). Granted with every --domains run. Adding one is a code change.
+UNSCOPED_PROVISION_DOCTYPES = ("Item", "Item Price", "Address", "Contact")
+
 
 # Fields whose type init_bot.py may change on an ALREADY-provisioned
 # instance, to converge it on the definitions above. Only these — nothing

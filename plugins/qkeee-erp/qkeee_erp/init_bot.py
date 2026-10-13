@@ -73,7 +73,8 @@ from .core.client import ConnectorError, _qkeee_env_file_path, _audit_insert, _a
 from .core.confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECONDS
 import urllib.parse
 
-from .doctype_defs import ALL_DOCTYPES, BOT_READ_GRANTS, MIGRATABLE_FIELDS, ROLE_NAME, ROLE_PAYLOAD
+from .doctype_defs import (ALL_DOCTYPES, AUDIT_LOG, BOT_READ_GRANTS, MIGRATABLE_FIELDS,
+                           PROVISION_PTYPES, ROLE_NAME, ROLE_PAYLOAD, UNSCOPED_PROVISION_DOCTYPES)
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +242,226 @@ def grant_bot_reads(tag: str, requested_by: str, grants: list, approval_note: st
     return list(grants)
 
 
+# ---------------------------------------------------------------------------
+# Bot user + business rights (agents ADR 0003 amendment 2026-10-13)
+# ---------------------------------------------------------------------------
+# Both ops write the bot's own rights, so both are exempt from the
+# self-escalation rule like the two above: Operator-run from this script,
+# cli=False (the agent can never reach them), and each prepare() accepts
+# only the narrow shape below. The exact rows are bound by the plan token.
+
+def _privileged_doctypes() -> frozenset:
+    return operations.admin_key_doctypes() | operations.UNSCOPED_DENY
+
+
+def _assign_bot_role_prepare(args, ctx):
+    """Set the bot user's roles: may add ROLE_NAME and remove roles, never
+    add any other role."""
+    if set(args) != {"user", "roles_before", "roles_after"}:
+        raise core_client.DoctypeNotAllowedError(
+            "provisioning.assign_bot_role takes exactly user, roles_before, roles_after.")
+    before, after = set(args["roles_before"]), set(args["roles_after"])
+    if ROLE_NAME not in after or not after <= before | {ROLE_NAME}:
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.assign_bot_role may only add {ROLE_NAME!r} and remove roles; "
+            f"it would add {sorted(after - before - {ROLE_NAME})}.")
+    return operations.PreparedRequest(
+        transport="resource", doctype="User", action="update", name=args["user"],
+        body={"roles": [{"role": r} for r in sorted(after)]},
+        bound={"roles_before": sorted(before), "roles_after": sorted(after)})
+
+
+def _is_the_bot_with_roles_before(req, args, ctx):
+    """Precondition: `user` is the bot key's own user, and its roles are
+    still exactly roles_before (read live with the Admin Account)."""
+    core_client.reset_identity_caches(ctx.tag)
+    identity = core_client._bot_identity(ctx.tag)
+    if identity.get("roles_error"):
+        raise core_client.PreconditionFailedError(
+            f"provisioning.assign_bot_role: the bot's roles can't be read: {identity['roles_error']}")
+    if (identity.get("user") or "").lower() != str(args["user"]).lower():
+        raise core_client.PreconditionFailedError(
+            f"provisioning.assign_bot_role: {args['user']!r} is not the bot key's user "
+            f"({identity.get('user')!r}).")
+    if sorted(identity.get("roles") or []) != sorted(args["roles_before"]):
+        raise core_client.PreconditionFailedError(
+            "provisioning.assign_bot_role: the bot's roles changed since the plan — run --dry-run again.")
+
+
+def _grant_bot_permission_prepare(args, ctx):
+    """One permlevel-0 step on ROLE_NAME: "add" (a new row, read ticked) or
+    tick one of PROVISION_PTYPES. Never delete, never a privileged doctype."""
+    steps = ("add",) + PROVISION_PTYPES
+    if set(args) != {"doctype", "step"} or args["step"] not in steps:
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.grant_bot_permission takes doctype and step (one of {steps}).")
+    doctype = args["doctype"]
+    if doctype in _privileged_doctypes():
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.grant_bot_permission never grants on privileged doctype {doctype!r}.")
+    if args["step"] == "add":
+        path, body, ptype, audit_action = (_PM + "add", {"parent": doctype, "role": ROLE_NAME,
+                                                         "permlevel": 0}, "create", "Create")
+    else:
+        path, body, ptype, audit_action = (
+            _PM + "update", {"doctype": doctype, "role": ROLE_NAME, "permlevel": 0,
+                             "ptype": args["step"], "value": 1, "if_owner": 0}, "write", "Update")
+    return operations.PreparedRequest(
+        transport="rpc", doctype="Custom DocPerm", action=f"grant_bot_permission_{args['step']}",
+        rpc_path=path, body=body, rbac_ptype=ptype, audit_action=audit_action,
+        audit_doctype="DocType", audit_reference=doctype)
+
+
+operations.register_operation(operations.Operation(
+    key="provisioning.assign_bot_role", domain=None,
+    summary=f"give the bot user the {ROLE_NAME} role (and optionally strip stock roles)",
+    prepare=_assign_bot_role_prepare, preconditions=(_is_the_bot_with_roles_before,),
+    token_policy=operations.POLICY_NONE, credential="admin", allowlist_domain=None,
+    skip_comment=True, cli=False, self_escalation_exempt=True))
+
+operations.register_operation(operations.Operation(
+    key="provisioning.grant_bot_permission", domain=None,
+    summary=f"grant the {ROLE_NAME} role one business permission (never delete)",
+    prepare=_grant_bot_permission_prepare, token_policy=operations.POLICY_NONE,
+    credential="admin", allowlist_domain=None, skip_comment=True, cli=False,
+    self_escalation_exempt=True))
+
+
+def provisionable_domains() -> dict:
+    """{domain: [doctypes]} the bot writes with its own key."""
+    from .discover import bot_permissions
+    return bot_permissions()["bot_write_doctypes"]
+
+
+def _meta_bundle(tag: str, doctype: str) -> list:
+    """getdoctype's bundle (the doctype, then its child tables), read with
+    the Admin Account."""
+    cfg = core_client.get_env_config(tag, credential="admin")
+    return core_client._request(cfg, "GET", core_client._MERGED_META_PATH,
+                                params={"doctype": doctype}).get("docs") or []
+
+
+def bot_permission_matrix(tag: str, domains) -> tuple:
+    """({doctype: {ptype}}, skipped, not_found) for `domains`: each write doctype of
+    each domain plus UNSCOPED_PROVISION_DOCTYPES gets read/create/write, and
+    submit/cancel when submittable; each mandatory Link target (child
+    tables included) gets read. A privileged doctype is skipped, never
+    granted: `skipped` lists it for an admin to decide by hand. A write
+    doctype missing on the instance (its app not installed) goes to
+    `not_found`."""
+    available = provisionable_domains()
+    unknown = sorted(set(domains) - set(available))
+    if unknown:
+        raise ConnectorError(f"Unknown or non-bot domain(s) {unknown}. Choose from "
+                             f"{sorted(available)}.")
+    privileged = _privileged_doctypes()
+    write_doctypes = sorted({dt for d in domains for dt in available[d]}
+                            | set(UNSCOPED_PROVISION_DOCTYPES))
+    matrix, skipped, not_found = {}, set(), []
+
+    def grant(doctype, ptypes):
+        if doctype in privileged:
+            skipped.add(doctype)
+        else:
+            matrix.setdefault(doctype, set()).update(ptypes)
+
+    for doctype in write_doctypes:
+        try:
+            bundle = _meta_bundle(tag, doctype)
+        except ConnectorError as e:
+            if "(404)" in str(e) or "DoesNotExistError" in str(e):
+                not_found.append(doctype)
+                continue
+            raise
+        main = next((d for d in bundle if d.get("name") == doctype), {})
+        grant(doctype, {"read", "create", "write"}
+              | ({"submit", "cancel"} if main.get("is_submittable") else set()))
+        for doc in bundle:
+            for f in doc.get("fields") or []:
+                if f.get("reqd") and f.get("fieldtype") == "Link" and f.get("options"):
+                    grant(f["options"], {"read"})
+    return matrix, sorted(skipped), not_found
+
+
+def _live_role_permissions(tag: str) -> list:
+    """Every permission row of ROLE_NAME (Role Permission Manager, admin key)."""
+    cfg = core_client.get_env_config(tag, credential="admin")
+    return core_client._request(cfg, "GET", _PM + "get_permissions",
+                                params={"role": ROLE_NAME}).get("message") or []
+
+
+def _business_plan(tag: str, domains) -> dict:
+    """The steps to reach the matrix, and the role's rights beyond it
+    (reported, never removed)."""
+    matrix, skipped, not_found = bot_permission_matrix(tag, domains)
+    rows = {r.get("parent"): r for r in _live_role_permissions(tag)
+            if not int(r.get("permlevel") or 0)}
+    steps = []
+    for doctype in sorted(matrix):
+        row = rows.get(doctype)
+        have = {"read"} if row is None else {p for p in PROVISION_PTYPES if int(row.get(p) or 0)}
+        if row is None:
+            steps.append(f"{doctype}: add")
+        steps += [f"{doctype}: {p}" for p in PROVISION_PTYPES if p in matrix[doctype] - have]
+    expected = {dt: set(p) for dt, p in matrix.items()}
+    for dt in BOT_READ_GRANTS:
+        expected.setdefault(dt, set()).add("read")
+    audit_row = next(r for r in AUDIT_LOG["permissions"] if r["role"] == ROLE_NAME)
+    expected[AUDIT_LOG["name"]] = {p for p in PROVISION_PTYPES if audit_row.get(p)}
+    extras = []
+    for doctype, row in sorted(rows.items()):
+        held = {p for p in PROVISION_PTYPES + ("delete", "amend") if int(row.get(p) or 0)}
+        beyond = held - expected.get(doctype, set())
+        if beyond:
+            extras.append(f"{doctype}: {', '.join(sorted(beyond))}")
+    return {"business_grants": steps, "skipped_privileged": skipped, "extra_rights": extras,
+            "doctypes_not_found": not_found}
+
+
+def _bot_role_plan(tag: str, strip_stock_roles: bool) -> dict:
+    """The bot user's role change, if any. Reads the bot's roles with the
+    Admin Account; an unreadable identity is reported, not guessed."""
+    core_client.reset_identity_caches(tag)
+    identity = core_client._bot_identity(tag)
+    if identity.get("roles_error"):
+        return {"bot_role_change": None, "bot_stock_roles": [],
+                "bot_identity_error": identity["roles_error"]}
+    before = sorted(identity.get("roles") or [])
+    stock = core_client.stock_roles(before)
+    after = set(before) | {ROLE_NAME}
+    if strip_stock_roles:
+        after -= set(stock)
+    after = sorted(after)
+    change = None if after == before else {"user": identity["user"], "roles_before": before,
+                                           "roles_after": after}
+    return {"bot_role_change": change, "bot_stock_roles": stock, "bot_identity_error": None}
+
+
+def assign_bot_role(tag: str, requested_by: str, change: dict, approval_note: str) -> dict:
+    operations.run_operation("provisioning.assign_bot_role", dict(change),
+                             operations.WriteContext(tag=tag, mode="read-write",
+                                                     requested_by=requested_by,
+                                                     user_approved=True,
+                                                     approval_note=approval_note))
+    print(f"Set {change['user']}'s roles: {change['roles_before']} -> {change['roles_after']}.")
+    return change
+
+
+def grant_business_permissions(tag: str, requested_by: str, steps: list,
+                               approval_note: str) -> list:
+    for step in steps:
+        doctype, _, what = step.partition(": ")
+        operations.run_operation("provisioning.grant_bot_permission",
+                                 {"doctype": doctype, "step": what},
+                                 operations.WriteContext(tag=tag, mode="read-write",
+                                                         requested_by=requested_by,
+                                                         user_approved=True,
+                                                         approval_note=approval_note))
+        print(f"Granted {ROLE_NAME} {'a new row (read)' if what == 'add' else what} on "
+              f"'{doctype}'.")
+    return list(steps)
+
+
 def ensure_qkeee_env_file_skeleton() -> bool:
     """Create qkeee-erp.env with a header comment ONLY (no tag lines, no
     secrets) if it doesn't already exist. Returns True if it was created,
@@ -278,7 +499,8 @@ def ensure_qkeee_env_file_skeleton() -> bool:
 
 def _init_plan_token(tag: str, requested_by: str, role_needed: bool,
                       doctypes_needed: list, issued_at: int = None,
-                      fields_to_migrate: list = (), bot_read_grants: list = ()) -> str:
+                      fields_to_migrate: list = (), bot_read_grants: list = (),
+                      bot_role_change: dict = None, business_grants: list = ()) -> str:
     """Token over the init plan: which tag, who's running it, whether the
     Role needs creating, and exactly which doctype names need creating
     (sorted, so ordering never causes a spurious mismatch). issued_at
@@ -295,6 +517,8 @@ def _init_plan_token(tag: str, requested_by: str, role_needed: bool,
         doctypes_needed=sorted(doctypes_needed),
         fields_to_migrate=sorted(fields_to_migrate),
         bot_read_grants=sorted(bot_read_grants),
+        bot_role_change=bot_role_change,
+        business_grants=sorted(business_grants),
         issued_at=int(issued_at),
     )
 
@@ -303,7 +527,7 @@ def _step(label):
     print(f"--- {label} ---")
 
 
-def compute_plan(tag: str) -> dict:
+def compute_plan(tag: str, domains=None, strip_stock_roles: bool = False) -> dict:
     """Existence-checks the Role and the (now-single) Audit Log doctype
     against the live target right now. Returns what's actually needed —
     re-run fresh on every dry-run AND every real run, so a real run's
@@ -322,9 +546,51 @@ def compute_plan(tag: str) -> dict:
         want = {f["fieldname"]: f["fieldtype"] for f in _definition(name)["fields"]}
         fields_to_migrate += [f"{name}.{fn}: {live.get(fn)} -> {want[fn]}"
                               for fn in fieldnames if live.get(fn) != want[fn]]
-    return {"role_needed": role_needed, "doctypes_needed": doctypes_needed,
+    plan = {"role_needed": role_needed, "doctypes_needed": doctypes_needed,
             "fields_to_migrate": fields_to_migrate,
-            "bot_read_grants": _bot_read_grants_needed(tag)}
+            "bot_read_grants": _bot_read_grants_needed(tag),
+            **_bot_role_plan(tag, strip_stock_roles),
+            "business_grants": [], "skipped_privileged": [], "extra_rights": [],
+            "doctypes_not_found": []}
+    if domains:
+        plan.update(_business_plan(tag, domains))
+    return plan
+
+
+def _plan_token(tag, requested_by, plan, issued_at):
+    return _init_plan_token(tag, requested_by, plan["role_needed"], plan["doctypes_needed"],
+                            issued_at=issued_at, fields_to_migrate=plan["fields_to_migrate"],
+                            bot_read_grants=plan.get("bot_read_grants", []),
+                            bot_role_change=plan.get("bot_role_change"),
+                            business_grants=plan.get("business_grants", []))
+
+
+def _needs_action(plan) -> bool:
+    return bool(plan["role_needed"] or plan["doctypes_needed"] or plan["fields_to_migrate"]
+                or plan.get("bot_read_grants") or plan.get("bot_role_change")
+                or plan.get("business_grants"))
+
+
+def _print_bot_findings(plan) -> None:
+    if plan.get("bot_identity_error"):
+        print(f"WARN: the bot's roles could not be read with the Admin Account "
+              f"({plan['bot_identity_error']}). Set QKEEE_ERP_<TAG>_ADMIN_API_KEY/SECRET; the "
+              f"role assignment is left out of this plan.")
+    stock = set(plan.get("bot_stock_roles") or [])
+    change = plan.get("bot_role_change")
+    kept_stock = sorted(stock & set(change["roles_after"]) if change else stock)
+    if kept_stock:
+        print(f"WARN: the bot user holds stock role(s) {kept_stock}. Every business call is "
+              f"refused while it does (agents ADR 0003). Re-run with --strip-stock-roles to "
+              f"remove them.")
+    for doctype in plan.get("skipped_privileged") or []:
+        print(f"NOTE: '{doctype}' is a privileged doctype (a mandatory Link target); init-bot "
+              f"never grants on it. An admin decides by hand.")
+    for doctype in plan.get("doctypes_not_found") or []:
+        print(f"NOTE: '{doctype}' does not exist on this instance (its app is not installed); "
+              f"skipped.")
+    for extra in plan.get("extra_rights") or []:
+        print(f"NOTE: {ROLE_NAME} holds rights beyond the plan (not removed): {extra}.")
 
 
 def _live_doctype(tag: str, name: str) -> dict:
@@ -450,22 +716,19 @@ def log_role_provisioning(tag: str, requested_by: str, role_created: bool, appro
           + (f" ({create_name})." if create_name else " — insert failed, see WARN above."))
 
 
-def run_dry_run(tag: str, requested_by: str) -> dict:
+def run_dry_run(tag: str, requested_by: str, domains=None, strip_stock_roles: bool = False) -> dict:
     _step("Health check")
     print(json.dumps(core_client.health_check(tag), indent=2))
 
     _step("Plan")
-    plan = compute_plan(tag)
-    nothing_needed = (not plan["role_needed"] and not plan["doctypes_needed"]
-                      and not plan["fields_to_migrate"] and not plan.get("bot_read_grants"))
-    if nothing_needed:
-        print("Nothing to do — role, doctype and read grants already in place.")
+    plan = compute_plan(tag, domains, strip_stock_roles)
+    _print_bot_findings(plan)
+    if not _needs_action(plan):
+        print("Nothing to do — role, doctype, bot role and grants already in place.")
         return {"tag": tag, "dry_run": True, **plan, "confirm_token": None, "issued_at": None}
 
     issued_at = int(time.time())
-    token = _init_plan_token(tag, requested_by, plan["role_needed"], plan["doctypes_needed"],
-                              issued_at=issued_at, fields_to_migrate=plan["fields_to_migrate"],
-                              bot_read_grants=plan.get("bot_read_grants", []))
+    token = _plan_token(tag, requested_by, plan, issued_at)
 
     if plan["role_needed"]:
         print(f"[dry-run] Would create Role '{ROLE_NAME}'.")
@@ -480,6 +743,14 @@ def run_dry_run(tag: str, requested_by: str) -> dict:
         doctype, _, step = grant.partition(": ")
         print(f"[dry-run] Would grant Role '{ROLE_NAME}' read on '{doctype}' (permlevel 0, "
               f"read only; {'new Custom DocPerm row' if step == 'add' else 'tick read on its row'}).")
+    change = plan.get("bot_role_change")
+    if change:
+        print(f"[dry-run] Would set bot user {change['user']}'s roles: {change['roles_before']} "
+              f"-> {change['roles_after']}.")
+    for grant in plan.get("business_grants", []):
+        doctype, _, what = grant.partition(": ")
+        print(f"[dry-run] Would grant Role '{ROLE_NAME}' "
+              f"{'a new row (read)' if what == 'add' else what} on '{doctype}'.")
 
     _step("Confirm token")
     print(f"To run this for real, re-invoke with:\n"
@@ -490,17 +761,17 @@ def run_dry_run(tag: str, requested_by: str) -> dict:
     return {"tag": tag, "dry_run": True, **plan, "confirm_token": token, "issued_at": issued_at}
 
 
-def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) -> dict:
+def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int, domains=None,
+             strip_stock_roles: bool = False) -> dict:
     _step("Health check")
     print(json.dumps(core_client.health_check(tag), indent=2))
 
     _step("Plan (recomputed against current target state)")
-    plan = compute_plan(tag)
+    plan = compute_plan(tag, domains, strip_stock_roles)
+    _print_bot_findings(plan)
 
     grants = plan.get("bot_read_grants", [])
-    action_needed = (plan["role_needed"] or plan["doctypes_needed"] or plan["fields_to_migrate"]
-                     or grants)
-    if action_needed:
+    if _needs_action(plan):
         if not confirm_token or issued_at is None:
             raise ConnectorError(
                 "This run would create/change records but no --confirm-token/--issued-at "
@@ -513,10 +784,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
                 f"{DEFAULT_TOKEN_TTL_SECONDS // 60} minutes). Run --dry-run again to get "
                 f"a fresh token."
             )
-        expected = _init_plan_token(tag, requested_by, plan["role_needed"],
-                                     plan["doctypes_needed"], issued_at=issued_at,
-                                     fields_to_migrate=plan["fields_to_migrate"],
-                                     bot_read_grants=grants)
+        expected = _plan_token(tag, requested_by, plan, issued_at)
         if expected != confirm_token:
             raise ConnectorError(
                 "--confirm-token does not match the current plan for this target. Either "
@@ -542,6 +810,16 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
     _step(f"Read grants for {ROLE_NAME}")
     granted = grant_bot_reads(tag, requested_by, grants, approval_note) if grants else []
 
+    _step("Bot user role")
+    role_change = plan.get("bot_role_change")
+    if role_change:
+        assign_bot_role(tag, requested_by, role_change, approval_note)
+
+    _step(f"Business permissions for {ROLE_NAME}")
+    business = plan.get("business_grants", [])
+    business_granted = (grant_business_permissions(tag, requested_by, business, approval_note)
+                        if business else [])
+
     _step("Qkeee Bot Audit Log: recording Role provisioning")
     log_role_provisioning(tag, requested_by, role_created, approval_note)
 
@@ -559,6 +837,10 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         "doctypes_already_present": [name for name, created in results.items() if not created],
         "fields_migrated": migrated,
         "bot_read_grants": granted,
+        "bot_role_change": role_change,
+        "business_grants": business_granted,
+        "skipped_privileged": plan.get("skipped_privileged", []),
+        "extra_rights": plan.get("extra_rights", []),
         "qkeee_env_file_created": env_created,
     }
     print(json.dumps(summary, indent=2))
@@ -571,13 +853,12 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int) ->
         "  1. Confirm the steady-state QKEEE_ERP_<TAG>_API_KEY/SECRET in "
         "qkeee-erp.env belong to a dedicated bot user that is NOT Administrator "
         "and does NOT hold System Manager.\n"
-        "  2. Give that bot user the '" + ROLE_NAME + "' role and no "
-        "other role (agents ADR 0003).\n"
+        "  2. The bot user holds '" + ROLE_NAME + "' and no other role "
+        "(this run assigns it; --strip-stock-roles removes stock roles).\n"
         "  3. Keep QKEEE_ERP_<TAG>_ADMIN_API_KEY/SECRET set: the Admin Account "
         "reads the bot's and the requester's roles for every business call.\n"
         "  4. Run `erp_discover health` on tag " + tag + " and confirm "
-        "bot_roles is ['" + ROLE_NAME + "'] and gaps is []. "
-        "`erp_discover bot_permissions` lists the business DocPerms to add on "
-        "the role."
+        "bot_roles is ['" + ROLE_NAME + "'] and gaps is []. Re-run with "
+        "--domains <list> to grant the business permissions those domains need."
     )
     return summary

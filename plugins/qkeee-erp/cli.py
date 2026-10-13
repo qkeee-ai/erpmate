@@ -133,6 +133,10 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--dry-run", action="store_true", help="report the plan and print a confirm token")
     p.add_argument("--confirm-token", help="from a prior --dry-run")
     p.add_argument("--issued-at", type=int, help="from a prior --dry-run")
+    p.add_argument("--domains", help="comma-separated domains whose permissions to grant the bot "
+                                     "role (e.g. procurement,inventory); omit to grant none")
+    p.add_argument("--strip-stock-roles", action="store_true",
+                   help="remove stock roles from the bot user (shown in the plan first)")
     _common(p, True)
 
 
@@ -307,10 +311,12 @@ def _init_bot(a, tag: str, requester: str) -> int:
     from .qkeee_erp.core import client
     try:
         requester = _cli_requester(requester)
+        domains = [d.strip() for d in (a.domains or "").split(",") if d.strip()]
         if a.dry_run:
-            init_bot.run_dry_run(tag, requester)
+            init_bot.run_dry_run(tag, requester, domains, a.strip_stock_roles)
         else:
-            init_bot.run_real(tag, requester, a.confirm_token, a.issued_at)
+            init_bot.run_real(tag, requester, a.confirm_token, a.issued_at, domains,
+                              a.strip_stock_roles)
     except client.GateRefusal as e:
         print(f"ERROR: refused, nothing was sent: {e}", file=sys.stderr)
         return EXIT_REFUSED

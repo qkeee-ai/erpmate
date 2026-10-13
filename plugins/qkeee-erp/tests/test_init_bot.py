@@ -19,6 +19,22 @@ from unittest.mock import patch
 
 from qkeee_erp_plugin.qkeee_erp import init_bot
 
+NO_BOT_CHANGE = {"bot_role_change": None, "bot_stock_roles": [], "bot_identity_error": None}
+
+
+# compute_plan() reads the bot's roles with the Admin Account; these tests
+# cover the other plan parts and must stay offline. (tearDownModule, not
+# addModuleCleanup: pytest does not run unittest module cleanups.)
+_BOT_ROLE_PLAN = patch.object(init_bot, "_bot_role_plan", return_value=dict(NO_BOT_CHANGE))
+
+
+def setUpModule():
+    _BOT_ROLE_PLAN.start()
+
+
+def tearDownModule():
+    _BOT_ROLE_PLAN.stop()
+
 
 class LogRoleProvisioningTests(unittest.TestCase):
     @patch.object(init_bot, "_audit_submit")

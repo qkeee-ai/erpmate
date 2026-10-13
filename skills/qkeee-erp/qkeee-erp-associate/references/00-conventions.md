@@ -462,8 +462,11 @@ Rules:
    pipeline refuses it (agents ADR 0003). The fix is a human admin in the
    ERPNext UI.
 4. A `bot` gap is fixed on the `Qkeee Bot` role, never by giving the bot a
-   stock role. `hermes qkeee-erp init-bot` grants the two reads the bot needs for
-   discovery (Module Def, Workflow). The bot needs no read on User or
+   stock role. `hermes qkeee-erp init-bot` (Operator-only) grants the two reads
+   the bot needs for discovery (Module Def, Workflow), assigns `Qkeee Bot` to
+   the bot user, and with `--domains` grants the business permissions those
+   domains need. For a bot gap, tell the user an Operator can run it; never
+   ask them to add rows one by one. The bot needs no read on User or
    DocType: the Admin Account does the permission check's reads. An
    `admin` gap (`rbac_mirror`) is fixed by an Operator or an admin, never
    by widening the bot.

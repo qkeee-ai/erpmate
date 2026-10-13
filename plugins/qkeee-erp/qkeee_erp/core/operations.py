@@ -575,7 +575,7 @@ class PostHooks:
                                   approval_note=f"compensating delete: {reason}")
         _c._validate_prod_requester(ctx.tag, ctx.requested_by, req.rbac_doctype, req.rbac_ptype,
                                      docname=req.name, for_write=True, domain=self._op.domain,
-                                     **ctx.audit_kwargs())
+                                     credential=self._op.credential, **ctx.audit_kwargs())
         return _send(self._op, req, ctx, user_approved=False, skip_comment=True)
 
 
@@ -697,7 +697,7 @@ def run_operation(op_key: str, args: dict, ctx: WriteContext) -> dict:
     verified = _verify_token(op, op.policy_for(req), req, ctx)    # 8
     _c._validate_prod_requester(                                  # 9
         ctx.tag, ctx.requested_by, req.rbac_doctype, req.rbac_ptype, docname=req.name,
-        for_write=True, domain=op.domain, **ctx.audit_kwargs())
+        for_write=True, domain=op.domain, credential=op.credential, **ctx.audit_kwargs())
     result = _send(op, req, ctx, user_approved=verified or ctx.user_approved, args=args)  # 10-12
     if op.post:
         created = None
