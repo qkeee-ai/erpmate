@@ -71,6 +71,13 @@ services:
       # the same path and the volume line above can reference it.
       - HERMES_CWD=${HERMES_CWD:-/opt/cwd}
       - TERMINAL_CWD=${HERMES_CWD:-/opt/cwd}
+      # The base image sets HERMES_WRITE_SAFE_ROOT=/opt/data, and the gateway
+      # checks every write_file/patch path against it, also when the file tools
+      # run in the terminal sidecar. Without the cwd here, every write to the
+      # agent's own working directory is denied: specs then fall back into the
+      # sidecar's terminal-home volume, which no Operator or user can see
+      # (2026-10-14 Item run review, issue 03). Separator is ':' (Linux).
+      - HERMES_WRITE_SAFE_ROOT=/opt/data:${HERMES_CWD:-/opt/cwd}
       # 0 = skip the boot-time component-version drift check. JEV_REF/LCM_REF
       # float by default, so a rebuild can move jev's or LCM's behaviour with no
       # error; 0156-component-versions records each resolved SHA on the volume
