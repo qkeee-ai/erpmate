@@ -182,6 +182,14 @@ class ExecuteWriteToolTests(ToolTestCase):
         out = self.call(self.tools({}), "erp_execute_write", {"phase": "list_ops"})
         self.assertTrue(any(o["op"] == "sales.generic" for o in out["result"]))
 
+    def test_list_ops_passes_op_and_domain_filters(self):
+        tools = self.tools({})
+        out = self.call(tools, "erp_execute_write", {"phase": "list_ops", "op": "unscoped.generic"})
+        self.assertEqual([o["op"] for o in out["result"]], ["unscoped.generic"])
+        out = self.call(tools, "erp_execute_write", {"phase": "list_ops", "domain": "sales"})
+        self.assertTrue(out["result"])
+        self.assertTrue(all(o["op"].startswith("sales.") for o in out["result"]))
+
 
 if __name__ == "__main__":
     unittest.main()

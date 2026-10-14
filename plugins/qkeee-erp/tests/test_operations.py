@@ -67,6 +67,7 @@ TAMPER = {
     "system_admin.create_webhook": "reason", "system_admin.toggle_workflow": "reason",
     "system_admin.permission_add": "reason", "system_admin.permission_update": "reason",
     "system_admin.permission_remove": "reason", "system_admin.permission_reset": "reason",
+    "notify.summary_email": "title",
 }
 NO_EXAMPLE = {"mis.generic"}  # refuses every write — see OwnershipAndUnscopedTests
 
@@ -262,6 +263,10 @@ class OperationMatrixTests(unittest.TestCase):
                 "reply without code": (dict(user_confirmation_text="yes go ahead"),
                                        core_client.UnconfirmedByUserError, full_args),
             }
+            if out["policy"] == operations.POLICY_TOKEN:
+                # Token only (notify.summary_email): no user code to check.
+                cases.pop("no user reply")
+                cases.pop("reply without code")
             for case, (overrides, exc, use_args) in cases.items():
                 with self.subTest(op=key, case=case):
                     c = testsupport.ctx(**{**ctx.__dict__, **overrides})
@@ -447,6 +452,7 @@ class InvariantTests(unittest.TestCase):
         "inventory": {"get_stock_reconciliation_items": "gated read",
                       "get_bin_qty": "gated read", "bin_rows_to_actual_source_qty": "pure"},
         "fixed_assets": {"map_sales_invoice": "gated read"},
+        "notify": {"render_summary": "pure"},
         "system_admin": {"get_roles_and_doctypes": "gated read",
                          "get_permissions": "gated read", "get_scheduler_status": "gated read"},
     }
@@ -467,6 +473,55 @@ class InvariantTests(unittest.TestCase):
         from qkeee_erp_plugin.qkeee_erp import execute_write
         listed = {o["op"] for o in execute_write.list_ops()}
         self.assertEqual(listed, {op.key for op in operations.list_operations()})
+
+    def test_list_ops_filters_by_op(self):
+        from qkeee_erp_plugin.qkeee_erp import execute_write
+        rows = execute_write.list_ops(op="unscoped.generic")
+        self.assertEqual([r["op"] for r in rows], ["unscoped.generic"])
+
+    def test_list_ops_filters_by_domain(self):
+        from qkeee_erp_plugin.qkeee_erp import execute_write
+        rows = execute_write.list_ops(domain="inventory")
+        self.assertTrue(rows)
+        self.assertTrue(all(r["op"].startswith("inventory.") for r in rows))
+
+    def test_list_ops_unknown_filter_is_refused(self):
+        from qkeee_erp_plugin.qkeee_erp import execute_write
+        for kw in ({"op": "nope.generic"}, {"domain": "nope"}):
+            with self.subTest(**kw), self.assertRaises(core_client.InvalidArgumentsError) as e:
+                execute_write.list_ops(**kw)
+            self.assertIn("unscoped.generic", str(e.exception))
+
+
+class ApprovalBasisTests(unittest.TestCase):
+    """Issue 02 (item-run review): the Audit Log note says whether the
+    approval was verified by the gate or only asserted by the agent."""
+
+    def _note(self, key, args, **ctx_kw):
+        with connector():
+            full_args, ctx, _ = testsupport.render(key, copy.deepcopy(args), **ctx_kw)
+        with connector() as m:
+            operations.run_operation(key, full_args, ctx)
+        return m["record_audit_log_start"].call_args.kwargs
+
+    def test_token_and_user_code_is_verified(self):
+        start = self._note("unscoped.generic", {"doctype": "Item", "action": "create",
+                                                "payload": {"item_code": "X"}})
+        self.assertTrue(start["user_approved"])
+        self.assertIn("[approval: token+code]", start["approval_note"])
+
+    def test_draft_with_agent_flag_is_agent_asserted(self):
+        start = self._note("inventory.generic", {"doctype": "Material Request", "action": "create",
+                                                 "payload": {"material_request_type": "Purchase"}},
+                           user_approved=True)
+        self.assertTrue(start["user_approved"])
+        self.assertIn("[approval: agent-asserted]", start["approval_note"])
+
+    def test_draft_without_flag_has_no_approval(self):
+        start = self._note("inventory.generic", {"doctype": "Material Request", "action": "create",
+                                                 "payload": {"material_request_type": "Purchase"}})
+        self.assertFalse(start["user_approved"])
+        self.assertIn("[approval: none]", start["approval_note"])
 
 
 class OwnershipAndUnscopedTests(unittest.TestCase):

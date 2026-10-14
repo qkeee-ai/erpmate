@@ -13,17 +13,20 @@ confirmation token -> RBAC -> audit -> send.
 
 # Import every domain module for its side effect: registering its allowlist
 # and its operations. manufacturing/doc_extraction have no write path.
+# notify is not a business domain (no generic op): its one operation logs
+# the task summary email.
 from .domains import (  # noqa: F401
     accounts,
     fixed_assets,
     hr_payroll,
     inventory,
     mis,
+    notify,
     procurement,
     sales,
     system_admin,
 )
-from .core import operations
+from .core import client, operations
 
 _DOMAIN_MODULES = {
     m.DOMAIN_NAME: m for m in (accounts, fixed_assets, hr_payroll, inventory, mis,
@@ -44,14 +47,26 @@ def _confirmation_label(op) -> str:
     return f"per action: {'/'.join(gated)}" if gated else "none"
 
 
-def list_ops() -> list:
+def list_ops(op: str = None, domain: str = None) -> list:
+    """Every CLI operation, or only `op` (one key) / `domain` (key prefix,
+    e.g. "inventory", "unscoped"): the full list is ~14k chars of context
+    when the agent needs one operation."""
+    ops = operations.list_operations()
+    keys = sorted(o.key for o in ops)
+    if op is not None:
+        ops = [o for o in ops if o.key == op]
+    if domain is not None:
+        ops = [o for o in ops if o.key.split(".", 1)[0] == domain]
+    if not ops:
+        raise client.InvalidArgumentsError(
+            f"list_ops: no operation matches op={op!r} domain={domain!r}. Registered: {keys}.")
     out = []
-    for op in operations.list_operations():
+    for o in ops:
         out.append({
-            "op": op.key, "summary": op.summary, "credential": op.credential,
-            "confirmation": _confirmation_label(op),
-            "owns": sorted(f"{d} {a}" for d, a in op.owns),
-            "args": op.args_help,
-            "example_args": op.example_args,
+            "op": o.key, "summary": o.summary, "credential": o.credential,
+            "confirmation": _confirmation_label(o),
+            "owns": sorted(f"{d} {a}" for d, a in o.owns),
+            "args": o.args_help,
+            "example_args": o.example_args,
         })
     return out

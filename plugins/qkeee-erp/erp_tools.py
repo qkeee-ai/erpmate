@@ -93,7 +93,8 @@ SCHEMAS = {
         required=("action",)),
     "erp_execute_write": _schema(
         "erp_execute_write",
-        "The only ERPNext write path. list_ops: every registered operation and its arguments. render: "
+        "The only ERPNext write path. list_ops: the registered operations and their arguments; pass op "
+        "(one key) or domain (key prefix, e.g. inventory, unscoped) to get only those. render: "
         "prepare the exact request; show its request and confirmation_code to the user and wait for "
         "their reply. execute: run the operation with the rendered args unchanged, plus "
         "confirmation_token, issued_at and the user's own reply, verbatim, as user_confirmation_text "
@@ -101,14 +102,22 @@ SCHEMAS = {
         "first failure. On write_failure, ask the user for the named fields; never fill a value they "
         "did not give.",
         {"phase": {"type": "string", "enum": ["list_ops", "render", "execute"]},
-         "op": {"type": "string", "description": "Operation key from list_ops, e.g. sales.generic."},
+         "op": {"type": "string", "description": "Operation key from list_ops, e.g. sales.generic. "
+                                                 "list_ops: return only this operation."},
+         "domain": {"type": "string",
+                    "description": "list_ops only: return only operations whose key starts with "
+                                   "this prefix, e.g. inventory, unscoped."},
          "args": {"type": "object", "description": "The operation's arguments."},
          "batch": {"type": "array", "items": {"type": "object"},
                    "description": 'execute only: [{"op", "args", "confirmation_token"?, "issued_at"?, '
                                   '"user_confirmation_text"?}] instead of op/args.'},
          "confirmation_token": {"type": "string"}, "issued_at": {"type": "integer"},
          "user_confirmation_text": {"type": "string"},
-         "user_approved": {"type": "boolean"}, "approval_note": {"type": "string"}},
+         "user_approved": {"type": "boolean",
+                           "description": "Set only after the user confirmed this exact payload in "
+                                          "a reply. On an operation with no confirmation token, the "
+                                          "Audit Log records it as agent-asserted."},
+         "approval_note": {"type": "string"}},
         required=("phase",)),
 }
 
@@ -283,7 +292,7 @@ class ErpTools:
     def _execute_write(self, args):
         phase = args.get("phase")
         if phase == "list_ops":
-            return _ok(execute_write.list_ops())
+            return _ok(execute_write.list_ops(op=args.get("op"), domain=args.get("domain")))
         if phase not in ("render", "execute"):
             raise client.ConnectorError(f"unknown erp_execute_write phase {phase!r}")
         batch = args.get("batch")

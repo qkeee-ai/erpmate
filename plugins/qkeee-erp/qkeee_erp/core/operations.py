@@ -583,13 +583,24 @@ class PostHooks:
 # Send (steps 10-13)
 # ---------------------------------------------------------------------------
 
+def _approval_basis(policy: str, verified: bool, agent_asserted: bool) -> str:
+    """What the Audit Log's `user_approved` rests on. Only a verified token
+    is proof; `user_approved=True` on a no-token operation is the agent's
+    word, so the note says so (item-run review issue 02)."""
+    if verified:
+        return "token+code" if policy == POLICY_TOKEN_USER_CODE else "token"
+    return "agent-asserted" if agent_asserted else "none"
+
+
 def _send(op: Operation, req: PreparedRequest, ctx: WriteContext, *, user_approved: bool,
-          skip_comment: bool = None, args: dict = None) -> dict:
+          skip_comment: bool = None, args: dict = None, approval_basis: str = None) -> dict:
     audit_cfg = _c.get_env_config(ctx.tag)
     send_cfg = audit_cfg if op.credential == "bot" else _c.get_env_config(ctx.tag, credential=op.credential)
     skip_comment = op.skip_comment if skip_comment is None else skip_comment
     label = op.comment_label or (f"qkeee-erp-associate/{op.domain}" if op.domain else _c.SKILL_LABEL)
     approval_note = ctx.approval_note or op.summary
+    if approval_basis:
+        approval_note = f"[approval: {approval_basis}] {approval_note}"
 
     payload_before = None
     if (req.transport == "resource" and req.action == "update"
@@ -694,11 +705,13 @@ def run_operation(op_key: str, args: dict, ctx: WriteContext) -> dict:
     _check_no_self_escalation(op, req, ctx)                       # 6c
     for check in op.preconditions:                                # 7
         check(req, args, ctx)
-    verified = _verify_token(op, op.policy_for(req), req, ctx)    # 8
+    policy = op.policy_for(req)
+    verified = _verify_token(op, policy, req, ctx)                # 8
     _c._validate_prod_requester(                                  # 9
         ctx.tag, ctx.requested_by, req.rbac_doctype, req.rbac_ptype, docname=req.name,
         for_write=True, domain=op.domain, credential=op.credential, **ctx.audit_kwargs())
-    result = _send(op, req, ctx, user_approved=verified or ctx.user_approved, args=args)  # 10-12
+    result = _send(op, req, ctx, user_approved=verified or ctx.user_approved, args=args,  # 10-12
+                   approval_basis=_approval_basis(policy, verified, ctx.user_approved))
     if op.post:
         created = None
         if req.transport == "resource" and req.action == "create" and isinstance(result, dict):

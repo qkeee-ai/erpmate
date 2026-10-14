@@ -77,21 +77,35 @@ and the action, and say that access, not connectivity, is the problem.
 
 ## 7. Write with confirmation
 
-1. `erp_execute_write` `list_ops`: find the operation and copy its
-   `example_args`. Keep the keys, replace the values.
+1. `erp_execute_write` `list_ops` with `op="<key>"` (or `domain="<prefix>"`):
+   copy the operation's `example_args`. Keep the keys, replace the values.
 2. `render` with `op` and `args`. When the operation needs confirmation,
    the result has `request`, `args`, `confirmation_token`, `issued_at` and
    `confirmation_code`.
 3. Show the user `request` and the code, for example "reply `yes 3F0A9C`
-   to confirm". Wait for their reply in a later turn.
+   to confirm". Wait for their reply in a later turn. Any reply that
+   contains the code confirms; `3F0A9C` alone is valid.
 4. `execute` with the same `op`, the rendered `args` unchanged,
    `confirmation_token`, `issued_at`, the user's reply verbatim as
    `user_confirmation_text`, and `latest_prompt`.
 
 - Never write `user_confirmation_text` yourself.
+- `user_approved=true` only after the user confirmed this exact payload
+  in a reply. On a write with no token, the Audit Log records it as
+  `[approval: agent-asserted]`; a verified token records
+  `[approval: token+code]`.
 - Any change after render is refused: other args, a changed record,
   another Requester, or more than 15 minutes. Render again and ask again.
 - An operation that needs no confirmation says so in its render result.
+
+## 7a. Task summary email
+
+`notify.summary_email` builds the summary email for the requester. Use
+it only after the user confirmed the task is complete. Render it, send
+`request.body.content` as HTML to `request.body.recipients` only, then
+execute it with the rendered values to log the email on the record's
+timeline. The full procedure is in the domain skill's spec procedure,
+step 8.
 
 ## 8. Handle failures honestly
 
