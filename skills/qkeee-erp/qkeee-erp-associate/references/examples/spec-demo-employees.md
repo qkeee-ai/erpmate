@@ -166,7 +166,7 @@ Warnings: none. Tag `qkeee-demo` still to be added (follow-up below).
 
 - Verified: both re-fetched; every mandatory field matches the table
   above; `company` and `gender` Links resolve.
-- Deviations: none.
+- Deviations: see the Deviations section.
 - Audit: `_audit_log_status: ok` for both writes.
 - Follow-ups: add tag `qkeee-demo` (user, ERPNext UI); remove both with
   the Teardown calls when the walkthrough ends.

@@ -58,8 +58,11 @@ unconditionally — neither is debug-gated or PROD-only.
   now a real query against this log, not a gap you have to explain away.
 - Does NOT prove: that a human actually read and approved a
   `user_approved: "Approved"` write — that field is a detection signal
-  set by the calling domain after its own confirm stage, not
-  independently verified by the connector. A `confirmation_token` match
+  set by the calling domain after its own confirm stage. The
+  `approval_note` prefix tells the two cases apart: `[approval:
+  token+code]` / `[approval: token]` means the gate verified a rendered
+  token; `[approval: agent-asserted]` means only the agent said so (a
+  no-token draft). A `confirmation_token` match
   (on a double-confirm write) proves recency/consistency of the rendered
   facts, never that a human said yes to them.
 - **Secondary cross-check, recommended for a real statutory audit:**

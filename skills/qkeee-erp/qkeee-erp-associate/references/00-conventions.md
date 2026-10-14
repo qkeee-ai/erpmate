@@ -292,7 +292,10 @@ write flow.
   write's confirm stage actually ran with the user first — it's a
   detection field for later scanning (did every write really get
   confirmed), not a second gate; omitting it logs `"Not Confirmed"` rather
-  than blocking the write.
+  than blocking the write. The row's `approval_note` starts with the
+  basis: `[approval: token+code]` or `[approval: token]` (the gate
+  verified a rendered token), `[approval: agent-asserted]` (no token; only
+  your `user_approved=True`), or `[approval: none]`.
 - **`session_id`, `channel_metadata`, `latest_prompt` — resolve once per
   logical session, pass on every write, never leave blank because the
   write "feels routine."** Live-observed: hand-writing a fresh one-off

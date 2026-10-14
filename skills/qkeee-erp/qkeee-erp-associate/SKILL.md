@@ -105,7 +105,9 @@ Every session, in order, before any domain action:
    Latch more only as the conversation needs it (e.g. procurement hands
    off to `doc-extraction`). For a single-domain read-only lookup, latch
    only `00-conventions.md`, `01-connectivity.md` and the one domain
-   file. Skip `02-`, `03-` and `grc-audit.md` unless needed.
+   file. Skip `02-`, `03-` and `grc-audit.md` unless needed. Load a
+   reference when the step that needs it starts, not all up front: every
+   loaded file is resent on every later call.
    **Done when:** one domain file is latched and named, or the fallback
    path (`02-environment-assessment.md` / `non-erpnext-adapter.md`) is
    declared.
@@ -124,8 +126,11 @@ Every session, in order, before any domain action:
 ## Domain table
 
 Latch the matching `references/domains/<slug>.md`. On its first use in a
-session, get its writable DocTypes from
-`erp_execute_write(phase="list_ops")` before proposing a write.
+session, get its operations from
+`erp_execute_write(phase="list_ops", domain="<slug prefix>")` (or
+`op="<key>"` for the one you will render) before proposing a write. The
+unfiltered list is long. For a create, run `erp_discover preflight` with
+the draft payload before `meta`; `preflight` lists the mandatory fields.
 
 | Domain slug | Core doctypes / territory |
 | --- | --- |
@@ -134,7 +139,7 @@ session, get its writable DocTypes from
 | `mis` | GL Entry, Trial Balance/P&L/Balance Sheet, Cost Center, Accounting Dimension — read-only, always |
 | `sales` | Customer, Quotation, Sales Order, Delivery Note |
 | `procurement` | Supplier, Purchase Order, Request for Quotation, Supplier Quotation |
-| `inventory` | Item, Warehouse, Stock Entry, Stock Reconciliation, Material Request, Batch, Serial No |
+| `inventory` | Item (master: `unscoped.generic`, see "Item master"), Warehouse, Stock Entry, Stock Reconciliation, Material Request, Batch, Serial No |
 | `manufacturing` | BOM, Work Order, Job Card — **unvalidated, no write path yet** |
 | `fixed-assets` | Asset, Asset Category, Asset Movement, Asset Maintenance, Asset Repair |
 | `system-admin` | User, Role, Role Profile, Workflow, Custom Field, Webhook, Notification |

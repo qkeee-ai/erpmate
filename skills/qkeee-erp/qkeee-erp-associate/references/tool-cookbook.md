@@ -61,9 +61,12 @@ and required fields, see the matching `domains/<slug>.md`; do not
 freehand a payload from this cookbook alone.
 
 ```
-# Every operation, its arguments, whether it needs a confirmation, and a
-# ready-to-edit worked example (`example_args`) for each one
-erp_execute_write(phase="list_ops")
+# One operation: its arguments, whether it needs a confirmation, and a
+# ready-to-edit worked example (`example_args`). Ask for the op you are
+# about to render; the full list is long.
+erp_execute_write(phase="list_ops", op="unscoped.generic")
+# One domain's operations (key prefix)
+erp_execute_write(phase="list_ops", domain="inventory")
 ```
 
 Start every write from that operation's `example_args`: replace the
@@ -93,7 +96,9 @@ need no token. `list_ops` shows each operation's rule.
    ```
 
 2. **Show.** Show the user `request` and the code, for example "reply
-   `yes 3F0A9C` to confirm". Wait for their reply in a later turn.
+   `yes 3F0A9C` to confirm". Wait for their reply in a later turn. The
+   gate accepts any reply that contains the code: `3F0A9C` alone is a
+   valid confirmation, not a deviation.
 3. **Execute.** Pass the rendered values and the user's own reply:
 
    ```
@@ -152,12 +157,29 @@ erp_execute_write(phase="execute", op="procurement.generic",
                   prompt_summary="<one line>", latest_prompt="<msg>")
 
 # Doctype no domain owns (e.g. Item): unscoped.generic, every action is
-# confirmed. For an item sourced from a purchase document add
-# "purchase_sourced_item": true (is_purchase_item=1/is_sales_item=0; a
-# bare standard_rate is refused).
+# confirmed. Field checklist: domains/inventory.md "Item master". Set
+# is_stock_item / is_purchase_item / is_sales_item explicitly.
 erp_execute_write(phase="render", op="unscoped.generic",
-                  args={"doctype": "Item", "action": "create", "purchase_sourced_item": true,
-                        "payload": {"item_code": "<v>", ...}})
+                  args={"doctype": "Item", "action": "create",
+                        "payload": {"item_code": "<v>", "is_stock_item": 0, ...}})
+# Only when the Item's sole evidence is a purchase document (a PO,
+# purchase invoice or GRN from doc-extraction) add
+# "purchase_sourced_item": true. It fills is_stock_item=1,
+# is_purchase_item=1, is_sales_item=0 where the payload is silent, and
+# refuses a bare standard_rate. Never use it for a typed request: its
+# is_stock_item=1 default is wrong for a service.
+
+# Task summary email (03-spec-driven-execution.md step 8), only after the
+# user said the task is complete. Render builds subject + HTML for the
+# requester; send request.body.content with the email skill; then execute
+# with the rendered args, confirmation_token and issued_at (no user code)
+# to log it on the primary record's timeline.
+erp_execute_write(phase="render", op="notify.summary_email",
+                  args={"title": "Item created: Media Marketing Services",
+                        "records": [{"doctype": "Item", "name": "Media Marketing Services",
+                                     "action": "create"}],
+                        "notes": ["Expense account: Marketing Expenses - DL"],
+                        "follow_ups": ["Add SAC before the first Purchase Invoice."]})
 
 # A bespoke gated operation
 erp_execute_write(phase="render", op="system_admin.disable_user",

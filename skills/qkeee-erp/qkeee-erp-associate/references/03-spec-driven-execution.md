@@ -63,7 +63,11 @@ unreviewed multi-step write costs a lot.
    `00-conventions.md`) rather than papering over the gap. **For every
    doctype the spec creates, run `erp_discover(action="preflight", doctype="<DocType>",
    payload={<the exact payload>})`** and paste its result into Schema
-   evidence. `ready: false` means the create does not go ahead: resolve
+   evidence. Run `preflight` early, with the draft payload (a partial
+   payload is fine: it lists every mandatory field with `in_payload`), and
+   use `erp_discover meta` only for a field `preflight` does not cover —
+   `meta` on a large doctype (Item: about 33k characters) costs context on
+   every later call. `ready: false` means the create does not go ahead: resolve
    each blocker with the user first. `custom_fields_merged: false` blocks
    until the user explicitly overrides; record the override, in their
    words, in the spec. Show any `gaps[]` with the role-gap prompt
@@ -77,7 +81,10 @@ unreviewed multi-step write costs a lot.
    relative to whatever directory this session is actually running in:
    - **Gateway/cron-driven session:** `01-connectivity.md` notes these
      backends bridge Hermes' `terminal.cwd` config key into a real
-     path — resolve against that.
+     path — resolve against that. In the Docker deployment that is
+     `/opt/cwd`, which the gateway's `HERMES_WRITE_SAFE_ROOT` includes.
+     The chat user cannot open a server path: show the spec digest in the
+     chat at step 4, not only the path.
    - **Local CLI session (this skill's primary usage path):**
      `01-connectivity.md`'s "Working scratch" section says this backend
      ignores the `terminal.cwd` config key but still always writes
@@ -91,18 +98,27 @@ unreviewed multi-step write costs a lot.
    - **Neither resolves to a writable path** (a sandboxed/read-only
      launch dir): fall back to
      `<profile>/workspace/qkeee-erp/<env-tag>/specs/<slug>-<YYYYMMDD-HHMM>.md`
-     and say so explicitly — the exception, not the default.
+     and say so explicitly — the exception, not the default. Record the
+     fallback under Deviations, with the denial text.
 
    Never put a spec under `qkeee-erp-learned/*` or `memories/MEMORY.md` —
    those are durable environment knowledge, not per-task working state; a
    spec is disposable once its task closes. **Done when:** the file
    exists at its resolved path and that path is stated to the user.
-4. **Seek approval — unless running autonomously (see below).** Present
-   the spec's objective/plan/steps to the user, plainly, and wait for an
-   explicit go-ahead or edits. Don't start step 5 on a spec that hasn't
-   been approved or silently-generated (autonomous mode). **Done when:**
-   the user has given an explicit go-ahead or edits, or (autonomous mode)
-   the header carries the `Approval: autonomous (…)` mark.
+4. **Seek approval — unless running autonomously (see below).** Show
+   the spec digest in the reply: objective, the values to write, side
+   effects, rollback, open risks, and the spec path. Wait for an explicit
+   go-ahead or edits. A "yes" to field values asked at step 1, before the
+   spec existed, answers the clarify questions; it is not spec approval.
+   For a single-record write with a confirmation token, one message may
+   carry both approvals: the spec digest plus the rendered `request` and
+   its code. The user's reply with the code then approves the spec and
+   the write; write `Approval: approved <date> (with confirmation code)`
+   in the header. Don't start step 5 on a spec that hasn't been approved
+   or silently-generated (autonomous mode). **Done when:** the user has
+   seen the digest and given an explicit go-ahead or edits, or
+   (autonomous mode) the header carries the `Approval: autonomous (…)`
+   mark.
 5. **Update on feedback.** Fold every user edit into the persisted file
    itself (not just into conversation) before proceeding — the file on
    disk is the record of what was actually approved, so it must match
@@ -138,15 +154,50 @@ unreviewed multi-step write costs a lot.
    2. Append Outcome, shaped by `00-conventions.md`'s Report-back items
       1–4: warnings first; a records table (doctype, name, action,
       docstatus, and for a non-submittable doctype the word "live");
-      "Deviations: none" or the list; the audit status per write
-      (`_audit_log_status`); open follow-ups (gaps, pending skills,
-      teardown due).
+      a pointer to the Deviations section; the audit status per write
+      (`_audit_log_status`, and the approval basis); open follow-ups
+      (gaps, pending skills, teardown due).
    Leave the file in place — it's the audit trail for this task, not
    deleted on success. Working-scratch files are disposable across
    *sessions* (`01-connectivity.md`), not mid-task. Tell the user per
    the same Report-back contract, not a free-form summary. **Done when:**
    Risks are reconciled and the Outcome section is appended to the spec
    file, before — not after — telling the user the task is done.
+8. **Summary email — after the user confirms the task is complete.**
+   End the step-7 reply with one question: "Is this task complete? If
+   yes, I will email you a summary." Send nothing until the user's own
+   reply says yes in a later turn. A "no" or a new request means the task
+   continues; ask again at its next close-out. Autonomous mode never
+   sends it. Then:
+   1. `erp_execute_write(phase="render", op="notify.summary_email",
+      args={"title": "<what was done, e.g. Supplier, Item and Purchase
+      Invoice created>", "records": [<every record in the Outcome table,
+      primary record first>], "notes": [<key values>], "follow_ups":
+      [<open follow-ups>]})`. The primary record is the one the task was
+      for (the Purchase Invoice, not the Supplier made on the way); the
+      email is logged on its timeline. Render reads every record again
+      and builds the HTML from the plugin template. Pass data, never
+      HTML.
+   2. Send `request.body.content` as an HTML email, subject
+      `request.body.subject`, to `request.body.recipients` and to no one
+      else (no Cc, no other address, even when the user asks: tell them
+      to forward it). Use the profile's email skill:
+      `google-workspace` (`$GSETUP --check` first, then `$GAPI gmail send
+      --to <recipients> --subject <subject> --body "$(cat <file>)"
+      --html`, with the HTML written to a file in the working directory
+      first), else `himalaya` (MML `<#part type=text/html>`). Neither set
+      up: tell the user the email cannot be sent and stop; never try
+      another channel.
+   3. Only after the send succeeds: `erp_execute_write(phase="execute",
+      op="notify.summary_email", args=<rendered args unchanged>,
+      confirmation_token=..., issued_at=..., latest_prompt="<the user's
+      yes>")`. It logs the email as a Sent `Communication` on the primary
+      record. More than 15 minutes since render: render again first. A
+      send that failed is not logged.
+   4. Add one line to the spec's Outcome: "Summary email sent to <requester>
+      <time>; Communication <name>", or why it was not sent.
+   **Done when:** the email is sent and logged, or the reason it was not
+   is in the spec and in the reply.
 
 ## Autonomous mode
 
@@ -175,7 +226,8 @@ not a blanket "go ahead."
 - Env tag: <tag>            Mode: <read-only | read-write>
 - Domain(s): <slug, slug>
 - Requested by: <resolved ERPNext user id/email>
-- Approval: <pending | approved <date> | autonomous (<why>)>
+- Approval: <pending | approved <date> | approved <date> (with confirmation code) | autonomous (<why>)>
+- Times: file-name slug in UTC; record times quoted with their zone
 
 ## Objective
 One or two sentences: what this task accomplishes and why.
@@ -211,8 +263,10 @@ The query run before create to find an existing matching record, and
 its result. A re-run of this spec must not create duplicates.
 
 ## Rollback
-How to undo each write (delete, cancel, set a status), the exact call,
-and who may run it.
+How to undo each write (delete, cancel, set a status), and who may run
+it. Every path gets its full `erp_execute_write render` call, including
+the fallback (for example "disable instead of delete" as a full `update`
+render with its payload), not prose.
 
 ## Teardown (demo/test data only)
 The query that finds the records (name prefix, `qkeee-demo` tag) and the
@@ -221,7 +275,9 @@ action that removes them — `00-conventions.md`'s Demo and test data.
 ## Exact calls
 Per write: the full `erp_execute_write` command (or the `--batch` step)
 and the payload JSON, exactly as it will run. Nothing is decided at
-execution time.
+execution time. Never record `confirmation_token` or `issued_at`: they
+are one-time values, not part of the plan. Write "render, then execute
+with the rendered values and the user's reply".
 
 ## Risks / open questions
 Anything ambiguous, anything requiring a double-confirm
@@ -230,12 +286,18 @@ unconfirmed assumption. Reconciled at close-out: closed, updated or
 carried forward.
 
 ## Deviations
-"None", or each change to an approved value: what, why, who re-confirmed.
+"None", or each item: what, why, who re-confirmed. Two kinds:
+- a change to an approved value;
+- a procedure deviation: the spec path fell back, a step was skipped or
+  reordered, an operation flag was used outside its documented purpose.
+A confirmation reply that contains the code (e.g. the code alone) is not
+a deviation.
 
 ## Outcome (filled in at close-out)
 Report-back items 1–4 (`00-conventions.md`): warnings first; records
 table (doctype | name | action | docstatus, "live" for non-submittable);
-"Deviations: none" or the list; audit status per write; open follow-ups.
+a pointer to the Deviations section (do not repeat it); audit status per
+write (`_audit_log_status`, and the approval basis); open follow-ups.
 ```
 
 A worked example, the 2026-10-07 DEMO_ERP spec rewritten to this
