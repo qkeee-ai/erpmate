@@ -67,7 +67,9 @@ unreviewed multi-step write costs a lot.
    payload is fine: it lists every mandatory field with `in_payload`), and
    use `erp_discover meta` only for a field `preflight` does not cover —
    `meta` on a large doctype (Item: about 33k characters) costs context on
-   every later call. `ready: false` means the create does not go ahead: resolve
+   every later call. `ready: false` means the create does not go ahead (this includes a
+   `Bot permission` blocker: the write is sent as the bot, so a requester
+   who may create is not enough): resolve
    each blocker with the user first. `custom_fields_merged: false` blocks
    until the user explicitly overrides; record the override, in their
    words, in the spec. Show any `gaps[]` with the role-gap prompt

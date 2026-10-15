@@ -143,6 +143,18 @@ PROVISION_PTYPES = ("read", "create", "write", "submit", "cancel")
 # owns them). Granted with every --domains run. Adding one is a code change.
 UNSCOPED_PROVISION_DOCTYPES = ("Item", "Item Price", "Address", "Contact")
 
+# Masters a domain's work creates on the way (a new Supplier Group before
+# the Supplier). No domain owns them, so the agent writes them through
+# `unscoped.generic` (every action token-gated). Granted read/create/write
+# only when the domain is in `init-bot --domains` (dev-erp 2026-10-15: 403
+# creating a Supplier Group after procurement was provisioned). Adding one
+# is a code change; never a privileged or a domain-owned doctype.
+DOMAIN_MASTER_DOCTYPES = {
+    "procurement": ("Supplier Group", "Payment Terms Template"),
+    "sales": ("Customer Group", "Territory"),
+    "inventory": ("Item Group", "Brand", "UOM", "Warehouse"),
+}
+
 
 def is_bot_read_link(field: dict) -> bool:
     """A Link field whose target the bot must be able to read: mandatory,

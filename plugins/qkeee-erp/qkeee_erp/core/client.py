@@ -1738,6 +1738,19 @@ def probe_capabilities(tag: str, cfg: dict, bot_user: str) -> tuple:
     return capabilities, gaps
 
 
+def bot_role_grants(tag: str, doctype: str, perm_type: str) -> tuple:
+    """(True | False | None, error) — does a permlevel-0 row of BOT_ROLE_NAME
+    on `doctype` grant `perm_type`? Read from merged meta with the Admin
+    Account, like the requester check. A create cannot be probed without
+    creating, so preflight reads the rows instead (dev-erp 2026-10-15:
+    preflight ready, then 403 because the bot had no create)."""
+    rows, error = _fetch_doctype_role_permissions(tag, doctype)
+    if rows is None:
+        return None, error
+    return any(r.get("role") == BOT_ROLE_NAME and r.get(perm_type) and not r.get("if_owner")
+               for r in rows), None
+
+
 def probe_bot_link_reads(tag: str, doctype: str, links: dict) -> list:
     """Gaps for the Link targets the bot cannot read. `links`: {target
     doctype: [fieldname, ...]} — preflight passes the mandatory Link fields

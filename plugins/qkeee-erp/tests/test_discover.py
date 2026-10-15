@@ -425,7 +425,8 @@ class PreflightTests(unittest.TestCase):
     READY = {"ready": True, "reason": None, "gaps": []}
 
     def run_preflight(self, meta=None, payload=None, modules=None, hr_settings=None,
-                      app="erpnext", doctype="Employee", readiness=None, link_reads=None):
+                      app="erpnext", doctype="Employee", readiness=None, link_reads=None,
+                      bot_create=None):
         meta = meta or self.meta()
 
         def fake_get_resource(tag, dt, name, **kw):
@@ -449,7 +450,8 @@ class PreflightTests(unittest.TestCase):
                 patch.object(discover, "get_env_config",
                              return_value={"tag": "DEMO_ERP", "base_url": "https://demo.example.com"}),                 patch.object(discover._client, "requester_permission_readiness",
                              return_value=readiness or self.READY),                 patch.object(discover._client, "probe_bot_link_reads",
-                             side_effect=link_reads or (lambda tag, dt, links: [])) as probe:
+                             side_effect=link_reads or (lambda tag, dt, links: [])) as probe,                 patch.object(discover._client, "bot_role_grants",
+                             return_value=bot_create if bot_create is not None else (True, None)):
             self.link_probe = probe
             return discover.preflight("DEMO_ERP", doctype, payload=payload, requested_by=self.REQ)
 
@@ -492,6 +494,22 @@ class PreflightTests(unittest.TestCase):
         result = self.run_preflight(payload=self.FULL, link_reads=lambda tag, dt, links: [gap])
         self.assertTrue(result["ready"], result["blockers"])
         self.assertEqual(result["gaps"], [gap])
+
+    def test_rule9_bot_without_create_is_a_blocker(self):
+        # dev-erp 2026-10-15: preflight said ready, the write then failed
+        # with 403 because the bot role had no create on the doctype.
+        result = self.run_preflight(payload=self.FULL, bot_create=(False, None))
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["bot_ready"])
+        self.assertTrue(any("Qkeee Bot" in b and "create" in b for b in result["blockers"]))
+        gap = result["gaps"][-1]
+        self.assertEqual((gap["who"], gap["doctype"], gap["perm"]), ("bot", "Employee", "create"))
+
+    def test_rule9_unreadable_bot_rights_is_a_gap_not_a_blocker(self):
+        result = self.run_preflight(payload=self.FULL, bot_create=(None, "403"))
+        self.assertTrue(result["ready"], result["blockers"])
+        self.assertIsNone(result["bot_ready"])
+        self.assertEqual(result["gaps"][-1]["perm"], "create")
 
     def test_rule7_requester_without_create_is_a_blocker(self):
         result = self.run_preflight(payload=self.FULL, readiness={

@@ -317,10 +317,13 @@ def bot_permissions() -> dict:
         "admin_account_needs": "System Manager; its key pair in QKEEE_ERP_<TAG>_ADMIN_API_KEY/"
                                "_ADMIN_API_SECRET. Without it every business call is refused.",
         "bot_write_doctypes": bot_writes,
+        "domain_master_doctypes": {d: list(m) for d, m in doctype_defs.DOMAIN_MASTER_DOCTYPES.items()},
         "admin_write_doctypes": admin_writes,
         "per_doctype_grants": "On each bot write doctype the user will use: read, plus create / "
                               "write / submit / cancel for the operations used, plus read on its "
-                              "Link targets. A doctype outside every list (e.g. Item) goes "
+                              "Link targets. A domain's masters (domain_master_doctypes, e.g. "
+                              "Supplier Group) get read/create/write with that domain. A "
+                              "doctype outside every list (e.g. Item) goes "
                               "through unscoped.generic and needs the same rows. An Operator "
                               "grants all of it with `hermes qkeee-erp init-bot --domains "
                               "<list>`; erp_discover preflight <DocType> checks one doctype.",
@@ -376,6 +379,10 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
     8. The bot's read on the target doctype of each mandatory Link field
        and of each user-settable Link field the payload sets: a gap per
        target it cannot read, never a blocker.
+    9. The bot's own create on `doctype` (its role's permission rows, read
+       with the Admin Account): none is a blocker, because the write is
+       sent as the bot and ERPNext refuses it; rows that cannot be read
+       are a gap.
 
     Preflight cannot see server scripts or custom-app validate hooks; they
     run only on save. execute_write.py's structured failure covers those.
@@ -469,6 +476,25 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
         gaps.append(gap_for(e, "(link targets)", "read", BOT_ROLE_NAME,
                             "preflight could not check the bot's read on Link targets"))
 
+    # Rule 9: the bot's own create. The requester check (rule 7) passing
+    # says nothing about it: the write is sent as the bot.
+    bot_ready, bot_error = _client.bot_role_grants(tag, doctype, "create")
+    if bot_ready is not True:
+        effect = (f"ERPNext refuses the create with 403: the bot sends it and its role "
+                  f"{BOT_ROLE_NAME!r} has no create on {doctype}" if bot_ready is False else
+                  f"preflight could not read {BOT_ROLE_NAME!r}'s rights on {doctype}")
+        steps = (f"An Operator runs `hermes qkeee-erp init-bot --domains <the domain that owns "
+                 f"or lists {doctype}>`; if no domain covers it, an admin adds the row: Role "
+                 f"Permission Manager → Document Type \"{doctype}\" → Role \"{BOT_ROLE_NAME}\", "
+                 f"Level 0 → tick create, read, write → Save.")
+        gaps.append(make_gap(tag=tag, base_url=base_url, capability=f"bot_create:{doctype}",
+                             who="bot", user="(the bot account)", role=BOT_ROLE_NAME,
+                             doctype=doctype, perm="create", effect=effect, grant_steps=steps,
+                             error=bot_error))
+        if bot_ready is False:
+            blockers.append(f"Bot permission: {BOT_ROLE_NAME!r} has no create on {doctype}; "
+                            f"the write would fail with 403.")
+
     settings_rule = None
     check = _SETTINGS_CHECKS.get(doctype)
     if check:
@@ -490,6 +516,7 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
                    "settings_rule": settings_rule},
         "workflow_active": workflow_active,
         "requester_ready": requester_ready,
+        "bot_ready": bot_ready,
         "ready": not blockers,
         "blockers": blockers,
         "gaps": gaps,

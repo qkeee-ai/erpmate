@@ -75,7 +75,7 @@ import urllib.parse
 
 from .doctype_defs import (ALL_DOCTYPES, AUDIT_LOG, BOT_READ_GRANTS, MIGRATABLE_FIELDS,
                            PROVISION_PTYPES, ROLE_NAME, ROLE_PAYLOAD, UNSCOPED_PROVISION_DOCTYPES,
-                           is_bot_read_link)
+                           DOMAIN_MASTER_DOCTYPES, is_bot_read_link)
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +344,8 @@ def _meta_bundle(tag: str, doctype: str) -> list:
 
 def bot_permission_matrix(tag: str, domains) -> tuple:
     """({doctype: {ptype}}, skipped, not_found) for `domains`: each write doctype of
-    each domain plus UNSCOPED_PROVISION_DOCTYPES gets read/create/write, and
+    each domain, its DOMAIN_MASTER_DOCTYPES and UNSCOPED_PROVISION_DOCTYPES get
+    read/create/write, and
     submit/cancel when submittable; each Link target a user can set or
     must set (doctype_defs.is_bot_read_link(); child
     tables included) gets read. A privileged doctype is skipped, never
@@ -358,6 +359,7 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
                              f"{sorted(available)}.")
     privileged = _privileged_doctypes()
     write_doctypes = sorted({dt for d in domains for dt in available[d]}
+                            | {dt for d in domains for dt in DOMAIN_MASTER_DOCTYPES.get(d, ())}
                             | set(UNSCOPED_PROVISION_DOCTYPES))
     matrix, skipped, not_found = {}, set(), []
 

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from qkeee_erp_plugin.qkeee_erp import init_bot
+from qkeee_erp_plugin.qkeee_erp.doctype_defs import DOMAIN_MASTER_DOCTYPES
 from qkeee_erp_plugin.qkeee_erp.core import client as core_client
 from qkeee_erp_plugin.qkeee_erp.core import operations
 
@@ -114,8 +115,8 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(matrix["Purchase Order"], {"read", "create", "write", "submit", "cancel"})
         self.assertEqual(matrix["Supplier"], {"read", "create", "write"})
         self.assertEqual(matrix["Country"], {"read"})              # mandatory Link
-        self.assertEqual(matrix["Supplier Group"], {"read"})       # optional, user-settable
-        self.assertEqual(matrix["Price List"], {"read"})
+        self.assertEqual(matrix["Supplier Group"], {"read", "create", "write"})  # procurement master
+        self.assertEqual(matrix["Price List"], {"read"})           # optional, user-settable
         for target in ("Hidden Target", "Read Only Target", "Fetched Target"):
             self.assertNotIn(target, matrix)
         self.assertIn("read", matrix["Item"])                       # child-table Link + master
@@ -123,6 +124,26 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(skipped, ["User"])                         # privileged, never granted
         self.assertNotIn("User", matrix)
         self.assertFalse(any("delete" in p for p in matrix.values()))
+
+    def test_domain_masters_get_create_only_with_their_domain(self):
+        # dev-erp 2026-10-15: Supplier Group create refused (403) after
+        # procurement was provisioned: masters were read-only.
+        matrix, _, _ = self.matrix(["procurement"], {"procurement": ["Supplier"], "sales": ["Quotation"]})
+        self.assertEqual(matrix["Supplier Group"], {"read", "create", "write"})
+        self.assertEqual(matrix["Payment Terms Template"], {"read", "create", "write"})
+        self.assertNotIn("create", matrix.get("Customer Group", set()))
+        matrix, _, _ = self.matrix(["sales"], {"procurement": ["Supplier"], "sales": ["Quotation"]})
+        self.assertEqual(matrix["Customer Group"], {"read", "create", "write"})
+        self.assertNotIn("Supplier Group", matrix)
+
+    def test_domain_masters_are_never_privileged_or_domain_owned(self):
+        from qkeee_erp_plugin.qkeee_erp import execute_write  # noqa: F401 — registers allowlists
+        owned = {dt for dts in core_client.DOMAIN_WRITE_ALLOWLISTS.values() for dt in dts}
+        for domain, masters in DOMAIN_MASTER_DOCTYPES.items():
+            for dt in masters:
+                with self.subTest(domain=domain, doctype=dt):
+                    self.assertNotIn(dt, init_bot._privileged_doctypes())
+                    self.assertNotIn(dt, owned)        # else unscoped.generic refuses it
 
     def test_a_doctype_missing_on_the_instance_is_skipped(self):
         def meta(tag, dt):
