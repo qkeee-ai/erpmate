@@ -4,13 +4,13 @@ qkeee-erp-associate — task summary email to the requester.
 
 | Operation             | What it does                                            |
 |-----------------------|---------------------------------------------------------|
-| notify.summary_email  | render: re-read every record of the task and build one HTML summary (subject + body) addressed to the requester. execute: log that email as a Sent `Communication` on the primary record's timeline. |
+| notify.summary_email  | render: re-read every record of the task and build one HTML summary (subject + body) addressed to the requester. execute: send it from the agent's mailbox (mailer.py, gateway side), then log it as a Sent `Communication` on the primary record's timeline. |
 
-The plugin does not send the email. The agent sends `request.body.content`
-to `request.body.recipients` with the profile's email skill
-(google-workspace `gmail send --html`, or himalaya), after the user has
-confirmed the task is complete, and then executes this operation so the
-email shows on the record's timeline and in the Audit Log.
+The agent renders, then executes after the user has confirmed the task is
+complete. The gateway sends the email through the agent's own mailbox
+(the email platform's EMAIL_* settings), so a reply reaches the agent as
+an email turn and the SMTP password never reaches the agent's terminal.
+ERPNext only records the email; it sends nothing.
 
 Rules held in code, not prompt:
 - The recipient is always this turn's requester. No argument sets it.
@@ -19,7 +19,10 @@ Rules held in code, not prompt:
 - Render reads every record with the requester's own gated read, so a
   summary can only describe records the requester may see.
 - The token (no user code) binds the exact subject and body the agent was
-  given at render, so the logged Communication is the email that was sent.
+  given at render, so the email sent and the Communication logged are the
+  rendered ones.
+- The send runs after every gate and before the Audit Log row
+  (Operation.pre_send). A failed send writes nothing.
 
 ALLOWED_WRITE_DOCTYPES: "Communication". Registering it here also keeps
 unscoped.generic off Communication, and lets `init-bot --domains notify`
@@ -30,6 +33,7 @@ import datetime
 import html
 import urllib.parse
 
+from .. import mailer
 from ..core import client as core_client
 from ..core import operations
 from ..core.operations import PreparedRequest, require_args
@@ -179,6 +183,39 @@ def render_summary(*, title, records, notes, follow_ups, requester, tag, instanc
     return subject, body
 
 
+def render_summary_text(*, title, records, notes, follow_ups, requester, tag, instance,
+                        completed_on) -> str:
+    """The plain-text part of the same email. Pure."""
+    lines = [f"Task complete: {title}", ""]
+    for r in records:
+        f = r.get("facts") or {}
+        extra = " · ".join(x for x in (f.get("title"), f.get("amount")) if x)
+        link = (f" <{_link(instance, r['doctype'], r['name'])}>"
+                if instance and f.get("status") != "Deleted" else "")
+        lines.append(f"- {r['doctype']} {r['name']}: {r['action']}, {f.get('status', '')}"
+                     + (f" ({extra})" if extra else "") + link)
+    for heading, items in (("Notes", notes), ("Open follow-ups", follow_ups)):
+        if items:
+            lines += ["", f"{heading}:"] + [f"- {i}" for i in items]
+    lines += ["", f"Instance {tag} ({instance}) · Requested by {requester} · Completed {completed_on}",
+              "Sent by the ERPNext associate. Each change is in the Qkeee Bot Audit Log."]
+    return "\n".join(lines)
+
+
+def _send_email(req, args, ctx):
+    """pre_send: every gate has passed. Send; the pipeline then logs."""
+    body = req.body
+    text = render_summary_text(
+        title=str(args["title"]).strip(), records=args["records"], notes=_lines(args, "notes"),
+        follow_ups=_lines(args, "follow_ups"), requester=ctx.requested_by, tag=ctx.tag,
+        instance=args["instance"], completed_on=args["completed_on"])
+    sent = mailer.send_html(body["recipients"], body["subject"], body["content"], text)
+    body["message_id"] = sent["message_id"]
+    body["sender"] = sent["from"]
+    req.notes.append(f"Email sent from {sent['from']} to {sent['to']}, "
+                     f"Message-ID {sent['message_id']}.")
+
+
 # ---------------------------------------------------------------- prepare (no I/O)
 
 def _prepare(args, ctx):
@@ -205,16 +242,18 @@ def _prepare(args, ctx):
         # Logging a summary of a record needs the requester's read on it.
         rbac_doctype=primary["doctype"], rbac_ptype="read",
         audit_doctype=primary["doctype"], audit_reference=primary["name"],
-        notes=["Send request.body.content as HTML to request.body.recipients (only) with the "
-               "email skill, after the user confirmed the task is complete. Then execute with "
-               "these args, confirmation_token and issued_at to log it on the timeline."])
+        notes=["Execute with these args, confirmation_token and issued_at only after the user "
+               "confirmed the task is complete: the gateway sends this email to "
+               "request.body.recipients from the agent's mailbox, then logs it on the "
+               "timeline. Never send it any other way."])
 
 
 operations.register_operation(operations.Operation(
     key="notify.summary_email", domain=DOMAIN_NAME,
-    summary="task summary email to the requester: render builds it, execute logs it on the "
-            "primary record's timeline",
-    prepare=_prepare, render_defaults=_render, token_policy=operations.POLICY_TOKEN,
+    summary="task summary email to the requester: render builds it, execute sends it from the "
+            "agent's mailbox and logs it on the primary record's timeline",
+    prepare=_prepare, render_defaults=_render, pre_send=_send_email,
+    token_policy=operations.POLICY_TOKEN,
     skip_comment=True,
     example_args={"title": "Item created: Media Marketing Services",
                   "records": [{"doctype": "Item", "name": "Media Marketing Services",

@@ -30,6 +30,7 @@ from unittest.mock import MagicMock, patch
 from qkeee_erp_plugin.qkeee_erp.core import client as core_client
 from qkeee_erp_plugin.qkeee_erp.core import operations
 from qkeee_erp_plugin.qkeee_erp import domains
+from qkeee_erp_plugin.qkeee_erp import mailer
 from qkeee_erp_plugin.qkeee_erp.domains import fixed_assets, inventory, system_admin
 import testsupport
 from testsupport import REQ
@@ -118,6 +119,8 @@ def connector(send_error=None, accounts=None):
         _p(system_admin, "get_permissions",
            return_value=[{"role": "Accounts User", "permlevel": 0, "write": 0}])
         _p(fixed_assets, "map_sales_invoice", return_value=copy.deepcopy(MAPPED_INVOICE))
+        _p(mailer, "send_html", return_value={"message_id": "<qkeee-1@bot.example>",
+                                              "from": "agent@bot.example", "to": REQ})
         yield m
 
 
@@ -452,7 +455,7 @@ class InvariantTests(unittest.TestCase):
         "inventory": {"get_stock_reconciliation_items": "gated read",
                       "get_bin_qty": "gated read", "bin_rows_to_actual_source_qty": "pure"},
         "fixed_assets": {"map_sales_invoice": "gated read"},
-        "notify": {"render_summary": "pure"},
+        "notify": {"render_summary": "pure", "render_summary_text": "pure"},
         "system_admin": {"get_roles_and_doctypes": "gated read",
                          "get_permissions": "gated read", "get_scheduler_status": "gated read"},
     }

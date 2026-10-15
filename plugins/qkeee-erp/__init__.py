@@ -90,6 +90,12 @@ def register(ctx) -> None:
 
     client.set_session_env_reader(get_session_env)
     client.set_hermes_home_reader(lambda: str(get_hermes_home()))
+    try:
+        from gateway.platforms._shared import get_scoped_secret
+        from .qkeee_erp import mailer
+        mailer.set_secret_reader(get_scoped_secret)
+    except Exception as e:  # mailer falls back to os.environ
+        logger.warning("qkeee-erp plugin: profile secret reader not set for email: %s", e)
 
     try:
         hooks = kanban_hooks.KanbanOriginHooks(

@@ -179,6 +179,10 @@ class Operation:
     preconditions: tuple = ()            # (req, args, ctx) -> None, raise to refuse
     render_defaults: Optional[Callable] = None   # (args, ctx) -> args (live facts)
     enrich: Optional[Callable] = None    # (req, args, ctx) -> None; live shaping, after cheap gates
+    # (req, args, ctx) -> None: an external side effect that must happen only
+    # after every gate (token, RBAC) and before the audit row + write; raise
+    # to stop with nothing written (notify.summary_email sends its email).
+    pre_send: Optional[Callable] = None
     post: Optional[Callable] = None      # (result, req, args, ctx, hooks) -> result
     on_failure: Optional[Callable] = None  # (exc, req, args, ctx) -> str | None
     skip_comment: bool = False
@@ -710,6 +714,8 @@ def run_operation(op_key: str, args: dict, ctx: WriteContext) -> dict:
     _c._validate_prod_requester(                                  # 9
         ctx.tag, ctx.requested_by, req.rbac_doctype, req.rbac_ptype, docname=req.name,
         for_write=True, domain=op.domain, credential=op.credential, **ctx.audit_kwargs())
+    if op.pre_send:                                               # 9b
+        op.pre_send(req, args, ctx)
     result = _send(op, req, ctx, user_approved=verified or ctx.user_approved, args=args,  # 10-12
                    approval_basis=_approval_basis(policy, verified, ctx.user_approved))
     if op.post:

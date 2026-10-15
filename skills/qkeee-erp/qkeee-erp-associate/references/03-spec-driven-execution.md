@@ -179,25 +179,22 @@ unreviewed multi-step write costs a lot.
       for (the Purchase Invoice, not the Supplier made on the way); the
       email is logged on its timeline. Render reads every record again
       and builds the HTML from the plugin template. Pass data, never
-      HTML.
-   2. Send `request.body.content` as an HTML email, subject
-      `request.body.subject`, to `request.body.recipients` and to no one
-      else (no Cc, no other address, even when the user asks: tell them
-      to forward it). Use the profile's email skill:
-      `google-workspace` (`$GSETUP --check` first, then `$GAPI gmail send
-      --to <recipients> --subject <subject> --body "$(cat <file>)"
-      --html`, with the HTML written to a file in the working directory
-      first), else `himalaya` (MML `<#part type=text/html>`). Neither set
-      up: tell the user the email cannot be sent and stop; never try
-      another channel.
-   3. Only after the send succeeds: `erp_execute_write(phase="execute",
-      op="notify.summary_email", args=<rendered args unchanged>,
-      confirmation_token=..., issued_at=..., latest_prompt="<the user's
-      yes>")`. It logs the email as a Sent `Communication` on the primary
-      record. More than 15 minutes since render: render again first. A
-      send that failed is not logged.
-   4. Add one line to the spec's Outcome: "Summary email sent to <requester>
-      <time>; Communication <name>", or why it was not sent.
+      HTML. Do not paste the HTML into the chat.
+   2. `erp_execute_write(phase="execute", op="notify.summary_email",
+      args=<rendered args unchanged>, confirmation_token=...,
+      issued_at=..., latest_prompt="<the user's yes>")`. The gateway sends
+      the email from the agent's own mailbox to the requester only, then
+      logs it as a Sent `Communication` on the primary record. More than
+      15 minutes since render: render again first.
+      - Never send it another way: no email skill, no terminal, no other
+        address or Cc, even when the user asks (tell them to forward it).
+      - `EmailNotConfiguredError`: the agent's mailbox is not set up.
+        Tell the user that an Operator sets the `EMAIL_*` settings; stop.
+      - `EmailSendError`: the send failed and nothing was logged. Report
+        the message as is. Do not retry in the same turn.
+   3. Add one line to the spec's Outcome: "Summary email sent to
+      <requester> <time>, Message-ID <id>; Communication <name>", or why
+      it was not sent.
    **Done when:** the email is sent and logged, or the reason it was not
    is in the spec and in the reply.
 

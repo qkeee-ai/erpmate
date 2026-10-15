@@ -101,11 +101,11 @@ and the action, and say that access, not connectivity, is the problem.
 ## 7a. Task summary email
 
 `notify.summary_email` builds the summary email for the requester. Use
-it only after the user confirmed the task is complete. Render it, send
-`request.body.content` as HTML to `request.body.recipients` only, then
-execute it with the rendered values to log the email on the record's
-timeline. The full procedure is in the domain skill's spec procedure,
-step 8.
+it only after the user confirmed the task is complete. Render it, then
+execute it with the rendered values. The gateway sends the email from
+the agent's mailbox to the requester only and logs it on the record's
+timeline. Never send it any other way (no email skill, no terminal). The
+full procedure is in the domain skill's spec procedure, step 8.
 
 ## 8. Handle failures honestly
 

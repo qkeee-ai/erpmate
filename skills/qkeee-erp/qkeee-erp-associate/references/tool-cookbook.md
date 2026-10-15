@@ -171,9 +171,9 @@ erp_execute_write(phase="render", op="unscoped.generic",
 
 # Task summary email (03-spec-driven-execution.md step 8), only after the
 # user said the task is complete. Render builds subject + HTML for the
-# requester; send request.body.content with the email skill; then execute
-# with the rendered args, confirmation_token and issued_at (no user code)
-# to log it on the primary record's timeline.
+# requester; execute with the rendered args, confirmation_token and
+# issued_at (no user code): the gateway sends it from the agent's mailbox
+# and logs it on the primary record's timeline. No other send path.
 erp_execute_write(phase="render", op="notify.summary_email",
                   args={"title": "Item created: Media Marketing Services",
                         "records": [{"doctype": "Item", "name": "Media Marketing Services",

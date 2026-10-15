@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from qkeee_erp_plugin.qkeee_erp.core import client as core_client
 from qkeee_erp_plugin.qkeee_erp.core import operations
+from qkeee_erp_plugin.qkeee_erp import mailer
 from qkeee_erp_plugin.qkeee_erp.domains import notify
 import testsupport
 from test_operations import connector
@@ -79,14 +80,45 @@ class SummaryEmailTests(unittest.TestCase):
         with connector() as m:
             result = operations.run_operation(KEY, full_args, ctx)
         self.assertEqual(result["_audit_log_status"], "ok")
+        to, subject, html, text = m["send_html"].call_args.args
+        body = out["request"]["body"]
+        self.assertEqual((to, subject, html), (testsupport.REQ, body["subject"], body["content"]))
+        self.assertIn("Task complete: Supplier, Item and Purchase Invoice created", text)
+        self.assertIn("https://erp.example/app/item/Media%20Marketing%20Services", text)
         sent = m["_do_mutate"].call_args.args
         self.assertEqual(sent[1:3], ("Communication", "create"))
-        self.assertEqual(sent[3], out["request"]["body"])
+        self.assertEqual(sent[3], dict(body, message_id="<qkeee-1@bot.example>",
+                                       sender="agent@bot.example"))
+        self.assertTrue(any("Message-ID <qkeee-1@bot.example>" in n for n in result["_notes"]))
         start = m["record_audit_log_start"].call_args.kwargs
         self.assertEqual(start["doctype"], "Purchase Invoice")
         self.assertIn("[approval: token]", start["approval_note"])
         rbac = m["_validate_prod_requester"].call_args.args
         self.assertEqual(rbac[2:4], ("Purchase Invoice", "read"))
+
+    def test_failed_send_logs_nothing(self):
+        full_args, ctx, _ = self._render()
+        for error in (mailer.EmailNotConfiguredError("no mailbox"), mailer.EmailSendError("smtp")):
+            with self.subTest(error=type(error).__name__), connector() as m:
+                m["send_html"].side_effect = error
+                with self.assertRaises(type(error)):
+                    operations.run_operation(KEY, full_args, ctx)
+                self.assertFalse(m["_do_mutate"].called)
+                m["record_audit_log_start"].assert_not_called()
+
+    def test_no_send_before_the_token_and_rbac_gates(self):
+        full_args, ctx, _ = self._render()
+        full_args["title"] = "changed"
+        with connector() as m:
+            with self.assertRaises(core_client.TokenMismatchError):
+                operations.run_operation(KEY, full_args, ctx)
+            m["send_html"].assert_not_called()
+        full_args, ctx, _ = self._render()
+        with connector() as m:
+            m["_validate_prod_requester"].side_effect = core_client.UnvalidatedProdRequesterError("no")
+            with self.assertRaises(core_client.UnvalidatedProdRequesterError):
+                operations.run_operation(KEY, full_args, ctx)
+            m["send_html"].assert_not_called()
 
     def test_changed_content_after_render_is_refused(self):
         full_args, ctx, _ = self._render()
