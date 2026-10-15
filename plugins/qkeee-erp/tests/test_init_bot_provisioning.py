@@ -85,8 +85,19 @@ META = {
     "Purchase Order": bundle("Purchase Order", True, [("supplier", "Supplier"),
                                                       ("owner_user", "User")],
                              child=("Purchase Order Item", [("item_code", "Item")])),
-    "Supplier": bundle("Supplier", links=[("supplier_group", "Supplier Group")]),
+    "Supplier": bundle("Supplier", links=[("country", "Country")]),
 }
+# ERPNext v15: supplier_group is NOT mandatory (dev-erp 2026-10-15: 403 on
+# Supplier Group although procurement was provisioned). A Link the user
+# can set gets read; a hidden, read-only or fetched one does not.
+META["Supplier"][0]["fields"] += [
+    {"fieldname": "supplier_group", "fieldtype": "Link", "options": "Supplier Group"},
+    {"fieldname": "default_price_list", "fieldtype": "Link", "options": "Price List"},
+    {"fieldname": "hidden_link", "fieldtype": "Link", "options": "Hidden Target", "hidden": 1},
+    {"fieldname": "ro_link", "fieldtype": "Link", "options": "Read Only Target", "read_only": 1},
+    {"fieldname": "fetched", "fieldtype": "Link", "options": "Fetched Target",
+     "fetch_from": "supplier_group.parent_supplier_group"},
+]
 
 
 class MatrixTests(unittest.TestCase):
@@ -102,7 +113,11 @@ class MatrixTests(unittest.TestCase):
                                       {"procurement": ["Purchase Order", "Supplier"]})
         self.assertEqual(matrix["Purchase Order"], {"read", "create", "write", "submit", "cancel"})
         self.assertEqual(matrix["Supplier"], {"read", "create", "write"})
-        self.assertEqual(matrix["Supplier Group"], {"read"})       # mandatory Link
+        self.assertEqual(matrix["Country"], {"read"})              # mandatory Link
+        self.assertEqual(matrix["Supplier Group"], {"read"})       # optional, user-settable
+        self.assertEqual(matrix["Price List"], {"read"})
+        for target in ("Hidden Target", "Read Only Target", "Fetched Target"):
+            self.assertNotIn(target, matrix)
         self.assertIn("read", matrix["Item"])                       # child-table Link + master
         self.assertEqual(matrix["Item Price"], {"read", "create", "write"})
         self.assertEqual(skipped, ["User"])                         # privileged, never granted

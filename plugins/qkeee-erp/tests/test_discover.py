@@ -467,10 +467,23 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("Requester permission", result["blockers"][0])
         self.assertEqual(result["gaps"], [gap])
 
-    def test_rule8_probes_only_mandatory_link_targets(self):
+    def test_rule8_probes_mandatory_link_targets(self):
         self.run_preflight(payload=self.FULL)
         _tag, dt, links = self.link_probe.call_args.args
         self.assertEqual((dt, links), ("Employee", {"Gender": ["gender"]}))
+
+    def test_rule8_also_probes_optional_links_the_payload_sets(self):
+        # dev-erp 2026-10-15: Supplier.supplier_group is optional, so the
+        # bot's missing read on Supplier Group was invisible to preflight.
+        meta = self.meta()
+        meta["fields"] += [
+            {"fieldname": "department", "fieldtype": "Link", "options": "Department"},
+            {"fieldname": "branch", "fieldtype": "Link", "options": "Branch"},
+            {"fieldname": "fetched", "fieldtype": "Link", "options": "Designation",
+             "fetch_from": "department.designation"}]
+        self.run_preflight(meta=meta, payload=dict(self.FULL, department="Ops", fetched="X"))
+        _tag, _dt, links = self.link_probe.call_args.args
+        self.assertEqual(links, {"Gender": ["gender"], "Department": ["department"]})
 
     def test_rule8_unreadable_link_target_is_a_gap_not_a_blocker(self):
         gap = _client.make_gap(tag="DEMO_ERP", base_url="", capability="link_read:Employee.Gender",

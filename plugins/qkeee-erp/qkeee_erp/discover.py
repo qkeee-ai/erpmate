@@ -373,8 +373,9 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
     7. The requester's create permission, checked the way the gate checks
        it (client.requester_permission_readiness(), no audit row): not
        confirmed is a blocker. The gate still runs at render and execute.
-    8. The bot's read on each mandatory Link field's target doctype: a gap
-       per target it cannot read, never a blocker.
+    8. The bot's read on the target doctype of each mandatory Link field
+       and of each user-settable Link field the payload sets: a gap per
+       target it cannot read, never a blocker.
 
     Preflight cannot see server scripts or custom-app validate hooks; they
     run only on save. execute_write.py's structured failure covers those.
@@ -454,17 +455,19 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
             blockers.append(f"Requester permission: {readiness['reason']}.")
         gaps += readiness["gaps"]
 
-    # Rule 8: the bot's read on each mandatory Link target. A gap, not a
-    # blocker: Frappe checks a Link value without the user's read.
+    # Rule 8: the bot's read on each mandatory Link target, and on each
+    # optional one the payload sets (the agent lists its values to the user
+    # first). A gap, not a blocker: Frappe checks a Link value without the
+    # user's read.
     links = {}
     for f in meta.get("fields", []):
-        if f.get("reqd") and f.get("fieldtype") == "Link" and f.get("options"):
+        if doctype_defs.is_bot_read_link(f) and (f.get("reqd") or f.get("fieldname") in (payload or {})):
             links.setdefault(f["options"], []).append(f["fieldname"])
     try:
         gaps += _client.probe_bot_link_reads(tag, doctype, links)
     except ConnectorError as e:
         gaps.append(gap_for(e, "(link targets)", "read", BOT_ROLE_NAME,
-                            "preflight could not check the bot's read on mandatory Link targets"))
+                            "preflight could not check the bot's read on Link targets"))
 
     settings_rule = None
     check = _SETTINGS_CHECKS.get(doctype)

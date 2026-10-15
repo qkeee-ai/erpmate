@@ -144,6 +144,19 @@ PROVISION_PTYPES = ("read", "create", "write", "submit", "cancel")
 UNSCOPED_PROVISION_DOCTYPES = ("Item", "Item Price", "Address", "Contact")
 
 
+def is_bot_read_link(field: dict) -> bool:
+    """A Link field whose target the bot must be able to read: mandatory,
+    or one a user can set (not hidden, not read-only, not fetched). The
+    mandatory-only rule missed optional pickers such as Supplier.
+    supplier_group, Item Default expense_account or default_price_list
+    (dev-erp 2026-10-15: 403 on Supplier Group after provisioning)."""
+    if field.get("fieldtype") != "Link" or not field.get("options"):
+        return False
+    if field.get("reqd"):
+        return True
+    return not (field.get("hidden") or field.get("read_only") or field.get("fetch_from"))
+
+
 # Fields whose type init_bot.py may change on an ALREADY-provisioned
 # instance, to converge it on the definitions above. Only these — nothing
 # else about a live doctype is ever modified by a re-run.

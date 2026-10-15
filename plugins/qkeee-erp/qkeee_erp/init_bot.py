@@ -74,7 +74,8 @@ from .core.confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECON
 import urllib.parse
 
 from .doctype_defs import (ALL_DOCTYPES, AUDIT_LOG, BOT_READ_GRANTS, MIGRATABLE_FIELDS,
-                           PROVISION_PTYPES, ROLE_NAME, ROLE_PAYLOAD, UNSCOPED_PROVISION_DOCTYPES)
+                           PROVISION_PTYPES, ROLE_NAME, ROLE_PAYLOAD, UNSCOPED_PROVISION_DOCTYPES,
+                           is_bot_read_link)
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +345,8 @@ def _meta_bundle(tag: str, doctype: str) -> list:
 def bot_permission_matrix(tag: str, domains) -> tuple:
     """({doctype: {ptype}}, skipped, not_found) for `domains`: each write doctype of
     each domain plus UNSCOPED_PROVISION_DOCTYPES gets read/create/write, and
-    submit/cancel when submittable; each mandatory Link target (child
+    submit/cancel when submittable; each Link target a user can set or
+    must set (doctype_defs.is_bot_read_link(); child
     tables included) gets read. A privileged doctype is skipped, never
     granted: `skipped` lists it for an admin to decide by hand. A write
     doctype missing on the instance (its app not installed) goes to
@@ -378,7 +380,7 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
               | ({"submit", "cancel"} if main.get("is_submittable") else set()))
         for doc in bundle:
             for f in doc.get("fields") or []:
-                if f.get("reqd") and f.get("fieldtype") == "Link" and f.get("options"):
+                if is_bot_read_link(f):
                     grant(f["options"], {"read"})
     return matrix, sorted(skipped), not_found
 
@@ -584,7 +586,7 @@ def _print_bot_findings(plan) -> None:
               f"refused while it does (agents ADR 0003). Re-run with --strip-stock-roles to "
               f"remove them.")
     for doctype in plan.get("skipped_privileged") or []:
-        print(f"NOTE: '{doctype}' is a privileged doctype (a mandatory Link target); init-bot "
+        print(f"NOTE: '{doctype}' is a privileged doctype (a Link target); init-bot "
               f"never grants on it. An admin decides by hand.")
     for doctype in plan.get("doctypes_not_found") or []:
         print(f"NOTE: '{doctype}' does not exist on this instance (its app is not installed); "
