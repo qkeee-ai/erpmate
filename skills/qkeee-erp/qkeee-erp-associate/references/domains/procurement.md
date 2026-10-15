@@ -70,6 +70,37 @@ checking a supplier's performance.
   passes confirmed submission authority; otherwise every PO is
   create-as-draft-only, full stop.
 
+## Supplier checklist
+
+Ask the whole set in one round, each with your recommended value, before
+the spec is approved (`03-spec-driven-execution.md` step 1). A value you
+derive yourself (from the name, the country, a document) is a proposal:
+show it as "proposed", and write only after the user confirms it. Never
+report it as an inference after the write.
+
+| Field | Ask when | Why |
+| --- | --- | --- |
+| `supplier_name`, `supplier_type` | always | Mandatory. |
+| `supplier_group` | always | Offer live values (`is_group = 0`). A new group is its own `unscoped.generic` create. |
+| `country`, `default_currency` | always | Purchase documents take the supplier's currency. A foreign supplier billed in USD with `INR` here makes every invoice wrong. |
+| `gst_category` (india_compliance) | Indian company | Drives tax templates and returns. Ask; for an unclear case (an OIDAR or SEZ supplier) ask the accounts owner. After save, read it back: india_compliance can change it from the GSTIN. |
+| Tax ID and its type | always | See "Tax ID types" below. Goes on the Address (KYC rule above). |
+| `default_price_list`, `payment_terms` | the company uses them | Purchase documents pre-fill from them. |
+| Bank details | the supplier will be paid by transfer | KYC bar above. |
+
+**Tax ID types** (Indian company). Identify the type before you call an ID
+valid or invalid. Never call it invalid on format alone: ERPNext saved it,
+so india_compliance accepted it.
+
+- Regular GSTIN: 2-digit state code (01-38), the 10-character PAN, 1 entity
+  digit, `Z`, 1 check character. Example shape: `27AAAAA0000A1Z5`.
+- OIDAR / non-resident online-service GSTIN: starts `99`, then a 2-digit
+  year, a 3-letter country code, 5 digits, `OS`, 1 check character.
+  Example shape: `9924USA29003OSI`. A foreign seller of online services
+  (software, SaaS, cloud) registered in India has one.
+- No Indian registration: the foreign tax ID (EIN, VAT number) is not a
+  GSTIN. Do not put it in `gstin`; ask where this instance keeps it.
+
 ## Procedure
 
 1. Follow the activation sequence and `ALLOWED_WRITE_DOCTYPES` above.
