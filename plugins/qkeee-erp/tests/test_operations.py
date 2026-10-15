@@ -68,7 +68,7 @@ TAMPER = {
     "system_admin.create_webhook": "reason", "system_admin.toggle_workflow": "reason",
     "system_admin.permission_add": "reason", "system_admin.permission_update": "reason",
     "system_admin.permission_remove": "reason", "system_admin.permission_reset": "reason",
-    "notify.summary_email": "title",
+    "notify.summary_email": "title", "notify.share_records": "title",
 }
 NO_EXAMPLE = {"mis.generic"}  # refuses every write — see OwnershipAndUnscopedTests
 
@@ -455,7 +455,8 @@ class InvariantTests(unittest.TestCase):
         "inventory": {"get_stock_reconciliation_items": "gated read",
                       "get_bin_qty": "gated read", "bin_rows_to_actual_source_qty": "pure"},
         "fixed_assets": {"map_sales_invoice": "gated read"},
-        "notify": {"render_summary": "pure", "render_summary_text": "pure"},
+        "notify": {"render_summary": "pure", "render_summary_text": "pure",
+                   "render_share": "pure"},
         "system_admin": {"get_roles_and_doctypes": "gated read",
                          "get_permissions": "gated read", "get_scheduler_status": "gated read"},
     }

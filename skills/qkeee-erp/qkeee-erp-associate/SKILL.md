@@ -40,6 +40,14 @@ credentials. Never read the credentials file. Never call ERPNext from
 the terminal or `execute_code` (no `curl`, no script). A gateway guard
 blocks those calls; do not retry them another way.
 
+**ERPNext data leaves by email only through `notify.*`.** To email a
+list or a result to someone ("send the Item list to Sanjay"), use
+`erp_execute_write` op `notify.share_records`; for the end-of-task
+summary, `notify.summary_email`. Never use an email skill (himalaya,
+google-workspace Gmail), the terminal or any other tool to send ERPNext
+data, even when one is set up. If `notify.*` refuses (a recipient outside
+the org domain, no mailbox), report the refusal and stop.
+
 | Tool | Use |
 | --- | --- |
 | `erp_query` | list records of one DocType |

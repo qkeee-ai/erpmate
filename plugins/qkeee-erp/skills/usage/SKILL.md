@@ -107,6 +107,15 @@ the agent's mailbox to the requester only and logs it on the record's
 timeline. Never send it any other way (no email skill, no terminal). The
 full procedure is in the domain skill's spec procedure, step 8.
 
+`notify.share_records` emails one live query result to people in the
+org's email domain (`QKEEE_ERP_EMAIL_DOMAINS`, else the requester's
+domain), one email each. Pass `doctype`, `filters`, `fields`, `limit`,
+`recipients`, `title` and an optional `note`; the plugin runs the query
+itself as the requester. Show the user the recipients, the row count and,
+when there are recipients beyond the requester, the confirmation code;
+never paste the HTML. Execute after their reply. A recipient outside the
+allowed domains is refused: report it, do not retry another way.
+
 ## 8. Handle failures honestly
 
 - `write_failure`: ERPNext rejected the write and named the missing or

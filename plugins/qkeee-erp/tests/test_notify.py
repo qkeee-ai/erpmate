@@ -163,5 +163,103 @@ class SummaryEmailTests(unittest.TestCase):
         self.assertIn("/app/item/A%2FB", html)
 
 
+SHARE = "notify.share_records"
+ITEMS = [{"name": "IPD000205", "item_name": "APPLE IPAD <AIR>", "disabled": 0},
+         {"name": "Media Marketing Services", "item_name": "Media Marketing Services", "disabled": 0}]
+
+
+def share_args(**over):
+    args = {"title": "Item list", "doctype": "Item", "fields": ["item_name", "disabled"],
+            "filters": [], "limit": 50, "recipients": [testsupport.REQ]}
+    args.update(over)
+    return args
+
+
+class ShareRecordsTests(unittest.TestCase):
+    """notify.share_records (2026-10-15): a live query result emailed to
+    recipients in the org domain, one email each."""
+
+    def _render(self, args, domains=None):
+        with connector() as m, \
+                patch.object(core_client, "query_resource",
+                             return_value={"data": copy.deepcopy(ITEMS), "has_more": False}) as q, \
+                patch.object(mailer, "_setting",
+                             side_effect=lambda n, d="": domains if n == "QKEEE_ERP_EMAIL_DOMAINS"
+                             and domains is not None else d):
+            out = testsupport.render(SHARE, copy.deepcopy(args))
+        self.query = q
+        return out
+
+    def test_the_plugin_runs_the_query_as_the_requester(self):
+        _, _, out = self._render(share_args())
+        self.assertEqual(self.query.call_args.args[1:5], ("Item", [], ["name", "item_name", "disabled"], 50))
+        self.assertEqual(self.query.call_args.kwargs["requested_by"], testsupport.REQ)
+        self.assertEqual([r["name"] for r in out["args"]["rows"]], ["IPD000205", "Media Marketing Services"])
+        html = out["request"]["body"]["content"]
+        self.assertIn("APPLE IPAD &lt;AIR&gt;", html)
+        self.assertIn("https://erp.example/app/item/IPD000205", html)
+
+    def test_requester_alone_needs_the_token_only(self):
+        _, _, out = self._render(share_args())
+        self.assertEqual(out["policy"], operations.POLICY_TOKEN)
+
+    def test_other_recipients_need_the_users_code(self):
+        _, _, out = self._render(share_args(recipients=[testsupport.REQ, "sanjay@example.com"]))
+        self.assertEqual(out["policy"], operations.POLICY_TOKEN_USER_CODE)
+        self.assertIn("confirmation_code", out)
+
+    def test_recipient_outside_the_org_domain_is_refused(self):
+        for addr in ("x@gmail.com", "x@example.com.evil.io"):
+            with self.subTest(addr=addr), self.assertRaises(core_client.DoctypeNotAllowedError):
+                self._render(share_args(recipients=[addr]))
+
+    def test_operator_domains_replace_the_requester_domain(self):
+        _, _, out = self._render(share_args(recipients=["a@qkeee.in"]), domains="qkeee.in, qkeee.ai")
+        self.assertEqual(out["request"]["body"]["recipients"], "a@qkeee.in")
+        with self.assertRaises(core_client.DoctypeNotAllowedError):
+            self._render(share_args(recipients=[testsupport.REQ]), domains="qkeee.in")
+
+    def test_malformed_recipients_are_refused(self):
+        for bad in (["a@example.com, b@example.com"], ["a b@example.com"], ["nobody"], [],
+                    [f"u{i}@example.com" for i in range(11)]):
+            with self.subTest(bad=bad), self.assertRaises(core_client.ConnectorError):
+                self._render(share_args(recipients=bad))
+
+    def test_one_email_per_recipient_then_one_communication(self):
+        full_args, ctx, _ = self._render(share_args(recipients=[testsupport.REQ, "sanjay@example.com"]))
+        with connector() as m:
+            m["send_html"].side_effect = lambda to, *a: {"message_id": f"<{to}>", "from": "bot@x", "to": to}
+            result = operations.run_operation(SHARE, full_args, ctx)
+        self.assertEqual([c.args[0] for c in m["send_html"].call_args_list],
+                         [testsupport.REQ, "sanjay@example.com"])
+        body = m["_do_mutate"].call_args.args[3]
+        self.assertEqual(body["recipients"], f"{testsupport.REQ}, sanjay@example.com")
+        self.assertNotIn("reference_doctype", body)
+        self.assertEqual(m["_validate_prod_requester"].call_args.args[2:4], ("Item", "read"))
+        self.assertIn("[approval: token+code]", m["record_audit_log_start"].call_args.kwargs["approval_note"])
+        self.assertEqual(result["_audit_log_status"], "ok")
+
+    def test_partial_send_logs_the_sent_ones_and_warns(self):
+        full_args, ctx, _ = self._render(share_args(recipients=[testsupport.REQ, "sanjay@example.com"]))
+
+        def send(to, *a):
+            if to.startswith("sanjay"):
+                raise mailer.EmailSendError("550 no such user")
+            return {"message_id": "<1>", "from": "bot@x", "to": to}
+        with connector() as m:
+            m["send_html"].side_effect = send
+            result = operations.run_operation(SHARE, full_args, ctx)
+        self.assertEqual(m["_do_mutate"].call_args.args[3]["recipients"], testsupport.REQ)
+        self.assertTrue(any("not sent to sanjay@example.com" in n for n in result["_notes"]))
+
+    def test_rows_changed_after_render_are_refused(self):
+        full_args, ctx, _ = self._render(share_args())
+        full_args["rows"].append({"name": "INJECTED"})
+        with connector() as m:
+            with self.assertRaises(core_client.TokenMismatchError):
+                operations.run_operation(SHARE, full_args, ctx)
+            m["send_html"].assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -181,6 +181,18 @@ erp_execute_write(phase="render", op="notify.summary_email",
                         "notes": ["Expense account: Marketing Expenses - DL"],
                         "follow_ups": ["Add SAC before the first Purchase Invoice."]})
 
+# Email a list to people in the org domain (one email each). The plugin
+# runs the query as the requester. Recipients beyond the requester need
+# the user's confirmation code; show recipients + row count + code, never
+# the HTML. Then execute with the rendered args, token, issued_at and the
+# user's reply.
+erp_execute_write(phase="render", op="notify.share_records",
+                  args={"title": "Item list", "doctype": "Item",
+                        "fields": ["item_name", "item_group", "stock_uom", "disabled"],
+                        "filters": [], "limit": 100,
+                        "recipients": ["nikhil.sharma@qkeee.in", "sanjay.jain@qkeee.in"],
+                        "note": "All Items on demo_erp."})
+
 # A bespoke gated operation
 erp_execute_write(phase="render", op="system_admin.disable_user",
                   args={"name": "<user email>", "reason": "<stated reason>"})
