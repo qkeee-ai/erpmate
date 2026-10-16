@@ -116,6 +116,11 @@ when there are recipients beyond the requester, the confirmation code;
 never paste the HTML. Execute after their reply. A recipient outside the
 allowed domains is refused: report it, do not retry another way.
 
+For both `notify.*` operations: a result with `outcome_unknown` that says
+"The email WAS SENT" means the email reached its recipients and only the
+ERPNext log failed. Tell the user it was delivered. Never render or send
+it again. A refusal that says "no email was sent" means nothing went out.
+
 ## 8. Handle failures honestly
 
 - `write_failure`: ERPNext rejected the write and named the missing or

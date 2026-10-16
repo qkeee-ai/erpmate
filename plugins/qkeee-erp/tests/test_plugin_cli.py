@@ -143,7 +143,8 @@ class SameCodePathTests(CliTestCase):
             self.run_cli(["init-bot", "--dry-run", "--requested-by", REQ])
             self.run_cli(["init-bot", "--confirm-token", "t", "--issued-at", "9", "--requested-by", REQ,
                           "--domains", "procurement, inventory", "--strip-stock-roles"])
-        dry.assert_called_once_with("dev", REQ, [], False)
+        # No --domains: every bot domain (dev-erp 2026-10-16).
+        dry.assert_called_once_with("dev", REQ, init_bot.resolve_domains(None), False)
         real.assert_called_once_with("dev", REQ, "t", 9, ["procurement", "inventory"], True)
 
 

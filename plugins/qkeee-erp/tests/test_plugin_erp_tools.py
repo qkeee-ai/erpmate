@@ -125,6 +125,29 @@ class DiscoverToolTests(ToolTestCase):
         self.assertNotIn("123-45-6789", json.dumps(plan))
         self.assertIn("dev", plan[0]["name"])  # the active Instance tag
 
+    def test_promotion_plan_accepts_doctype_names(self):
+        # dev-erp 2026-10-15: doctypes passed as names crashed the plan
+        # ('str' object has no attribute 'get').
+        out = self.call(self.tools({}), "erp_discover", {
+            "action": "promotion_plan",
+            "findings": {"findings": {}, "doctypes": ["Item", {"name": "Loan", "app": "lending"}]}})
+        self.assertTrue(out["ok"], out)
+        catalog = next(s["file_content"] for s in out["result"]
+                       if s.get("file_path") == "references/doctypes-catalog.md")
+        self.assertIn("**Item**", catalog)
+        self.assertIn("**Loan** — module `?`, app `lending`", catalog)
+
+    def test_promotion_plan_malformed_findings_is_a_clear_refusal(self):
+        for bad in ({"findings": "text"}, {"findings": {}, "doctypes": "Item"},
+                    {"findings": {}, "doctypes": [42]}, {"findings": {}, "custom_apps": ["crm"]},
+                    {"findings": {}, "gaps": "none"}, "flat string"):
+            with self.subTest(bad=bad):
+                out = self.call(self.tools({}), "erp_discover",
+                                {"action": "promotion_plan", "findings": bad})
+                self.assertFalse(out["ok"])
+                self.assertTrue(out.get("invalid_arguments"), out)
+                self.assertIn("promotion_plan", out["error"])
+
     def test_promotion_plan_for_an_existing_learned_skill_edits_it(self):
         out = self.call(self.tools({}), "erp_discover",
                         {"action": "promotion_plan", "findings": {}, "skill_exists": True, "tag": "qa"})

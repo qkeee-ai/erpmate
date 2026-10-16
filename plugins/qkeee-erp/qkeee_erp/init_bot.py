@@ -65,6 +65,7 @@ Usage:
 
 import json
 import os
+import sys
 import time
 
 from .core import client as core_client
@@ -340,6 +341,31 @@ def _meta_bundle(tag: str, doctype: str) -> list:
     cfg = core_client.get_env_config(tag, credential="admin")
     return core_client._request(cfg, "GET", core_client._MERGED_META_PATH,
                                 params={"doctype": doctype}).get("docs") or []
+
+
+def resolve_domains(raw) -> list:
+    """`--domains` → the domain list. Omitted, empty or "all": every bot
+    domain, so one init-bot run gives the bot everything the agent needs
+    (dev-erp 2026-10-16: users should not have to know which domain owns
+    which doctype). "none": no business grants. Otherwise a comma list."""
+    value = (raw or "").strip().lower()
+    if value in ("", "all"):
+        return sorted(provisionable_domains())
+    if value == "none":
+        return []
+    return [d.strip() for d in value.split(",") if d.strip()]
+
+
+def requester_can_grant(tag: str, requested_by: str) -> tuple:
+    """(ok, reason): may `requested_by` approve the bot permission grants?
+    The real run's requester gate checks create on Custom DocPerm; check it
+    here so a dry-run never prints a token that cannot succeed."""
+    try:
+        readiness = core_client.requester_permission_readiness(
+            tag, "Custom DocPerm", "create", requested_by)
+    except ConnectorError as e:
+        return None, f"the requester check failed: {e}"
+    return readiness.get("ready"), readiness.get("reason")
 
 
 def bot_permission_matrix(tag: str, domains) -> tuple:
@@ -731,6 +757,20 @@ def run_dry_run(tag: str, requested_by: str, domains=None, strip_stock_roles: bo
         print("Nothing to do — role, doctype, bot role and grants already in place.")
         return {"tag": tag, "dry_run": True, **plan, "confirm_token": None, "issued_at": None}
 
+    grants_planned = bool(plan.get("business_grants") or plan.get("bot_read_grants"))
+    if grants_planned:
+        ok, reason = requester_can_grant(tag, requested_by)
+        if ok is False:
+            print(f"ERROR: {requested_by} cannot approve these grants: {reason}. The real run "
+                  f"would be refused, so no confirm token is printed. Re-run this dry-run with "
+                  f"--requested-by <a user who holds System Manager>; that person approves the "
+                  f"plan and is recorded in the Audit Log.", file=sys.stderr)
+            return {"tag": tag, "dry_run": True, **plan, "confirm_token": None, "issued_at": None,
+                    "requester_can_grant": False}
+        if ok is None:
+            print(f"WARNING: could not check whether {requested_by} may approve the grants "
+                  f"({reason}). The real run checks it again.", file=sys.stderr)
+
     issued_at = int(time.time())
     token = _plan_token(tag, requested_by, plan, issued_at)
 
@@ -862,7 +902,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int, do
         "  3. Keep QKEEE_ERP_<TAG>_ADMIN_API_KEY/SECRET set: the Admin Account "
         "reads the bot's and the requester's roles for every business call.\n"
         "  4. Run `erp_discover health` on tag " + tag + " and confirm "
-        "bot_roles is ['" + ROLE_NAME + "'] and gaps is []. Re-run with "
-        "--domains <list> to grant the business permissions those domains need."
+        "bot_roles is ['" + ROLE_NAME + "'] and gaps is []. A run without --domains grants "
+        "every domain's business permissions; re-run it after an upgrade adds doctypes."
     )
     return summary

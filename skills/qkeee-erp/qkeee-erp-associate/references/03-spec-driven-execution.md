@@ -192,6 +192,10 @@ unreviewed multi-step write costs a lot.
         Tell the user that an Operator sets the `EMAIL_*` settings; stop.
       - `EmailSendError`: the send failed and nothing was logged. Report
         the message as is. Do not retry in the same turn.
+      - `outcome_unknown` with "The email WAS SENT": it was delivered;
+        only the timeline log failed. Say so, and never send it again.
+      - A refusal that the bot cannot create `Communication`: no email
+        went out. Show the gap prompt; after `RECHECK ENV`, render again.
    3. Add one line to the spec's Outcome: "Summary email sent to
       <requester> <time>, Message-ID <id>; Communication <name>", or why
       it was not sent.

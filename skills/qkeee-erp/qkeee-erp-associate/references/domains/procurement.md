@@ -11,8 +11,9 @@ Supplier KYC gate below. Composing drafts and reports is prompt
 discipline.
 
 Masters made on the way (`Supplier Group`, `Payment Terms Template`) belong
-to no domain: write them with `unscoped.generic` (token-gated). `init-bot
---domains procurement` gives the bot create on them. When `preflight`
+to no domain: write them with `unscoped.generic` (token-gated). One
+`init-bot` run gives the bot create on them, along with every other
+domain's rights. When `preflight`
 shows a `bot_create:` blocker, show its gap prompt and stop; do not try
 another doctype or path.
 

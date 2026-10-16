@@ -52,6 +52,39 @@ _MAX_TITLE = 120
 _DOCSTATUS = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
 
 
+def _require_bot_can_log(ctx) -> None:
+    """Refuse BEFORE any email goes out when the bot cannot create the
+    Communication that logs it (dev-erp 2026-10-15: the email went out,
+    the log failed with 403, and the agent read it as 'not sent').
+    Unreadable rights are not proof of a gap: proceed."""
+    granted, _error = core_client.bot_role_grants(ctx.tag, "Communication", "create")
+    if granted is False:
+        base_url = core_client.get_env_config(ctx.tag).get("base_url", "")
+        steps = ("An Operator (with a System Manager as --requested-by) runs `hermes qkeee-erp "
+                 "init-bot --domains notify`, dry-run first, then with the printed token.")
+        raise core_client.PreconditionFailedError(
+            f"Refusing: no email was sent. The bot role {core_client.BOT_ROLE_NAME!r} has no "
+            f"create on Communication, so the email could not be logged. {steps} Then reply "
+            f"RECHECK ENV and render again.",
+            gaps=[core_client.make_gap(
+                tag=ctx.tag, base_url=base_url, capability="bot_create:Communication",
+                who="bot", user="(the bot account)", role=core_client.BOT_ROLE_NAME,
+                doctype="Communication", perm="create",
+                effect="the agent cannot email ERPNext data: each email must be logged",
+                grant_steps=steps)])
+
+
+def _sent_but_not_logged(exc, req, args, ctx):
+    """on_failure: the log failed. If the email already went out, say so,
+    so nobody sends it twice."""
+    message_id = (req.body or {}).get("message_id")
+    if not message_id:
+        return None
+    return (f"The email WAS SENT to {req.body.get('recipients')} (Message-ID {message_id}). "
+            f"Only logging it as a Communication failed. Do not send it again; tell the user it "
+            f"was delivered and that the ERPNext log is missing.")
+
+
 def _records(args) -> list:
     records = args.get("records")
     if not isinstance(records, list) or not 1 <= len(records) <= _MAX_RECORDS:
@@ -111,6 +144,7 @@ def _facts(ctx, record) -> dict:
 def _render(args, ctx):
     args = dict(args)
     records = _records(args)
+    _require_bot_can_log(ctx)
     args["records"] = [dict(r, facts=_facts(ctx, r)) for r in records]
     # Always from config and the clock, never from the caller: the links in
     # the email point only at this Instance.
@@ -204,6 +238,7 @@ def render_summary_text(*, title, records, notes, follow_ups, requester, tag, in
 
 def _send_email(req, args, ctx):
     """pre_send: every gate has passed. Send; the pipeline then logs."""
+    _require_bot_can_log(ctx)
     body = req.body
     text = render_summary_text(
         title=str(args["title"]).strip(), records=args["records"], notes=_lines(args, "notes"),
@@ -253,6 +288,7 @@ operations.register_operation(operations.Operation(
     summary="task summary email to the requester: render builds it, execute sends it from the "
             "agent's mailbox and logs it on the primary record's timeline",
     prepare=_prepare, render_defaults=_render, pre_send=_send_email,
+    on_failure=_sent_but_not_logged,
     token_policy=operations.POLICY_TOKEN,
     skip_comment=True,
     example_args={"title": "Item created: Media Marketing Services",
@@ -330,6 +366,7 @@ def _fields(args) -> list:
 def _share_render(args, ctx):
     args = dict(args)
     _recipients(args, ctx.requested_by)
+    _require_bot_can_log(ctx)
     fields = _fields(args)
     limit = int(args.get("limit") or 50)
     if not 1 <= limit <= _MAX_ROWS:
@@ -446,6 +483,7 @@ def _share_policy(req) -> str:
 def _share_send(req, args, ctx):
     """pre_send: one email per recipient. None sent → raise, nothing logged.
     Some sent → log the ones that went and warn about the rest."""
+    _require_bot_can_log(ctx)
     sent, failed = [], []
     for to in req.bound["recipients"]:
         try:
@@ -470,7 +508,7 @@ operations.register_operation(operations.Operation(
     summary="email one live query result to org-domain recipients (one email each); execute "
             "sends from the agent's mailbox and logs it",
     prepare=_share_prepare, render_defaults=_share_render, pre_send=_share_send,
-    token_policy=_share_policy, skip_comment=True,
+    token_policy=_share_policy, on_failure=_sent_but_not_logged, skip_comment=True,
     example_args={"title": "Item list", "doctype": "Item",
                   "fields": ["item_name", "item_group", "stock_uom", "disabled"],
                   "filters": [], "limit": 50, "recipients": ["admin@example.com"],

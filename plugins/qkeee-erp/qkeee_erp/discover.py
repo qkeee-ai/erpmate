@@ -284,6 +284,16 @@ def resolve_doctype(tag: str, doctype: str, *, requested_by: str = None, session
 _CORE_APPS = {"frappe", "erpnext"}
 
 
+def _granting_domains(doctype: str) -> str:
+    """The `init-bot --domains` value that grants the bot create on
+    `doctype`, or "" when none does (an admin then adds the row)."""
+    if doctype in doctype_defs.UNSCOPED_PROVISION_DOCTYPES:
+        return "<any domain>"
+    names = sorted({d for d, dts in _client.DOMAIN_WRITE_ALLOWLISTS.items() if doctype in dts}
+                   | {d for d, dts in doctype_defs.DOMAIN_MASTER_DOCTYPES.items() if doctype in dts})
+    return ",".join(names)
+
+
 def bot_permissions() -> dict:
     """What the Bot Account needs on ERPNext, from the code (no network):
     the answer to "which roles/permissions does the bot need". Rows go on
@@ -325,8 +335,9 @@ def bot_permissions() -> dict:
                               "Supplier Group) get read/create/write with that domain. A "
                               "doctype outside every list (e.g. Item) goes "
                               "through unscoped.generic and needs the same rows. An Operator "
-                              "grants all of it with `hermes qkeee-erp init-bot --domains "
-                              "<list>`; erp_discover preflight <DocType> checks one doctype.",
+                              "grants all of it with one `hermes qkeee-erp init-bot` run (every "
+                              "domain unless --domains narrows it); erp_discover preflight "
+                              "<DocType> checks one doctype.",
     }
 
 
@@ -483,10 +494,13 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
         effect = (f"ERPNext refuses the create with 403: the bot sends it and its role "
                   f"{BOT_ROLE_NAME!r} has no create on {doctype}" if bot_ready is False else
                   f"preflight could not read {BOT_ROLE_NAME!r}'s rights on {doctype}")
-        steps = (f"An Operator runs `hermes qkeee-erp init-bot --domains <the domain that owns "
-                 f"or lists {doctype}>`; if no domain covers it, an admin adds the row: Role "
-                 f"Permission Manager → Document Type \"{doctype}\" → Role \"{BOT_ROLE_NAME}\", "
-                 f"Level 0 → tick create, read, write → Save.")
+        domains = _granting_domains(doctype)
+        manual = (f"an admin adds the row: Role Permission Manager → Document Type \"{doctype}\" "
+                  f"→ Role \"{BOT_ROLE_NAME}\", Level 0 → tick create, read, write → Save.")
+        steps = (f"An Operator runs `hermes qkeee-erp init-bot --dry-run --requested-by "
+                 f"<a System Manager>`, then again with the printed token. With no --domains it "
+                 f"grants every domain (this one: {domains}). Or {manual}" if domains else
+                 f"No init-bot domain covers {doctype}: {manual}")
         gaps.append(make_gap(tag=tag, base_url=base_url, capability=f"bot_create:{doctype}",
                              who="bot", user="(the bot account)", role=BOT_ROLE_NAME,
                              doctype=doctype, perm="create", effect=effect, grant_steps=steps,

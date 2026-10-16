@@ -253,6 +253,34 @@ class BotReadGrantTests(unittest.TestCase):
         self.assertIn("read on 'Workflow'", printed)
         self.assertIsNotNone(result["confirm_token"])
 
+    def test_dry_run_prints_no_token_when_the_requester_cannot_grant(self):
+        # dev-erp 2026-10-15: a token was printed, the real run was then
+        # refused because the requester held no System Manager.
+        plan = {"role_needed": False, "doctypes_needed": [], "fields_to_migrate": [],
+                "bot_read_grants": [], "business_grants": ["Purchase Invoice: create"]}
+        with patch.object(init_bot.core_client, "health_check", return_value={}), \
+                patch.object(init_bot, "compute_plan", return_value=plan), \
+                patch.object(init_bot, "requester_can_grant",
+                             return_value=(False, "holds no role with 'create' on 'Custom DocPerm'")), \
+                patch("builtins.print") as out:
+            result = init_bot.run_dry_run("qa", "user@org.com")
+        self.assertIsNone(result["confirm_token"])
+        self.assertFalse(result["requester_can_grant"])
+        printed = "\n".join(str(c.args[0]) for c in out.call_args_list if c.args)
+        self.assertIn("--requested-by <a user who holds System Manager>", printed)
+        self.assertNotIn("--confirm-token", printed)
+
+    def test_no_domains_means_every_bot_domain(self):
+        every = sorted(init_bot.provisionable_domains())
+        self.assertIn("accounts", every)
+        self.assertIn("notify", every)
+        for raw in (None, "", "all", " ALL "):
+            with self.subTest(raw=raw):
+                self.assertEqual(init_bot.resolve_domains(raw), every)
+        self.assertEqual(init_bot.resolve_domains("none"), [])
+        self.assertEqual(init_bot.resolve_domains("procurement, inventory"),
+                         ["procurement", "inventory"])
+
     def test_plan_token_covers_the_grants(self):
         a = init_bot._init_plan_token("qa", "a@b.c", False, [], issued_at=1, bot_read_grants=[])
         b = init_bot._init_plan_token("qa", "a@b.c", False, [], issued_at=1,

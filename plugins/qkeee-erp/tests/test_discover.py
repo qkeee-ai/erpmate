@@ -505,6 +505,16 @@ class PreflightTests(unittest.TestCase):
         gap = result["gaps"][-1]
         self.assertEqual((gap["who"], gap["doctype"], gap["perm"]), ("bot", "Employee", "create"))
 
+    def test_rule9_names_the_init_bot_domain(self):
+        from qkeee_erp_plugin.qkeee_erp import execute_write  # noqa: F401 — registers allowlists
+        cases = {"Communication": "this one: notify", "Supplier Group": "this one: procurement",
+                 "Item": "this one: <any domain>", "Bank Guarantee": "No init-bot domain covers"}
+        for doctype, expected in cases.items():
+            with self.subTest(doctype=doctype):
+                result = self.run_preflight(payload=self.FULL, doctype=doctype,
+                                            bot_create=(False, None))
+                self.assertIn(expected, result["gaps"][-1]["grant_steps"])
+
     def test_rule9_unreadable_bot_rights_is_a_gap_not_a_blocker(self):
         result = self.run_preflight(payload=self.FULL, bot_create=(None, "403"))
         self.assertTrue(result["ready"], result["blockers"])

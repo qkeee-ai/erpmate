@@ -119,6 +119,7 @@ def connector(send_error=None, accounts=None):
         _p(system_admin, "get_permissions",
            return_value=[{"role": "Accounts User", "permlevel": 0, "write": 0}])
         _p(fixed_assets, "map_sales_invoice", return_value=copy.deepcopy(MAPPED_INVOICE))
+        _p(core_client, "bot_role_grants", return_value=(True, None))
         _p(mailer, "send_html", return_value={"message_id": "<qkeee-1@bot.example>",
                                               "from": "agent@bot.example", "to": REQ})
         yield m

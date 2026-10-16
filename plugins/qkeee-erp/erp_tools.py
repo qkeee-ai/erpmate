@@ -85,8 +85,12 @@ SCHEMAS = {
          "doctype": {"type": "string"}, "payload": {"type": "object"},
          "user": {"type": "string", "description": "roles: the user to look up. For the bot's own roles use health bot_roles."},
          "findings": {"type": "object",
-                      "description": "promotion_plan: {findings, doctypes, custom_apps, "
-                                     "non_erpnext_systems, gaps}; pass raw values, they are redacted."},
+                      "description": "promotion_plan: {\"findings\": {environment facts}, "
+                                     "\"doctypes\": [\"DocType name\" or {name, module, app, "
+                                     "custom}], \"custom_apps\": {slug: {...}}, "
+                                     "\"non_erpnext_systems\": {slug: {...}}, \"gaps\": [...]}. "
+                                     "Pass raw values, they are redacted. Then issue the returned "
+                                     "calls in order, each with its own action."},
          "summary": {"type": "string", "description": "promotion_plan: one-line memory breadcrumb."},
          "skill_exists": {"type": "boolean",
                           "description": "promotion_plan: the Instance Notes skill already exists."}},
@@ -123,6 +127,32 @@ SCHEMAS = {
 
 _STOP_AND_ASK = ("Stop. Show the user the missing or invalid fields, ask for the values, update the "
                  "spec and re-confirm. Never fill a value the user did not give.")
+
+
+_PROMOTION_SHAPE = ('{"findings": {...environment facts}, "doctypes": ["Name" or {"name", "module", '
+                    '"app", "custom"}], "custom_apps": {"<slug>": {...}}, "non_erpnext_systems": '
+                    '{"<slug>": {...}}, "gaps": [<gaps[] from health/preflight>]}')
+
+
+def _promotion_findings(doc) -> dict:
+    """Check the promotion_plan `findings` shape before anything formats
+    it: a wrong shape is the caller's to fix, not a crash (dev-erp
+    2026-10-15: doctypes as names raised AttributeError)."""
+    def bad(why):
+        return client.InvalidArgumentsError(
+            f"erp_discover promotion_plan: {why}. Expected findings = {_PROMOTION_SHAPE}.")
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise bad("findings must be an object")
+    for key, kind in (("findings", dict), ("custom_apps", dict), ("non_erpnext_systems", dict),
+                      ("doctypes", list), ("gaps", list)):
+        if doc.get(key) is not None and not isinstance(doc[key], kind):
+            raise bad(f"findings.{key} must be {'an object' if kind is dict else 'a list'}")
+    for i, d in enumerate(doc.get("doctypes") or [], start=1):
+        if not (isinstance(d, str) and d.strip()) and not (isinstance(d, dict) and d.get("name")):
+            raise bad(f"findings.doctypes[{i}] must be a DocType name or an object with a name")
+    return doc
 
 
 class Refused(Exception):
@@ -254,7 +284,7 @@ class ErpTools:
         if action == "bot_permissions":
             return _ok(discover.bot_permissions())
         if action == "promotion_plan":
-            doc = args.get("findings") or {}
+            doc = _promotion_findings(args.get("findings"))
             return _ok(memory_promote.build_promotion_plan(
                 self.tag(args), doc.get("findings") or {}, doctypes=doc.get("doctypes"),
                 custom_apps=doc.get("custom_apps"), non_erpnext_systems=doc.get("non_erpnext_systems"),

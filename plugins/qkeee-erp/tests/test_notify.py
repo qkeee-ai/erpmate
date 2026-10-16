@@ -163,6 +163,48 @@ class SummaryEmailTests(unittest.TestCase):
         self.assertIn("/app/item/A%2FB", html)
 
 
+class EmailLogSafetyTests(unittest.TestCase):
+    """dev-erp 2026-10-15: the email went out, the Communication log then
+    failed with 403, and the agent was told 'not sent' — so it offered to
+    send again. Now: no send while the bot cannot log; a log failure after
+    a send says the email WAS sent."""
+
+    def _rendered(self):
+        with connector() as m, patch.object(core_client, "_fetch_merged_meta", side_effect=_meta):
+            m["get_resource"].side_effect = _live
+            return testsupport.render(KEY, copy.deepcopy(ARGS))
+
+    def test_render_refuses_when_the_bot_cannot_log_the_email(self):
+        with connector() as m, patch.object(core_client, "_fetch_merged_meta", side_effect=_meta):
+            m["get_resource"].side_effect = _live
+            m["bot_role_grants"].return_value = (False, None)
+            with self.assertRaises(core_client.GateRefusal) as e:
+                testsupport.render(KEY, copy.deepcopy(ARGS))
+            m["send_html"].assert_not_called()
+        self.assertIn("init-bot --domains notify", str(e.exception))
+        self.assertEqual(e.exception.gaps[0]["doctype"], "Communication")
+
+    def test_execute_refuses_before_sending_when_the_bot_cannot_log(self):
+        full_args, ctx, _ = self._rendered()
+        with connector() as m:
+            m["bot_role_grants"].return_value = (False, None)
+            with self.assertRaises(core_client.GateRefusal):
+                operations.run_operation(KEY, full_args, ctx)
+            m["send_html"].assert_not_called()
+            self.assertFalse(m["_do_mutate"].called)
+
+    def test_log_failure_after_send_says_the_email_was_sent(self):
+        full_args, ctx, _ = self._rendered()
+        with connector(send_error=core_client.ConnectorError("ERPNext API error (403)")) as m:
+            with self.assertRaises(core_client.PartialOutcomeError) as e:
+                operations.run_operation(KEY, full_args, ctx)
+            m["send_html"].assert_called_once()
+        msg = str(e.exception)
+        self.assertIn("WAS SENT", msg)
+        self.assertIn("<qkeee-1@bot.example>", msg)
+        self.assertIn("Do not send it again", msg)
+
+
 SHARE = "notify.share_records"
 ITEMS = [{"name": "IPD000205", "item_name": "APPLE IPAD <AIR>", "disabled": 0},
          {"name": "Media Marketing Services", "item_name": "Media Marketing Services", "disabled": 0}]

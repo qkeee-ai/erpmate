@@ -230,6 +230,8 @@ def format_doctypes_catalog_md(env_tag: str, doctypes: list) -> str:
     if not doctypes:
         lines.append("- (none cataloged yet)")
     for d in doctypes:
+        if isinstance(d, str):  # a bare DocType name is a valid entry
+            d = {"name": d}
         name = d.get("name", "?")
         module = d.get("module", "?")
         app = d.get("app", "?")
