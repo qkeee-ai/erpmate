@@ -35,7 +35,7 @@ An ERPNext specialist that acts like a functional consultant, not a click-execut
 | `qkeee_erp/core/client.py` | Shared connector — auth, discovery, RBAC pre-check, write-allowlist gate, PII redaction, audit logging |
 | `qkeee_erp/core/operations.py` | The one write pipeline and the registry of named write operations |
 | `qkeee_erp/domains/*.py` | Per-domain allowlists + operations: `hr_payroll`, `accounts`, `mis` (no write path), `sales`, `procurement`, `inventory`, `fixed_assets`, `system_admin` |
-| `qkeee_erp/init_bot.py` | Operator-only, one-time: provisions the `Qkeee Bot` Role + `Qkeee Bot Audit Log` doctype (`hermes qkeee-erp init-bot`) |
+| `qkeee_erp/init_bot.py` | Operator-only (`hermes qkeee-erp init-bot`): provisions the `Qkeee Bot` Role + `Qkeee Bot Audit Log` doctype, assigns the role to the bot user, and grants its business rights — each domain's code doctypes plus its template roles' rows (`doctype_defs.DOMAIN_TEMPLATE_ROLES`, e.g. HR Manager); never delete, never a privileged doctype (agents ADR 0003). Re-run after an app upgrade |
 | `erp_tools.py`, `cli.py`, `settings.py` | The `erp_*` tools, the Operator CLI (same code path as the tools), the plugin settings |
 | `skills/usage/SKILL.md` | `qkeee-erp:usage`: the rules for calling the `erp_*` tools, loaded on demand |
 

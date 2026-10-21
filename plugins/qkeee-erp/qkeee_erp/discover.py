@@ -284,13 +284,21 @@ def resolve_doctype(tag: str, doctype: str, *, requested_by: str = None, session
 _CORE_APPS = {"frappe", "erpnext"}
 
 
-def _granting_domains(doctype: str) -> str:
+def _granting_domains(tag: str, doctype: str) -> str:
     """The `init-bot --domains` value that grants the bot create on
-    `doctype`, or "" when none does (an admin then adds the row)."""
+    `doctype`, or "" when none does (an admin then adds the row). Code
+    lists first; else the domains whose template roles hold create on it
+    (doctype_defs.DOMAIN_TEMPLATE_ROLES, read live with the Admin Account)."""
     if doctype in doctype_defs.UNSCOPED_PROVISION_DOCTYPES:
         return "<any domain>"
     names = sorted({d for d, dts in _client.DOMAIN_WRITE_ALLOWLISTS.items() if doctype in dts}
                    | {d for d, dts in doctype_defs.DOMAIN_MASTER_DOCTYPES.items() if doctype in dts})
+    if not names:
+        from . import init_bot
+        try:
+            names = init_bot.template_domains(tag, doctype)
+        except ConnectorError:
+            names = []
     return ",".join(names)
 
 
@@ -328,13 +336,17 @@ def bot_permissions() -> dict:
                                "_ADMIN_API_SECRET. Without it every business call is refused.",
         "bot_write_doctypes": bot_writes,
         "domain_master_doctypes": {d: list(m) for d, m in doctype_defs.DOMAIN_MASTER_DOCTYPES.items()},
+        "domain_template_roles": {d: list(r) for d, r in doctype_defs.DOMAIN_TEMPLATE_ROLES.items()},
         "admin_write_doctypes": admin_writes,
         "per_doctype_grants": "On each bot write doctype the user will use: read, plus create / "
                               "write / submit / cancel for the operations used, plus read on its "
                               "Link targets. A domain's masters (domain_master_doctypes, e.g. "
-                              "Supplier Group) get read/create/write with that domain. A "
-                              "doctype outside every list (e.g. Item) goes "
-                              "through unscoped.generic and needs the same rows. An Operator "
+                              "Supplier Group) get read/create/write with that domain. A domain "
+                              "also gets the permlevel-0 rows its template roles "
+                              "(domain_template_roles, e.g. HR Manager) hold, without delete, "
+                              "privileged doctypes or if_owner rows. A doctype outside every "
+                              "domain allowlist (e.g. Item, Salary Structure) goes through "
+                              "unscoped.generic and needs the same rows. An Operator "
                               "grants all of it with one `hermes qkeee-erp init-bot` run (every "
                               "domain unless --domains narrows it); erp_discover preflight "
                               "<DocType> checks one doctype.",
@@ -494,7 +506,7 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
         effect = (f"ERPNext refuses the create with 403: the bot sends it and its role "
                   f"{BOT_ROLE_NAME!r} has no create on {doctype}" if bot_ready is False else
                   f"preflight could not read {BOT_ROLE_NAME!r}'s rights on {doctype}")
-        domains = _granting_domains(doctype)
+        domains = _granting_domains(tag, doctype)
         manual = (f"an admin adds the row: Role Permission Manager → Document Type \"{doctype}\" "
                   f"→ Role \"{BOT_ROLE_NAME}\", Level 0 → tick create, read, write → Save.")
         steps = (f"An Operator runs `hermes qkeee-erp init-bot --dry-run --requested-by "

@@ -506,14 +506,28 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual((gap["who"], gap["doctype"], gap["perm"]), ("bot", "Employee", "create"))
 
     def test_rule9_names_the_init_bot_domain(self):
-        from qkeee_erp_plugin.qkeee_erp import execute_write  # noqa: F401 — registers allowlists
+        from qkeee_erp_plugin.qkeee_erp import execute_write, init_bot  # noqa: F401 — registers allowlists
+        # Salary Structure: in no code list, but HR Manager (hr_payroll's
+        # template role) holds create on it (agents ADR 0003, 2026-10-21).
+        templates = {"Salary Structure": ["hr_payroll"]}
         cases = {"Communication": "this one: notify", "Supplier Group": "this one: procurement",
-                 "Item": "this one: <any domain>", "Bank Guarantee": "No init-bot domain covers"}
+                 "Item": "this one: <any domain>", "Salary Structure": "this one: hr_payroll",
+                 "Bank Guarantee": "No init-bot domain covers"}
         for doctype, expected in cases.items():
-            with self.subTest(doctype=doctype):
+            with self.subTest(doctype=doctype), \
+                    patch.object(init_bot, "template_domains",
+                                 side_effect=lambda tag, dt: templates.get(dt, [])):
                 result = self.run_preflight(payload=self.FULL, doctype=doctype,
                                             bot_create=(False, None))
                 self.assertIn(expected, result["gaps"][-1]["grant_steps"])
+
+    def test_rule9_unreadable_template_rights_fall_back_to_the_manual_row(self):
+        from qkeee_erp_plugin.qkeee_erp import init_bot
+        with patch.object(init_bot, "template_domains",
+                          side_effect=_client.ConnectorError("403")):
+            result = self.run_preflight(payload=self.FULL, doctype="Salary Structure",
+                                        bot_create=(False, None))
+        self.assertIn("No init-bot domain covers", result["gaps"][-1]["grant_steps"])
 
     def test_rule9_unreadable_bot_rights_is_a_gap_not_a_blocker(self):
         result = self.run_preflight(payload=self.FULL, bot_create=(None, "403"))

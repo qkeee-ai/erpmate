@@ -97,7 +97,11 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
    submission will work, don't rely on remembering it as a mental note.
    HR Settings can also make `leave_approver` mandatory at create time.
    Leave Allocation and Holiday List Assignment are outside this domain's
-   allowlist; they go through `unscoped.generic` (fully confirmed). In
+   allowlist; they go through `unscoped.generic` (fully confirmed). So do
+   the other HR setup and payroll doctypes (Leave Type, Leave Policy
+   Assignment, Shift Assignment, Attendance, Salary Component, Salary
+   Structure, Salary Structure Assignment, Payroll Entry, Job Opening).
+   `init-bot` gives the bot the same rights on them as HR Manager holds. In
    standard HRMS only System Manager may delete an Employee Onboarding or
    Employee Separation — an HR Manager requester is refused by the RBAC
    gate, correctly.

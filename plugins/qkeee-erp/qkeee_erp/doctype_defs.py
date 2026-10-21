@@ -155,6 +155,23 @@ DOMAIN_MASTER_DOCTYPES = {
     "inventory": ("Item Group", "Brand", "UOM", "Warehouse"),
 }
 
+# Stock roles whose permlevel-0 rows init-bot copies onto ROLE_NAME with
+# their domain (agents ADR 0003 amendment 2026-10-21). The bot never holds
+# these roles; init-bot reads their live rows and grants the same ticks
+# (cut to PROVISION_PTYPES, never a privileged doctype, never an if_owner
+# row, read only on a Single) on ROLE_NAME. So the bot gets what a person
+# in that job gets, and an app upgrade that adds a doctype is covered by
+# the next init-bot run (dev-erp 2026-10-21: 403 on Salary Structure,
+# Attendance, Leave Allocation, Job Opening: no code list named them). A
+# role missing on the instance adds nothing. Adding a role is a code change.
+DOMAIN_TEMPLATE_ROLES = {
+    "accounts": ("Accounts Manager", "Accounts User"),
+    "hr_payroll": ("HR Manager", "HR User"),
+    "inventory": ("Stock Manager", "Stock User", "Item Manager"),
+    "procurement": ("Purchase Manager", "Purchase User", "Purchase Master Manager"),
+    "sales": ("Sales Manager", "Sales User", "Sales Master Manager"),
+}
+
 
 def is_bot_read_link(field: dict) -> bool:
     """A Link field whose target the bot must be able to read: mandatory,

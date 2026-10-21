@@ -103,11 +103,15 @@ META["Supplier"][0]["fields"] += [
 
 class MatrixTests(unittest.TestCase):
 
-    def matrix(self, domains, allow):
+    def matrix(self, domains, allow, role_rows=None, meta=None):
+        meta = {**META, **(meta or {})}
         with patch.object(init_bot, "provisionable_domains", return_value=allow), \
+                patch.object(init_bot, "_role_permissions",
+                             side_effect=lambda tag, role: (role_rows or {}).get(role, [])), \
                 patch.object(init_bot, "_meta_bundle",
-                             side_effect=lambda tag, dt: META.get(dt, bundle(dt))):
-            return init_bot.bot_permission_matrix("qa", domains)
+                             side_effect=lambda tag, dt: meta.get(dt, bundle(dt))):
+            self.result = init_bot.bot_permission_matrix("qa", domains)
+            return self.result[:3]
 
     def test_domain_doctypes_links_and_masters(self):
         matrix, skipped, _ = self.matrix(["procurement"],
@@ -151,8 +155,9 @@ class MatrixTests(unittest.TestCase):
                 raise core_client.ConnectorError("ERPNext API error (404) DoesNotExistError")
             return bundle(dt)
         with patch.object(init_bot, "provisionable_domains", return_value={"hr": ["Employee"]}), \
+                patch.object(init_bot, "_role_permissions", return_value=[]), \
                 patch.object(init_bot, "_meta_bundle", side_effect=meta):
-            matrix, _, not_found = init_bot.bot_permission_matrix("qa", ["hr"])
+            matrix, _, not_found, _ = init_bot.bot_permission_matrix("qa", ["hr"])
         self.assertEqual(not_found, ["Employee"])
         self.assertNotIn("Employee", matrix)
 
@@ -162,12 +167,109 @@ class MatrixTests(unittest.TestCase):
         self.assertIn("procurement", str(ctx.exception))
 
 
+def row(parent, permlevel=0, if_owner=0, **ticks):
+    return {"parent": parent, "permlevel": permlevel, "if_owner": if_owner,
+            **{p: 1 for p in ticks}}
+
+
+# dev-erp 2026-10-21: 403 on Salary Structure / Attendance / Job Opening:
+# no code list named them. HR Manager's live rows cover them.
+HR_ROWS = {
+    "HR Manager": [
+        row("Salary Structure", read=1, create=1, write=1, submit=1, cancel=1, delete=1, amend=1),
+        row("Attendance", read=1, create=1, write=1, submit=1, cancel=1),
+        row("Job Opening", read=1, create=1, write=1, submit=1),     # not submittable
+        row("HR Settings", read=1, write=1),                          # Single
+        row("Salary Detail", read=1, write=1),                        # child table
+        row("User", read=1, write=1),                                 # privileged
+        row("Employee", permlevel=1, read=1, write=1),                # permlevel 1
+        row("Expense Claim", if_owner=1, read=1, create=1),          # own records only
+        row("Holiday List", read=1, export=1, report=1),
+    ],
+    "HR User": [row("Attendance", read=1), row("Leave Allocation", read=1, create=1)],
+}
+HR_META = {
+    "Salary Structure": bundle("Salary Structure", True, [("company", "Company")],
+                               child=("Salary Detail", [("salary_component", "Salary Component")])),
+    "Attendance": bundle("Attendance", True, [("employee", "Employee")]),
+    "Leave Allocation": bundle("Leave Allocation", True),
+    "Holiday List": bundle("Holiday List", links=[("not_followed", "Never Read")]),
+}
+HR_META["HR Settings"] = [{"name": "HR Settings", "issingle": 1, "fields": []}]
+HR_META["Salary Detail"] = [{"name": "Salary Detail", "istable": 1, "fields": []}]
+
+
+class TemplateRoleTests(unittest.TestCase):
+    """agents ADR 0003 amendment 2026-10-21: a domain copies its template
+    roles' permlevel-0 rows (doctype_defs.DOMAIN_TEMPLATE_ROLES)."""
+
+    matrix = MatrixTests.matrix
+
+    def hr(self, rows=HR_ROWS):
+        return self.matrix(["hr_payroll"], {"hr_payroll": ["Employee"]}, rows, HR_META)
+
+    def test_template_rows_are_copied_without_delete(self):
+        matrix, _, _ = self.hr()
+        self.assertEqual(matrix["Salary Structure"], {"read", "create", "write", "submit", "cancel"})
+        self.assertEqual(matrix["Attendance"], {"read", "create", "write", "submit", "cancel"})
+        self.assertEqual(matrix["Leave Allocation"], {"read", "create"})      # HR User row
+        self.assertEqual(matrix["Holiday List"], {"read"})
+        self.assertFalse(any(p - set(init_bot.PROVISION_PTYPES) for p in matrix.values()))
+
+    def test_submit_only_on_submittable_and_read_only_on_singles(self):
+        matrix, _, _ = self.hr()
+        self.assertEqual(matrix["Job Opening"], {"read", "create", "write"})
+        self.assertEqual(matrix["HR Settings"], {"read"})
+
+    def test_child_tables_privileged_permlevel_and_owner_rows_are_left_out(self):
+        matrix, skipped, _ = self.hr()
+        self.assertNotIn("Salary Detail", matrix)
+        self.assertNotIn("User", matrix)
+        self.assertIn("User", skipped)
+        self.assertNotIn("Expense Claim", matrix)
+        self.assertEqual(matrix["Employee"], {"read", "create", "write"})   # code row only
+
+    def test_link_targets_of_writable_template_doctypes_get_read(self):
+        matrix, _, _ = self.hr()
+        self.assertEqual(matrix["Company"], {"read"})
+        self.assertEqual(matrix["Salary Component"], {"read"})            # child-table Link
+        self.assertNotIn("Never Read", matrix)                              # read-only doctype
+
+    def test_templates_come_only_with_their_domain(self):
+        matrix, _, _ = self.matrix(["procurement"], {"procurement": ["Supplier"],
+                                                     "hr_payroll": ["Employee"]}, HR_ROWS, HR_META)
+        self.assertNotIn("Salary Structure", matrix)
+
+    def test_a_template_role_with_no_rows_is_reported(self):
+        self.hr({"HR Manager": HR_ROWS["HR Manager"]})
+        self.assertEqual(self.result[3], ["HR User"])
+
+    def test_template_domains_names_the_domain_whose_role_holds_the_right(self):
+        live = [{"role": "HR Manager", "permlevel": 0, "create": 1},
+                {"role": "Stock User", "permlevel": 0, "if_owner": 1, "create": 1},
+                {"role": "Purchase User", "permlevel": 0, "read": 1}]
+        allow = {"hr_payroll": ["Employee"], "inventory": ["Stock Entry"],
+                 "procurement": ["Supplier"]}
+        with patch.object(init_bot, "provisionable_domains", return_value=allow), \
+                patch.object(init_bot, "_live_permissions", return_value=live):
+            self.assertEqual(init_bot.template_domains("qa", "Salary Structure"), ["hr_payroll"])
+            self.assertEqual(init_bot.template_domains("qa", "User"), [])
+
+    def test_template_roles_are_never_privileged_and_cover_only_bot_domains(self):
+        from qkeee_erp_plugin.qkeee_erp import execute_write  # noqa: F401 — registers allowlists
+        from qkeee_erp_plugin.qkeee_erp.doctype_defs import DOMAIN_TEMPLATE_ROLES
+        bot_domains = set(init_bot.provisionable_domains())
+        self.assertLessEqual(set(DOMAIN_TEMPLATE_ROLES), bot_domains)
+        for roles in DOMAIN_TEMPLATE_ROLES.values():
+            self.assertFalse({"System Manager", "Administrator", init_bot.ROLE_NAME} & set(roles))
+
+
 class BusinessPlanTests(unittest.TestCase):
 
     def plan(self, live_rows):
         matrix = {"Item": {"read", "create", "write"}, "UOM": {"read"},
                   "Purchase Order": {"read", "create", "write", "submit", "cancel"}}
-        with patch.object(init_bot, "bot_permission_matrix", return_value=(matrix, ["User"], [])), \
+        with patch.object(init_bot, "bot_permission_matrix", return_value=(matrix, ["User"], [], [])), \
                 patch.object(init_bot, "_live_role_permissions", return_value=live_rows):
             return init_bot._business_plan("qa", ["procurement"])
 

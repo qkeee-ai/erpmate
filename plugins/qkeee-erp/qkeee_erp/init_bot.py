@@ -76,7 +76,7 @@ import urllib.parse
 
 from .doctype_defs import (ALL_DOCTYPES, AUDIT_LOG, BOT_READ_GRANTS, MIGRATABLE_FIELDS,
                            PROVISION_PTYPES, ROLE_NAME, ROLE_PAYLOAD, UNSCOPED_PROVISION_DOCTYPES,
-                           DOMAIN_MASTER_DOCTYPES, is_bot_read_link)
+                           DOMAIN_MASTER_DOCTYPES, DOMAIN_TEMPLATE_ROLES, is_bot_read_link)
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +245,8 @@ def grant_bot_reads(tag: str, requested_by: str, grants: list, approval_note: st
 
 
 # ---------------------------------------------------------------------------
-# Bot user + business rights (agents ADR 0003 amendment 2026-10-13)
+# Bot user + business rights (agents ADR 0003 amendments 2026-10-13 and
+# 2026-10-21: template-role rows)
 # ---------------------------------------------------------------------------
 # Both ops write the bot's own rights, so both are exempt from the
 # self-escalation rule like the two above: Operator-run from this script,
@@ -368,34 +369,82 @@ def requester_can_grant(tag: str, requested_by: str) -> tuple:
     return readiness.get("ready"), readiness.get("reason")
 
 
+def _role_permissions(tag: str, role: str) -> list:
+    """Every permission row of `role` (Role Permission Manager, admin key)."""
+    cfg = core_client.get_env_config(tag, credential="admin")
+    return core_client._request(cfg, "GET", _PM + "get_permissions",
+                                params={"role": role}).get("message") or []
+
+
+def template_rights(tag: str, domains) -> tuple:
+    """({doctype: {ptype}}, empty_roles): what the domains' template roles
+    (doctype_defs.DOMAIN_TEMPLATE_ROLES) hold at permlevel 0, cut to
+    PROVISION_PTYPES. An if_owner row is left out: the bot's row would hold
+    the right on every record, not only its own. `empty_roles`: template
+    roles with no such row (missing on this instance)."""
+    rights, empty = {}, []
+    for role in sorted({r for d in domains for r in DOMAIN_TEMPLATE_ROLES.get(d, ())}):
+        found = False
+        for row in _role_permissions(tag, role):
+            if int(row.get("permlevel") or 0) or int(row.get("if_owner") or 0):
+                continue
+            held = {p for p in PROVISION_PTYPES if int(row.get(p) or 0)}
+            if held and row.get("parent"):
+                rights.setdefault(row["parent"], set()).update(held)
+                found = True
+        if not found:
+            empty.append(role)
+    return rights, empty
+
+
+def template_domains(tag: str, doctype: str, ptype: str = "create") -> list:
+    """The bot domains whose template roles hold `ptype` on `doctype`
+    (permlevel 0, not if_owner), read live: init-bot grants it with them.
+    [] for a privileged doctype — init-bot never grants on one."""
+    if doctype in _privileged_doctypes():
+        return []
+    roles = {r.get("role") for r in _live_permissions(tag, doctype)
+             if not int(r.get("permlevel") or 0) and not int(r.get("if_owner") or 0)
+             and int(r.get(ptype) or 0)}
+    return sorted(d for d in provisionable_domains()
+                  if roles & set(DOMAIN_TEMPLATE_ROLES.get(d, ())))
+
+
 def bot_permission_matrix(tag: str, domains) -> tuple:
-    """({doctype: {ptype}}, skipped, not_found) for `domains`: each write doctype of
-    each domain, its DOMAIN_MASTER_DOCTYPES and UNSCOPED_PROVISION_DOCTYPES get
-    read/create/write, and
-    submit/cancel when submittable; each Link target a user can set or
-    must set (doctype_defs.is_bot_read_link(); child
-    tables included) gets read. A privileged doctype is skipped, never
-    granted: `skipped` lists it for an admin to decide by hand. A write
-    doctype missing on the instance (its app not installed) goes to
-    `not_found`."""
+    """({doctype: {ptype}}, skipped, not_found, empty_template_roles) for
+    `domains`. Code rows: each write doctype of each domain, its
+    DOMAIN_MASTER_DOCTYPES and UNSCOPED_PROVISION_DOCTYPES get
+    read/create/write, and submit/cancel when submittable. Template rows
+    (template_rights()): what the domain's template roles hold, the same
+    ticks. Both cut the same way: submit/cancel only when submittable, no
+    child tables, read only on a Single. Each doctype the bot may create or
+    write gets read on each Link target a user can set or must set
+    (doctype_defs.is_bot_read_link(); child tables included). A privileged
+    doctype is skipped, never granted: `skipped` lists it for an admin to
+    decide by hand. A doctype missing on the instance (its app not
+    installed) goes to `not_found`."""
     available = provisionable_domains()
     unknown = sorted(set(domains) - set(available))
     if unknown:
         raise ConnectorError(f"Unknown or non-bot domain(s) {unknown}. Choose from "
                              f"{sorted(available)}.")
     privileged = _privileged_doctypes()
-    write_doctypes = sorted({dt for d in domains for dt in available[d]}
-                            | {dt for d in domains for dt in DOMAIN_MASTER_DOCTYPES.get(d, ())}
-                            | set(UNSCOPED_PROVISION_DOCTYPES))
+    code_doctypes = ({dt for d in domains for dt in available[d]}
+                     | {dt for d in domains for dt in DOMAIN_MASTER_DOCTYPES.get(d, ())}
+                     | set(UNSCOPED_PROVISION_DOCTYPES))
+    templates, empty_roles = template_rights(tag, domains)
     matrix, skipped, not_found = {}, set(), []
 
     def grant(doctype, ptypes):
         if doctype in privileged:
             skipped.add(doctype)
-        else:
+        elif ptypes:
             matrix.setdefault(doctype, set()).update(ptypes)
 
-    for doctype in write_doctypes:
+    for doctype in sorted(code_doctypes | set(templates)):
+        if doctype in privileged:
+            skipped.add(doctype)
+            continue
         try:
             bundle = _meta_bundle(tag, doctype)
         except ConnectorError as e:
@@ -404,26 +453,33 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
                 continue
             raise
         main = next((d for d in bundle if d.get("name") == doctype), {})
-        grant(doctype, {"read", "create", "write"}
-              | ({"submit", "cancel"} if main.get("is_submittable") else set()))
-        for doc in bundle:
-            for f in doc.get("fields") or []:
-                if is_bot_read_link(f):
-                    grant(f["options"], {"read"})
-    return matrix, sorted(skipped), not_found
+        if main.get("istable"):
+            continue
+        ptypes = set(templates.get(doctype, ()))
+        if doctype in code_doctypes:
+            ptypes |= {"read", "create", "write", "submit", "cancel"}
+        if not main.get("is_submittable"):
+            ptypes -= {"submit", "cancel"}
+        if main.get("issingle"):
+            ptypes &= {"read"}
+        grant(doctype, ptypes)
+        if ptypes & {"create", "write"}:
+            for doc in bundle:
+                for f in doc.get("fields") or []:
+                    if is_bot_read_link(f):
+                        grant(f["options"], {"read"})
+    return matrix, sorted(skipped), not_found, empty_roles
 
 
 def _live_role_permissions(tag: str) -> list:
     """Every permission row of ROLE_NAME (Role Permission Manager, admin key)."""
-    cfg = core_client.get_env_config(tag, credential="admin")
-    return core_client._request(cfg, "GET", _PM + "get_permissions",
-                                params={"role": ROLE_NAME}).get("message") or []
+    return _role_permissions(tag, ROLE_NAME)
 
 
 def _business_plan(tag: str, domains) -> dict:
     """The steps to reach the matrix, and the role's rights beyond it
     (reported, never removed)."""
-    matrix, skipped, not_found = bot_permission_matrix(tag, domains)
+    matrix, skipped, not_found, empty_roles = bot_permission_matrix(tag, domains)
     rows = {r.get("parent"): r for r in _live_role_permissions(tag)
             if not int(r.get("permlevel") or 0)}
     steps = []
@@ -445,7 +501,7 @@ def _business_plan(tag: str, domains) -> dict:
         if beyond:
             extras.append(f"{doctype}: {', '.join(sorted(beyond))}")
     return {"business_grants": steps, "skipped_privileged": skipped, "extra_rights": extras,
-            "doctypes_not_found": not_found}
+            "doctypes_not_found": not_found, "template_roles_empty": empty_roles}
 
 
 def _bot_role_plan(tag: str, strip_stock_roles: bool) -> dict:
@@ -581,7 +637,7 @@ def compute_plan(tag: str, domains=None, strip_stock_roles: bool = False) -> dic
             "bot_read_grants": _bot_read_grants_needed(tag),
             **_bot_role_plan(tag, strip_stock_roles),
             "business_grants": [], "skipped_privileged": [], "extra_rights": [],
-            "doctypes_not_found": []}
+            "doctypes_not_found": [], "template_roles_empty": []}
     if domains:
         plan.update(_business_plan(tag, domains))
     return plan
@@ -614,8 +670,11 @@ def _print_bot_findings(plan) -> None:
               f"refused while it does (agents ADR 0003). Re-run with --strip-stock-roles to "
               f"remove them.")
     for doctype in plan.get("skipped_privileged") or []:
-        print(f"NOTE: '{doctype}' is a privileged doctype (a Link target); init-bot "
-              f"never grants on it. An admin decides by hand.")
+        print(f"NOTE: '{doctype}' is a privileged doctype (a Link target or a template-role "
+              f"row); init-bot never grants on it. An admin decides by hand.")
+    for role in plan.get("template_roles_empty") or []:
+        print(f"NOTE: template role '{role}' has no permlevel-0 rows on this instance (role "
+              f"missing, or its app is not installed); it adds nothing.")
     for doctype in plan.get("doctypes_not_found") or []:
         print(f"NOTE: '{doctype}' does not exist on this instance (its app is not installed); "
               f"skipped.")
@@ -885,6 +944,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int, do
         "business_grants": business_granted,
         "skipped_privileged": plan.get("skipped_privileged", []),
         "extra_rights": plan.get("extra_rights", []),
+        "template_roles_empty": plan.get("template_roles_empty", []),
         "qkeee_env_file_created": env_created,
     }
     print(json.dumps(summary, indent=2))
@@ -903,6 +963,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int, do
         "reads the bot's and the requester's roles for every business call.\n"
         "  4. Run `erp_discover health` on tag " + tag + " and confirm "
         "bot_roles is ['" + ROLE_NAME + "'] and gaps is []. A run without --domains grants "
-        "every domain's business permissions; re-run it after an upgrade adds doctypes."
+        "every domain's business permissions, including its template roles' rows "
+        "(doctype_defs.DOMAIN_TEMPLATE_ROLES); re-run it after an upgrade adds doctypes."
     )
     return summary
