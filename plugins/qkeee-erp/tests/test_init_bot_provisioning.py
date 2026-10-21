@@ -101,11 +101,22 @@ META["Supplier"][0]["fields"] += [
 ]
 
 
+class AllBut:
+    """_doctype_names() stand-in: every DocType exists except `missing`."""
+
+    def __init__(self, missing=()):
+        self.missing = set(missing)
+
+    def __contains__(self, doctype):
+        return doctype not in self.missing
+
+
 class MatrixTests(unittest.TestCase):
 
-    def matrix(self, domains, allow, role_rows=None, meta=None):
+    def matrix(self, domains, allow, role_rows=None, meta=None, missing=()):
         meta = {**META, **(meta or {})}
         with patch.object(init_bot, "provisionable_domains", return_value=allow), \
+                patch.object(init_bot, "_doctype_names", return_value=AllBut(missing)), \
                 patch.object(init_bot, "_role_permissions",
                              side_effect=lambda tag, role: (role_rows or {}).get(role, [])), \
                 patch.object(init_bot, "_meta_bundle",
@@ -156,6 +167,7 @@ class MatrixTests(unittest.TestCase):
             return bundle(dt)
         with patch.object(init_bot, "provisionable_domains", return_value={"hr": ["Employee"]}), \
                 patch.object(init_bot, "_role_permissions", return_value=[]), \
+                patch.object(init_bot, "_doctype_names", return_value=AllBut()), \
                 patch.object(init_bot, "_meta_bundle", side_effect=meta):
             matrix, _, not_found, _ = init_bot.bot_permission_matrix("qa", ["hr"])
         self.assertEqual(not_found, ["Employee"])
@@ -239,6 +251,17 @@ class TemplateRoleTests(unittest.TestCase):
         matrix, _, _ = self.matrix(["procurement"], {"procurement": ["Supplier"],
                                                      "hr_payroll": ["Employee"]}, HR_ROWS, HR_META)
         self.assertNotIn("Salary Structure", matrix)
+
+    def test_a_doctype_without_a_doctype_record_is_not_planned(self):
+        # demo_erp 2026-10-21: Accounts Manager kept rows on Payment Gateway
+        # (app removed); getdoctype answered, the `add` RPC then 404'd mid-run.
+        rows = {"HR Manager": HR_ROWS["HR Manager"] + [row("Payment Gateway", read=1, write=1)]}
+        matrix, _, not_found = self.matrix(["hr_payroll"], {"hr_payroll": ["Employee"]}, rows,
+                                           HR_META, missing={"Payment Gateway", "Company"})
+        self.assertNotIn("Payment Gateway", matrix)
+        self.assertNotIn("Company", matrix)                                 # dangling Link target
+        self.assertEqual(not_found, ["Company", "Payment Gateway"])
+        self.assertIn("Salary Structure", matrix)
 
     def test_a_template_role_with_no_rows_is_reported(self):
         self.hr({"HR Manager": HR_ROWS["HR Manager"]})

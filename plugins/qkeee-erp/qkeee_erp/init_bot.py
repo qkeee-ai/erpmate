@@ -468,7 +468,23 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
                 for f in doc.get("fields") or []:
                     if is_bot_read_link(f):
                         grant(f["options"], {"read"})
-    return matrix, sorted(skipped), not_found, empty_roles
+    # The permission manager's `add` needs the DocType record. A template
+    # role can keep rows on a doctype whose app was removed, and a Link can
+    # name one, while getdoctype still answers (demo_erp 2026-10-21: 404
+    # "DocType Payment Gateway not found" mid-run). Plan only real ones.
+    existing = _doctype_names(tag)
+    for doctype in sorted(dt for dt in matrix if dt not in existing):
+        del matrix[doctype]
+        not_found.append(doctype)
+    return matrix, sorted(skipped), sorted(not_found), empty_roles
+
+
+def _doctype_names(tag: str) -> set:
+    """Every DocType record's name (one list read, admin key)."""
+    cfg = core_client.get_env_config(tag, credential="admin")
+    rows = core_client._request(cfg, "GET", "/api/resource/DocType",
+                                params={"fields": '["name"]', "limit_page_length": 0}).get("data")
+    return {r.get("name") for r in rows or []}
 
 
 def _live_role_permissions(tag: str) -> list:
