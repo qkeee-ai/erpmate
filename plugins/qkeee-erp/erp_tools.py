@@ -122,8 +122,13 @@ SCHEMAS = {
                                    "this prefix, e.g. inventory, unscoped."},
          "args": {"type": "object", "description": "The operation's arguments."},
          "batch": {"type": "array", "items": {"type": "object"},
-                   "description": 'execute only: [{"op", "args", "confirmation_token"?, "issued_at"?, '
-                                  '"user_confirmation_text"?}] instead of op/args.'},
+                   "description": 'Several steps instead of op/args, at most 25: [{"op", "args"}]. '
+                                  'render returns one batch_token and one confirmation_code for the '
+                                  'whole list; execute with the rendered batch unchanged, '
+                                  "batch_token, issued_at and the user's reply. A submit/cancel "
+                                  'after an earlier step changed the same record takes '
+                                  'args.expected_modified = {"from_step": k}.'},
+         "batch_token": {"type": "string", "description": "execute: the batch render's batch_token."},
          "confirmation_token": {"type": "string"}, "issued_at": {"type": "integer"},
          "user_confirmation_text": {"type": "string"},
          "user_approved": {"type": "boolean",
@@ -352,12 +357,25 @@ class ErpTools:
         if phase not in ("render", "execute"):
             raise client.ConnectorError(f"unknown erp_execute_write phase {phase!r}")
         batch = args.get("batch")
-        if batch is not None and (phase != "execute" or args.get("op")):
-            raise client.ConnectorError("batch is for phase=execute only, without op/args.")
+        if batch is not None and (args.get("op") or args.get("args")):
+            raise client.ConnectorError("batch replaces op/args; pass one or the other.")
         if batch is None:
             self._need(args, "op")
+        if args.get("batch_token") and batch is None:
+            raise client.ConnectorError("batch_token goes with batch.")
         requester = self._requester()
         ctx = self._context(args, requester)
+        if phase == "render" and batch is not None:
+            out = operations.prepare_batch(batch, ctx)
+            if out.get("policy") == operations.POLICY_NONE:
+                out["_note"] = ("No step needs a confirmation. Execute with phase=execute and "
+                                "`batch` as given.")
+            else:
+                out["_note"] = ("Show the user every `steps[].line` and the one `confirmation_code`, "
+                                "and \"expires at HH:MM UTC\" from `expires_at`. Execute with "
+                                "phase=execute, `batch` unchanged, batch_token and issued_at as "
+                                "given, and the user's own reply as user_confirmation_text.")
+            return _ok(out)
         if phase == "render":
             out = operations.prepare_only(args["op"], args.get("args") or {}, ctx)
             if out.get("policy") == operations.POLICY_NONE:
@@ -379,7 +397,7 @@ class ErpTools:
             raise client.ConnectorError("this write needs a confirmation, so latest_prompt (the "
                                         "user's most recent message, verbatim) is mandatory.")
         if batch is not None:
-            report = operations.run_batch(batch, ctx)
+            report = operations.run_batch(batch, ctx, batch_token=args.get("batch_token"))
             return json.dumps({"ok": report["stopped_at"] is None, "result": report}, default=str)
         result = operations.run_operation(args["op"], args.get("args") or {}, ctx)
         if (isinstance(result, dict) and isinstance(result.get("data"), dict)

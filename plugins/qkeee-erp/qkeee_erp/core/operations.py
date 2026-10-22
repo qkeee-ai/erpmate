@@ -102,6 +102,10 @@ class WriteContext:
     user_confirmation_text: Optional[str] = None
     user_approved: bool = False
     approval_note: Optional[str] = None
+    # Set only by run_batch() after it verified the one batch confirmation
+    # (HRMS run review issue 02): "batch <code> step i/n". Never a tool
+    # argument; without_confirmation() clears it.
+    batch_approval: Optional[str] = None
 
     def audit_kwargs(self) -> dict:
         return dict(session_id=self.session_id, domain_code=self.domain_code,
@@ -110,7 +114,7 @@ class WriteContext:
 
     def without_confirmation(self) -> "WriteContext":
         return dataclasses.replace(self, confirmation_token=None, issued_at=None,
-                                   user_confirmation_text=None)
+                                   user_confirmation_text=None, batch_approval=None)
 
 
 @dataclass
@@ -297,6 +301,8 @@ def operation_token(op_key: str, req: PreparedRequest, requested_by: str, issued
 def _verify_token(op: Operation, policy: str, req: PreparedRequest, ctx: WriteContext) -> bool:
     if policy == POLICY_NONE:
         return False
+    if ctx.batch_approval:
+        return True  # run_batch() verified the whole batch's one confirmation
     if not ctx.confirmation_token or ctx.issued_at is None:
         raise _c.ConfirmationRequiredError(
             f"Refusing {req.action} on '{req.doctype}' ({op.key}): a confirmation_token + "
@@ -803,13 +809,15 @@ def run_operation(op_key: str, args: dict, ctx: WriteContext) -> dict:
     return result                                                 # 13
 
 
-def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = None) -> dict:
-    """Render: steps 1-2 plus render_defaults; no gate, no write. The
-    returned `args` are what the execute step must be given back
-    unchanged — they include live facts the render filled in."""
+def _render_request(op_key: str, args: dict, ctx: WriteContext, *, render: bool = True):
+    """Steps 1-2, the cheap gates, enrich and self-escalation, as render
+    runs them; with `render`, also render_defaults and the requester check
+    as a dry run (no gate row): no code for a step the requester cannot
+    run (HRMS run review issue 09). Execute runs the real gate again; the
+    right can change between. Returns (op, args, req, policy)."""
     op = get_operation(resolve_op_key(op_key, args))
     args = dict(args or {})
-    if op.render_defaults:
+    if render and op.render_defaults:
         args = op.render_defaults(args, ctx)
     req = _prepare(op, args, ctx)
     # Refuse early: no point rendering a request the gates will refuse.
@@ -818,14 +826,27 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
     if op.enrich:
         op.enrich(req, args, ctx)
     _check_no_self_escalation(op, req, ctx)
-    # The requester's right for this action, as a dry run (no gate row):
-    # no code for a step the requester cannot run (HRMS run review issue
-    # 09). Execute runs the real gate again; the right can change between.
-    _c._validate_prod_requester(
-        ctx.tag, ctx.requested_by, req.rbac_doctype, req.rbac_ptype, docname=req.name,
-        for_write=True, domain=op.domain, credential=op.credential, dry=True,
-        **ctx.audit_kwargs())
-    policy = op.policy_for(req)
+    if render:
+        _c._validate_prod_requester(
+            ctx.tag, ctx.requested_by, req.rbac_doctype, req.rbac_ptype, docname=req.name,
+            for_write=True, domain=op.domain, credential=op.credential, dry=True,
+            **ctx.audit_kwargs())
+    return op, args, req, op.policy_for(req)
+
+
+def _token_fields(token: str, policy: str, issued: int, tag: str) -> dict:
+    ttl = _c.token_ttl_seconds(tag)
+    out = {"issued_at": issued, "expires_at": _c.expires_at(issued, ttl), "ttl_minutes": ttl // 60}
+    if policy == POLICY_TOKEN_USER_CODE:
+        out["confirmation_code"] = _c.confirmation_code(token)
+    return out
+
+
+def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = None) -> dict:
+    """Render: steps 1-2 plus render_defaults; no write. The
+    returned `args` are what the execute step must be given back
+    unchanged — they include live facts the render filled in."""
+    op, args, req, policy = _render_request(op_key, args, ctx)
     out = {"op": op.key, "summary": op.summary, "policy": policy, "args": args,
            "request": req.summary(), "notes": list(req.notes)}
     if op_key == AUTO_OP:
@@ -833,26 +854,192 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
     if policy != POLICY_NONE:
         issued = int(time.time()) if issued_at is None else _c.coerce_issued_at(issued_at)
         token = operation_token(op.key, req, ctx.requested_by, issued)
-        ttl = _c.token_ttl_seconds(ctx.tag)
-        out.update(confirmation_token=token, issued_at=issued,
-                   expires_at=_c.expires_at(issued, ttl), ttl_minutes=ttl // 60)
-        if policy == POLICY_TOKEN_USER_CODE:
-            out["confirmation_code"] = _c.confirmation_code(token)
+        out.update(confirmation_token=token, **_token_fields(token, policy, issued, ctx.tag))
     return out
+
+
+# ---------------------------------------------------------------------------
+# One confirmation per batch (HRMS demo run review issue 02, agents ADR 0007)
+# ---------------------------------------------------------------------------
+
+MAX_BATCH_STEPS = 25
+_BATCH_RENDER_KEYS = {"op", "args"}
+_FINAL_MARKS = {"submit": "SUBMIT (final)", "cancel": "CANCEL (final)", "delete": "DELETE"}
+
+
+def _check_batch_shape(steps) -> None:
+    if not isinstance(steps, list) or not steps:
+        raise _c.InvalidArgumentsError("batch must be a non-empty list of {op, args} steps.")
+    if len(steps) > MAX_BATCH_STEPS:
+        raise _c.InvalidArgumentsError(
+            f"batch has {len(steps)} steps; at most {MAX_BATCH_STEPS}. Split it into batches.")
+    for i, step in enumerate(steps, start=1):
+        if not isinstance(step, dict) or not step.get("op") or set(step) - _BATCH_RENDER_KEYS:
+            raise _c.InvalidArgumentsError(
+                f"batch step {i}: needs exactly 'op' and 'args' (one confirmation covers the "
+                f"whole batch; no per-step confirmation fields).")
+
+
+def _from_step(args: dict):
+    """The k of `expected_modified: {"from_step": k}`, else None."""
+    ref = (args or {}).get("expected_modified")
+    if not isinstance(ref, dict):
+        return None
+    k = ref.get("from_step")
+    if set(ref) != {"from_step"} or isinstance(k, bool) or not isinstance(k, int):
+        raise _c.InvalidArgumentsError(
+            f'expected_modified must be the record\'s modified or {{"from_step": k}}, got {ref!r}.')
+    return k
+
+
+def _batch_requests(steps: list, ctx: WriteContext, *, render: bool) -> list:
+    prepared = []
+    for i, step in enumerate(steps, start=1):
+        op, args, req, policy = _render_request(step["op"], step.get("args") or {}, ctx,
+                                                render=render)
+        k = _from_step(args)
+        if k is not None:
+            if not 1 <= k < i:
+                raise _c.InvalidArgumentsError(
+                    f"batch step {i}: from_step {k} must name an earlier step (1..{i - 1}).")
+            if req.action not in FINALIZING_ACTIONS:
+                raise _c.InvalidArgumentsError(
+                    f"batch step {i}: from_step only applies to submit/cancel/delete.")
+            prev = prepared[k - 1][2]
+            if prev.doctype != req.doctype or (prev.name and prev.name != req.name):
+                raise _c.InvalidArgumentsError(
+                    f"batch step {i}: from_step {k} writes {prev.doctype} {prev.name!r}, a "
+                    f"different record from {req.doctype} {req.name!r}.")
+        prepared.append((op, args, req, policy))
+    return prepared
+
+
+def _batch_policy(prepared: list) -> str:
+    policies = {p for *_, p in prepared}
+    for policy in (POLICY_TOKEN_USER_CODE, POLICY_TOKEN):
+        if policy in policies:
+            return policy
+    return POLICY_NONE
+
+
+def batch_token(prepared: list, requested_by: str, issued_at) -> str:
+    """The one batch token: binds, in order, each step's operation and full
+    prepared request (doctype, action, name, body, confirmed facts; a
+    from_step reference stays a reference), plus the requester, the batch
+    length and the render time."""
+    return _c.compute_token(
+        kind="batch", requested_by=requested_by or "", issued_at=_c.coerce_issued_at(issued_at),
+        length=len(prepared),
+        steps=[dict(op=op.key, **req.token_material()) for op, _, req, _ in prepared])
+
+
+def _step_line(i: int, op: Operation, req: PreparedRequest, policy: str) -> str:
+    target = req.name or (req.body or {}).get("name") or ""
+    line = f"{i}. {req.action} {req.doctype} {target}".rstrip() + f" ({op.key})"
+    if req.action in _FINAL_MARKS:
+        line += f" — {_FINAL_MARKS[req.action]}"
+    if policy == POLICY_NONE:
+        line += " — no code needed"
+    return line
+
+
+def prepare_batch(steps: list, ctx: WriteContext, issued_at: int = None) -> dict:
+    """Render a batch: every step prepared as prepare_only() does, then ONE
+    token and ONE code over the ordered list. `batch` holds the {op, args}
+    to pass back unchanged (resolved op keys, live facts filled in)."""
+    _check_batch_shape(steps)
+    prepared = _batch_requests(steps, ctx, render=True)
+    policy = _batch_policy(prepared)
+    out = {"policy": policy,
+           "batch": [{"op": op.key, "args": args} for op, args, _, _ in prepared],
+           "steps": [{"step": i, "op": op.key, "policy": p, "line": _step_line(i, op, req, p),
+                      "request": req.summary(), "notes": list(req.notes)}
+                     for i, (op, _, req, p) in enumerate(prepared, start=1)]}
+    if policy != POLICY_NONE:
+        issued = int(time.time()) if issued_at is None else _c.coerce_issued_at(issued_at)
+        token = batch_token(prepared, ctx.requested_by, issued)
+        out.update(batch_token=token, **_token_fields(token, policy, issued, ctx.tag))
+    return out
+
+
+def _verify_batch(steps: list, ctx: WriteContext, token: str) -> Optional[str]:
+    """Execute side of the batch binding, before step 1: the same steps,
+    in the same order, unchanged; fresh; and the user's reply holds the
+    code. Returns the code (None when the batch needs no user code)."""
+    _check_batch_shape(steps)
+    prepared = _batch_requests(steps, ctx, render=False)
+    policy = _batch_policy(prepared)
+    if ctx.issued_at is None:
+        raise _c.ConfirmationRequiredError("Refusing the batch: issued_at is required with "
+                                           "batch_token. Pass both back from the render.")
+    issued = _c.coerce_issued_at(ctx.issued_at)
+    ttl = _c.token_ttl_seconds(ctx.tag)
+    if not _c.is_fresh(issued, ttl):
+        raise _c.StaleConfirmationError(
+            f"The batch confirmation has expired (it expired at {_c.expires_at(issued, ttl)}; "
+            f"lifetime {ttl // 60} minutes on this {_c.tag_environment(ctx.tag)} Instance). "
+            f"Nothing was sent. Render the batch again and reconfirm.")
+    expected = batch_token(prepared, ctx.requested_by, issued)
+    if token != expected:
+        raise _c.TokenMismatchError(
+            "Refusing the batch: its steps differ from the render (a step added, removed, moved "
+            "or changed, another operation, or another requester). Nothing was sent. Render the "
+            "batch again and reconfirm.")
+    code = _c.confirmation_code(expected)
+    if policy != POLICY_TOKEN_USER_CODE:
+        return code
+    if not ctx.user_confirmation_text or code not in ctx.user_confirmation_text.upper():
+        raise _c.UnconfirmedByUserError(
+            f"Refusing the batch: user_confirmation_text must be the user's own reply, holding "
+            f"confirmation code {code!r}. Nothing was sent. Never write the reply yourself.")
+    return code
+
+
+def _written_record(result) -> dict:
+    data = result.get("data") if isinstance(result, dict) else None
+    if data is None and isinstance(result, dict):
+        data = result.get("message")
+    return data if isinstance(data, dict) else {}
 
 
 _BATCH_STEP_KEYS = {"op", "args", "confirmation_token", "issued_at", "user_confirmation_text",
                     "user_approved", "approval_note"}
 
 
-def run_batch(steps: list, ctx: WriteContext) -> dict:
+def _resolve_from_step(i: int, args: dict, written: dict) -> dict:
+    """Replace `expected_modified: {"from_step": k}` with step k's result
+    `modified`, refusing when step k wrote a different record."""
+    k = _from_step(args)
+    if k is None:
+        return args
+    doctype, name, modified = written.get(k, (None, None, None))
+    if (doctype, name) != (args.get("doctype"), args.get("name")):
+        raise _c.PreconditionFailedError(
+            f"batch step {i}: from_step {k} wrote {doctype} {name!r}, a different record from "
+            f"{args.get('doctype')} {args.get('name')!r}. Nothing was sent for this step.")
+    if not modified:
+        raise _c.PreconditionFailedError(
+            f"batch step {i}: step {k}'s result has no `modified` to check against. Nothing was "
+            f"sent for this step; render the rest again.")
+    return dict(args, expected_modified=modified)
+
+
+def run_batch(steps: list, ctx: WriteContext, batch_token: str = None) -> dict:
     """Run several operations in order and STOP AT THE FIRST FAILURE (issue
-    07): a gate refusal, an ERPNext rejection or an unknown outcome. Each
-    step is {"op", "args"} plus its own confirmation fields when the op
-    needs them. Returns {"steps": [...], "stopped_at": <1-based step> |
-    None, "counts": {...}}; every step reports `succeeded`, `failed` or
-    `not_attempted`, so the agent can show created / failed / not attempted
-    as one table. Never retry or patch a failed step here: ask the user."""
+    07): a gate refusal, an ERPNext rejection or an unknown outcome. Returns
+    {"steps": [...], "stopped_at": <1-based step> | None, "counts": {...}};
+    every step reports `succeeded`, `failed` or `not_attempted`, so the
+    agent can show created / failed / not attempted as one table. Never
+    retry or patch a failed step here: ask the user.
+
+    With `batch_token` (from prepare_batch(); ctx carries issued_at and the
+    user's reply): each step is exactly {"op", "args"}, the whole batch is
+    checked against the render before step 1, the one code is verified
+    once, and every step's Audit Log row names "batch <code> step i/n". A
+    step's `expected_modified: {"from_step": k}` takes step k's result
+    `modified`. Without it, each step carries its own confirmation fields."""
+    code = _verify_batch(steps, ctx, batch_token) if batch_token is not None else None
+    written = {}
     rows, stopped_at = [], None
     for i, step in enumerate(steps, start=1):
         args = step.get("args") or {}
@@ -866,14 +1053,20 @@ def run_batch(steps: list, ctx: WriteContext) -> dict:
             if unknown or not step.get("op"):
                 raise _c.InvalidArgumentsError(
                     f"batch step {i}: needs 'op' and 'args'; unknown key(s) {sorted(unknown)}")
-            step_ctx = dataclasses.replace(
-                ctx.without_confirmation(), confirmation_token=step.get("confirmation_token"),
-                issued_at=step.get("issued_at"),
-                user_confirmation_text=step.get("user_confirmation_text"),
-                # Per step only: a batch-level flag would mark every write
-                # approved whether or not its own confirm ran.
-                user_approved=bool(step.get("user_approved")),
-                approval_note=step.get("approval_note"))
+            if code is not None:
+                label = f"batch {code} step {i}/{len(steps)}"
+                args = _resolve_from_step(i, args, written)
+                step_ctx = dataclasses.replace(ctx.without_confirmation(), batch_approval=label,
+                                               approval_note=label)
+            else:
+                step_ctx = dataclasses.replace(
+                    ctx.without_confirmation(), confirmation_token=step.get("confirmation_token"),
+                    issued_at=step.get("issued_at"),
+                    user_confirmation_text=step.get("user_confirmation_text"),
+                    # Per step only: a batch-level flag would mark every write
+                    # approved whether or not its own confirm ran.
+                    user_approved=bool(step.get("user_approved")),
+                    approval_note=step.get("approval_note"))
             result = run_operation(step["op"], args, step_ctx)
         except _c.ConnectorError as e:
             stopped_at = i
@@ -886,6 +1079,9 @@ def run_batch(steps: list, ctx: WriteContext) -> dict:
                 row.update(outcome="not_applied", state_confirmed=False, read_back=e.read_back)
             rows.append(row)
             continue
+        record = _written_record(result)
+        written[i] = (args.get("doctype"), record.get("name") or args.get("name"),
+                      record.get("modified"))
         data = result.get("data") if isinstance(result, dict) else None
         row.update(status="succeeded",
                    name=(data or {}).get("name") if isinstance(data, dict) else args.get("name"),
@@ -1122,7 +1318,8 @@ generic_operation(None, token_actions=frozenset(RESOURCE_ACTIONS), example_args=
 # Keyword-style convenience for generic operations
 # ---------------------------------------------------------------------------
 
-_CTX_KEYS = {f.name for f in dataclasses.fields(WriteContext)} - {"tag", "mode", "requested_by"}
+_CTX_KEYS = {f.name for f in dataclasses.fields(WriteContext)} - {"tag", "mode", "requested_by",
+                                                                  "batch_approval"}
 
 
 

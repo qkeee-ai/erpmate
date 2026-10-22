@@ -218,9 +218,20 @@ erp_execute_write(phase="render", op="notify.share_records",
 erp_execute_write(phase="render", op="system_admin.disable_user",
                   args={"name": "<user email>", "reason": "<stated reason>"})
 
-# Several writes, stop at the first failure (each step carries its own
-# confirmation fields when it needs them)
-erp_execute_write(phase="execute", batch=[{"op": "hr_payroll.generic", "args": {...}}, ...],
+# Several writes, one code: render the batch, show every steps[].line and
+# the one confirmation_code, then execute the rendered batch unchanged.
+# Stops at the first failure. Step 2 submits what step 1 changed, so it
+# takes step 1's `modified`.
+erp_execute_write(phase="render",
+                  batch=[{"op": "auto", "args": {"doctype": "Interview Feedback",
+                                                 "action": "update", "name": "<name>",
+                                                 "payload": {...}}},
+                         {"op": "auto", "args": {"doctype": "Interview Feedback",
+                                                 "action": "submit", "name": "<name>",
+                                                 "expected_modified": {"from_step": 1}}}],
+                  prompt_summary="<one line>", latest_prompt="<msg>")
+erp_execute_write(phase="execute", batch=<rendered batch>, batch_token="<rendered>",
+                  issued_at=<rendered>, user_confirmation_text="<the user's actual reply>",
                   prompt_summary="<one line>", latest_prompt="<msg>")
 ```
 

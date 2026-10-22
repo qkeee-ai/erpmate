@@ -89,6 +89,15 @@ and the action, and say that access, not connectivity, is the problem.
    `confirmation_token`, `issued_at`, the user's reply verbatim as
    `user_confirmation_text`, and `latest_prompt`.
 
+- **Several writes: one batch, one code.** Render the whole remaining
+  card as one `batch` of `{op, args}` steps (at most 25). Show the user
+  every `steps[].line` (submit, cancel and delete steps are marked) and
+  the one `confirmation_code`. Execute with the rendered `batch`
+  unchanged, `batch_token`, `issued_at` and the user's reply. Any change
+  to the list is refused before step 1. A submit or cancel after an
+  earlier step changed the same record takes
+  `expected_modified: {"from_step": k}`. A step that needs another
+  step's new name goes in the next batch, rendered after this one ran.
 - Never write `user_confirmation_text` yourself.
 - `user_approved=true` only after the user confirmed this exact payload
   in a reply. On a write with no token, the Audit Log records it as
