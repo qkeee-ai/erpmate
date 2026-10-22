@@ -29,7 +29,7 @@ erp_query(doctype="<DocType>",
           fields=["name", "supplier", "company", "posting_date", "grand_total", "status"],
           limit=20, prompt_summary="<one line>")
 
-# A count: ask for the count, never pull every row to count it.
+# A count: ask for count_only; it returns one number, not the rows.
 erp_query(doctype="Attendance", filters=[["company", "=", "<value>"]], count_only=True,
           prompt_summary="<one line>")
 
@@ -133,10 +133,9 @@ its own key. The HR doctypes:
 **Refusals on execute:**
 
 - Any change between render and execute is refused: args, record,
-  requester, or a reply after the render's `expires_at` (15 minutes on
-  production, 60 on non-production; never check the clock in the
-  terminal). The record counts as changed when its `modified` timestamp
-  moves after a submit/cancel/delete render.
+  requester, or a reply after the render's `expires_at`. The record
+  counts as changed when its `modified` timestamp moves after a
+  submit/cancel/delete render.
   Render again and confirm again.
 - Never construct the reply text yourself.
 - A write that needs confirmation is refused without `latest_prompt`.

@@ -42,6 +42,14 @@ class PreflightHiddenReadTests(unittest.TestCase):
         result, _ = self._run(["erpnext", "frappe", "india_compliance"], [])
         self.assertTrue(result["ready"], result["blockers"])
 
+    def test_unlisted_apps_is_a_blocker_for_a_doctype_with_hidden_reads(self):
+        with patch.object(core_client, "probe_bot_hidden_reads") as probe:
+            result = self.run_preflight(meta=dict(COMPANY_META), payload={}, doctype="Company",
+                                        modules=core_client.ConnectorError("403"))
+        self.assertFalse(probe.called)
+        self.assertFalse(result["ready"])
+        self.assertTrue(any("installed apps" in b for b in result["blockers"]))
+
     def test_without_the_app_there_is_no_probe(self):
         result, probe = self._run(["erpnext", "frappe"], [GAP])
         self.assertFalse(probe.called)

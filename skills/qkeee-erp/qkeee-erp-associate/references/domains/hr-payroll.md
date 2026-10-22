@@ -91,8 +91,8 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
    with a live query before you promise the submit will work. HR Settings
    can also make `leave_approver` mandatory at create.
    **Save-draft-then-review-then-submit:** `create` lands it `Open`/
-   `docstatus 0`; re-fetch, set `Approved`/`Rejected` via `update`,
-   re-review, only then `submit` as its own step. In standard HRMS only
+   `docstatus 0`; re-fetch and re-review before the step 6 update and
+   submit. In standard HRMS only
    System Manager may delete an Employee Onboarding or Employee
    Separation; the RBAC gate refuses an HR Manager requester, correctly.
    **Done when:** both preconditions are confirmed live, not assumed,

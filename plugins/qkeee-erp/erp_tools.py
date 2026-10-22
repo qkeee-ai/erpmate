@@ -382,7 +382,7 @@ class ErpTools:
                 out["_note"] = "This operation needs no confirmation token for these args."
             else:
                 out["_note"] = ("Show `request` and `confirmation_code` to the user, and \"expires at "
-                                "HH:MM UTC\" taken from `expires_at` (never run a clock command). "
+                                "HH:MM UTC\" taken from `expires_at`; it is the only clock you need. "
                                 "Execute with "
                                 "phase=execute, the same op, these `args` unchanged, "
                                 "confirmation_token and issued_at as given, and the user's own reply "
@@ -404,7 +404,7 @@ class ErpTools:
                 and not args.get("full_result")):
             result["data"] = operations.compact_record(
                 result["data"], (args.get("args") or {}).get("payload"))
-        warnings =list((result.get("_notes") or []) if isinstance(result, dict) else [])
+        warnings = list((result.get("_notes") or []) if isinstance(result, dict) else [])
         audit_status = result.get("_audit_log_status") if isinstance(result, dict) else None
         if audit_status not in ("ok", "exempt"):
             warnings.append(f"this write's Qkeee Bot Audit Log status is {audit_status!r}: the write "

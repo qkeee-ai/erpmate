@@ -399,12 +399,13 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
     7. The requester's create permission, checked the way the gate checks
        it (client.requester_permission_readiness(), no audit row): not
        confirmed is a blocker. The gate still runs at render and execute.
-    8b. The bot's read on each doctype an installed app reads inside its
-       own checks on this doctype (doctype_defs.HIDDEN_READS): a missing
-       read is a blocker, because ERPNext refuses the write with 403.
     8. The bot's read on the target doctype of each mandatory Link field
        and of each user-settable Link field the payload sets: a gap per
        target it cannot read, never a blocker.
+    8b. The bot's read on each doctype an installed app reads inside its
+       own checks on this doctype (doctype_defs.HIDDEN_READS): a missing
+       read is a blocker, because ERPNext refuses the write with 403. When
+       the installed apps cannot be listed, that is a blocker too.
     9. The bot's own create on `doctype` (its role's permission rows, read
        with the Admin Account): none is a blocker, because the write is
        sent as the bot and ERPNext refuses it; rows that cannot be read
@@ -465,7 +466,7 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
                             f"record may land in a workflow state the user did not expect.")
 
     owning_app, app_error = _module_app(tag, meta.get("module"), read_ctx)
-    apps = []
+    apps = None
     try:
         apps = list_modules(tag, **read_ctx).get("apps_seen_via_modules") or []
         custom_apps = sorted(set(apps) - _CORE_APPS)
@@ -505,18 +506,25 @@ def preflight(tag: str, doctype: str, *, payload: dict = None, requested_by: str
 
     # Rule 8b: reads an installed app makes inside its own checks (F10:
     # India Compliance reads GST Settings while it validates a Company).
-    hidden = doctype_defs.hidden_reads(doctype, apps)
-    if hidden:
+    if apps is None:
+        if any(target == doctype for _, target in doctype_defs.HIDDEN_READS):
+            blockers.append(f"Preflight could not list the installed apps, so it could not "
+                            f"check the reads an app makes while it validates {doctype}.")
+    elif doctype_defs.hidden_reads(doctype, apps):
+        hidden = doctype_defs.hidden_reads(doctype, apps)
         try:
             hidden_gaps = _client.probe_bot_hidden_reads(tag, doctype, hidden)
         except ConnectorError as e:
-            hidden_gaps = [gap_for(e, "(hidden reads)", "read", BOT_ROLE_NAME,
-                                   "preflight could not check the bot's read on "
-                                   f"{sorted(hidden)}")]
+            hidden_gaps = []
+            gaps.append(gap_for(e, "(hidden reads)", "read", BOT_ROLE_NAME,
+                                f"preflight could not check the bot's read on {sorted(hidden)}"))
+            blockers.append(f"Preflight could not check the bot's read on {sorted(hidden)}, "
+                            f"which an app reads while it validates {doctype}.")
         for gap in hidden_gaps:
-            blockers.append(f"Bot permission: {BOT_ROLE_NAME!r} cannot read "
-                            f"{gap.get('doctype')}, which {hidden.get(gap.get('doctype'), 'an app')} "
-                            f"reads while it validates {doctype}; the write would fail with 403.")
+            target = gap.get("doctype")
+            blockers.append(f"Bot permission: {BOT_ROLE_NAME!r} cannot read {target}, which "
+                            f"{hidden.get(target)} reads while it validates {doctype}; the write "
+                            f"would fail with 403.")
         gaps += hidden_gaps
 
     # Rule 9: the bot's own create. The requester check (rule 7) passing

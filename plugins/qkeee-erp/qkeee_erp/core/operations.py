@@ -642,7 +642,7 @@ _UNCHECKED = object()
 
 def _read_back_state(cfg: dict, req: PreparedRequest) -> Optional[dict]:
     """The record's live docstatus, plus status and error_message when the
-    doctype has them, read with the sending credential's bot key: plumbing
+    doctype has them, read with the credential that sent the write: plumbing
     for the write just sent, so no gate row and no Read audit row. None
     when the read fails or returns no docstatus; the write is not undone."""
     path = (f"/api/resource/{urllib.parse.quote(req.doctype)}/"
@@ -712,7 +712,7 @@ def _send(op: Operation, req: PreparedRequest, ctx: WriteContext, *, user_approv
 
     state_confirmed = _UNCHECKED
     if req.transport == "resource" and req.action in _EXPECTED_DOCSTATUS:
-        read_back = _read_back_state(audit_cfg, req)
+        read_back = _read_back_state(send_cfg, req)
         if read_back is None:
             state_confirmed = None
             req.notes.append(f"{req.action} of '{req.doctype}' '{req.name}': could not read the "
@@ -962,10 +962,10 @@ def prepare_batch(steps: list, ctx: WriteContext, issued_at: int = None) -> dict
     return out
 
 
-def _verify_batch(steps: list, ctx: WriteContext, token: str) -> Optional[str]:
+def _verify_batch(steps: list, ctx: WriteContext, token: str) -> tuple:
     """Execute side of the batch binding, before step 1: the same steps,
-    in the same order, unchanged; fresh; and the user's reply holds the
-    code. Returns the code (None when the batch needs no user code)."""
+    in the same order, unchanged; fresh; and, when a step needs it, the
+    user's reply holds the code. Returns (code, prepared requests)."""
     _check_batch_shape(steps)
     prepared = _batch_requests(steps, ctx, render=False)
     policy = _batch_policy(prepared)
@@ -987,12 +987,12 @@ def _verify_batch(steps: list, ctx: WriteContext, token: str) -> Optional[str]:
             "batch again and reconfirm.")
     code = _c.confirmation_code(expected)
     if policy != POLICY_TOKEN_USER_CODE:
-        return code
+        return code, prepared
     if not ctx.user_confirmation_text or code not in ctx.user_confirmation_text.upper():
         raise _c.UnconfirmedByUserError(
             f"Refusing the batch: user_confirmation_text must be the user's own reply, holding "
             f"confirmation code {code!r}. Nothing was sent. Never write the reply yourself.")
-    return code
+    return code, prepared
 
 
 def _written_record(result) -> dict:
@@ -1006,17 +1006,18 @@ _BATCH_STEP_KEYS = {"op", "args", "confirmation_token", "issued_at", "user_confi
                     "user_approved", "approval_note"}
 
 
-def _resolve_from_step(i: int, args: dict, written: dict) -> dict:
+def _resolve_from_step(i: int, args: dict, req: PreparedRequest, written: dict) -> dict:
     """Replace `expected_modified: {"from_step": k}` with step k's result
-    `modified`, refusing when step k wrote a different record."""
+    `modified`, refusing when step k wrote a different record than step
+    i's prepared request targets."""
     k = _from_step(args)
     if k is None:
         return args
     doctype, name, modified = written.get(k, (None, None, None))
-    if (doctype, name) != (args.get("doctype"), args.get("name")):
+    if (doctype, name) != (req.doctype, req.name):
         raise _c.PreconditionFailedError(
             f"batch step {i}: from_step {k} wrote {doctype} {name!r}, a different record from "
-            f"{args.get('doctype')} {args.get('name')!r}. Nothing was sent for this step.")
+            f"{req.doctype} {req.name!r}. Nothing was sent for this step.")
     if not modified:
         raise _c.PreconditionFailedError(
             f"batch step {i}: step {k}'s result has no `modified` to check against. Nothing was "
@@ -1038,7 +1039,8 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None) -> dict:
     once, and every step's Audit Log row names "batch <code> step i/n". A
     step's `expected_modified: {"from_step": k}` takes step k's result
     `modified`. Without it, each step carries its own confirmation fields."""
-    code = _verify_batch(steps, ctx, batch_token) if batch_token is not None else None
+    code, prepared = (_verify_batch(steps, ctx, batch_token) if batch_token is not None
+                      else (None, None))
     written = {}
     rows, stopped_at = [], None
     for i, step in enumerate(steps, start=1):
@@ -1055,7 +1057,7 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None) -> dict:
                     f"batch step {i}: needs 'op' and 'args'; unknown key(s) {sorted(unknown)}")
             if code is not None:
                 label = f"batch {code} step {i}/{len(steps)}"
-                args = _resolve_from_step(i, args, written)
+                args = _resolve_from_step(i, args, prepared[i - 1][2], written)
                 step_ctx = dataclasses.replace(ctx.without_confirmation(), batch_approval=label,
                                                approval_note=label)
             else:
@@ -1080,8 +1082,9 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None) -> dict:
             rows.append(row)
             continue
         record = _written_record(result)
-        written[i] = (args.get("doctype"), record.get("name") or args.get("name"),
-                      record.get("modified"))
+        if prepared:
+            req = prepared[i - 1][2]
+            written[i] = (req.doctype, record.get("name") or req.name, record.get("modified"))
         data = result.get("data") if isinstance(result, dict) else None
         row.update(status="succeeded",
                    name=(data or {}).get("name") if isinstance(data, dict) else args.get("name"),

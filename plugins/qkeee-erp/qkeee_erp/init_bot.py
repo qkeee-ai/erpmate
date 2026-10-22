@@ -517,10 +517,9 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
             # Reads an app makes inside its own checks (HIDDEN_READS). A
             # target missing on the instance (app not installed) is dropped
             # with the other missing doctypes below.
-            for (_, target), reads in HIDDEN_READS.items():
-                if target == doctype:
-                    for read in reads:
-                        grant(read, {"read"})
+            for read in {r for (_, target), rs in HIDDEN_READS.items()
+                         if target == doctype for r in rs}:
+                grant(read, {"read"})
             for doc in bundle:
                 for f in doc.get("fields") or []:
                     if is_bot_read_link(f):
@@ -554,10 +553,9 @@ def _business_plan(tag: str, domains) -> dict:
     (reported, never removed)."""
     matrix, skipped, not_found, empty_roles = bot_permission_matrix(tag, domains)
     # Keyed like the matrix: "<doctype>" at permlevel 0, "<doctype>@<level>"
-    # above it (SUBMIT_GATE_FIELDS). if_owner rows are not the bot's
-    # business rows.
+    # above it (SUBMIT_GATE_FIELDS).
     rows = {level_key(r.get("parent"), int(r.get("permlevel") or 0)): r
-            for r in _live_role_permissions(tag) if not int(r.get("if_owner") or 0)}
+            for r in _live_role_permissions(tag)}
     steps = []
     for key in sorted(matrix):
         row = rows.get(key)
