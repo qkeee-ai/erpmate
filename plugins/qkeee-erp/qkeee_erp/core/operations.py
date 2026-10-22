@@ -827,7 +827,9 @@ GENERIC_ARGS_HELP = {
     "doctype": "target DocType",
     "action": "create | update | submit | cancel | delete",
     "payload": "JSON object (create/update)",
-    "name": "record name (update/submit/cancel/delete)",
+    "name": "record name (update/submit/cancel/delete); on create, the new record's name for a "
+            "doctype named by the user (autoname Prompt / naming rule \"Set by user\", e.g. "
+            "Shift Type, Salary Structure)",
     "expected_modified": "submit/cancel/delete: the record's `modified` — filled by render",
     "staged_fields": "create/update: doc-extraction staged report (see schema_mapping.py)",
     "confirmed_mappings": "create/update: {candidate_key: live_fieldname} the user confirmed",
@@ -891,8 +893,10 @@ def prepare_generic(args: dict, ctx: WriteContext, *, extra_keys=()) -> Prepared
             raise _c.ConnectorError(f"{action} takes no payload.")
         payload = None
         bound["expected_modified"] = args.get("expected_modified")
-    return PreparedRequest(transport="resource", doctype=doctype, action=action, name=name,
-                           body=payload, bound=bound)
+    # A create's `name` is the new record's name (enrich_generic puts it in
+    # the body), never a record to check or update.
+    return PreparedRequest(transport="resource", doctype=doctype, action=action,
+                           name=None if action == "create" else name, body=payload, bound=bound)
 
 
 def enrich_generic(req: PreparedRequest, args: dict, ctx: WriteContext) -> None:
@@ -909,9 +913,19 @@ def enrich_generic(req: PreparedRequest, args: dict, ctx: WriteContext) -> None:
             payload = apply_purchase_sourced_item_defaults(payload)
         except BareStandardRateOnPurchaseSourcedItemError as e:
             raise _c.PreconditionFailedError(str(e)) from e
+    new_name = (args.get("name") or payload.get("__newname") or payload.get("name")
+                if req.action == "create" else None)
     req.body = _schema_map(ctx, req.doctype, payload, req.notes,
                            staged_fields=args.get("staged_fields"),
                            confirmed_mappings=args.get("confirmed_mappings"))
+    if new_name:
+        # `name` is not a schema field, so the mapping drops it. A doctype
+        # named by the user (autoname Prompt) needs it: Frappe keeps a
+        # given `name` there and reads `__newname` when it is empty
+        # (dev-erp 2026-10-22: "Please set the document name" on Shift
+        # Type, Employee Grade, Salary Structure). Other naming rules
+        # replace it, so sending it is harmless.
+        req.body = dict(req.body or {}, name=str(new_name), __newname=str(new_name))
 
 
 def _generic_policy(token_actions):

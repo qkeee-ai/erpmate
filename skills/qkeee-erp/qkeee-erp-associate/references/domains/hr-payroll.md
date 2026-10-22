@@ -101,7 +101,11 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
    the other HR setup and payroll doctypes (Leave Type, Leave Policy
    Assignment, Shift Assignment, Attendance, Salary Component, Salary
    Structure, Salary Structure Assignment, Payroll Entry, Job Opening).
-   `init-bot` gives the bot the same rights on them as HR Manager holds. In
+   `init-bot` gives the bot the same rights on them as HR Manager holds.
+   Shift Type, Employee Grade, Salary Structure, Payroll Period, Income
+   Tax Slab and Staffing Plan are named by the user: pass the new
+   record's name as the create's `name` argument (it is not a payload
+   field). In
    standard HRMS only System Manager may delete an Employee Onboarding or
    Employee Separation — an HR Manager requester is refused by the RBAC
    gate, correctly.

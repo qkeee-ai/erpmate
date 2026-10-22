@@ -1022,5 +1022,43 @@ class RequestTransportHardeningTests(unittest.TestCase):
         self.assertIn("QKEEE_ERP_T_ADMIN_API_KEY", str(ctx.exception))
 
 
+class CreateNameTests(unittest.TestCase):
+    """dev-erp 2026-10-22: "Please set the document name" on Shift Type,
+    Employee Grade, Salary Structure (autoname Prompt). The schema mapping
+    drops `name`; a create's name now goes in the body as name + __newname."""
+
+    CTX = operations.WriteContext(tag="t", mode="read-write", requested_by=REQ)
+
+    def body(self, args):
+        op = operations.get_operation("unscoped.generic")
+        req = op.prepare(args, self.CTX)
+        schema_only = lambda ctx, dt, p, notes, **kw: {k: v for k, v in p.items()  # noqa: E731
+                                                      if k not in ("name", "__newname")}
+        with patch.object(operations, "_schema_map", side_effect=schema_only):
+            operations.enrich_generic(req, args, self.CTX)
+        return req
+
+    def test_create_name_arg_goes_in_the_body(self):
+        req = self.body({"doctype": "Shift Type", "action": "create", "name": "General",
+                         "payload": {"start_time": "09:00:00"}})
+        self.assertEqual(req.body, {"start_time": "09:00:00", "name": "General",
+                                    "__newname": "General"})
+        self.assertIsNone(req.name)          # not a record to check or update
+
+    def test_create_name_in_the_payload_survives_the_mapping(self):
+        for key in ("name", "__newname"):
+            with self.subTest(key=key):
+                req = self.body({"doctype": "Employee Grade", "action": "create",
+                                 "payload": {key: "G1"}})
+                self.assertEqual(req.body, {"name": "G1", "__newname": "G1"})
+
+    def test_create_without_a_name_and_update_are_unchanged(self):
+        req = self.body({"doctype": "Shift Type", "action": "create", "payload": {"a": 1}})
+        self.assertEqual(req.body, {"a": 1})
+        req = self.body({"doctype": "Shift Type", "action": "update", "name": "General",
+                         "payload": {"a": 1, "name": "Other"}})
+        self.assertEqual((req.name, req.body), ("General", {"a": 1}))
+
+
 if __name__ == "__main__":
     unittest.main()
