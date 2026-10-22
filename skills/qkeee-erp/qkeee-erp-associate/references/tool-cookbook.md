@@ -92,6 +92,9 @@ through every gate, so they stay valid as the code changes.
 `create`/`update` on any other `<domain>.generic` operation are drafts and
 need no token. `list_ops` shows each operation's rule.
 
+The spec rules for live facts, created names and what proves a write
+are in `03-spec-driven-execution.md`, steps 2 and 6.
+
 **Picking the operation:** for a plain doctype write, pass `op="auto"`.
 Render resolves it from `args.doctype` to the domain's `<domain>.generic`
 or to `unscoped.generic`, shows it as `resolved_op`, and the token binds

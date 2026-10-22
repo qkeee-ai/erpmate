@@ -87,7 +87,13 @@ unreviewed multi-step write costs a lot.
    until the user explicitly overrides; record the override, in their
    words, in the spec. Show any `gaps[]` with the role-gap prompt
    (`00-conventions.md`). Run the idempotency query (does a matching
-   record already exist?) and record its result. **Done when:** every
+   record already exist?) and record its result.
+   **Cite a live call for every live fact.** Each "exists", "needs no
+   code" or "is named X" line names the call that showed it (a query,
+   `list_ops`, `preflight`, a render's `policy`), because a fact from
+   memory or from the user's wording is a guess: an HRMS spec once said
+   "creates need no token" and "Designation HR Executive exists", and both
+   were wrong. **Done when:** every
    template section below is filled, or explicitly marked unconfirmed
    rather than left blank, and every create has a `ready: true` preflight
    (or a recorded override) in Schema evidence.
@@ -160,6 +166,14 @@ unreviewed multi-step write costs a lot.
    - **A batch stops at the first failure.** Run several writes as one
      `erp_execute_write batch`. On a failure, nothing after it runs.
      Report every step as a table: created, failed, not attempted.
+   - **Take each created record's name from its result.** A later step
+     links to that name. When steps need each other's names, end the
+     batch there and render the next batch after it ran, because
+     ERPNext's naming (series widths, a Job Applicant named by its email)
+     differs from any prediction.
+   - **Count a write as proven by execute plus read-back.** A render
+     shows the request, nothing more; a submit or cancel is done when its
+     result has `state_confirmed: true`.
    **Done when:** every technical step has run, or is marked
    deviated-with-reason in the spec file — never silently skipped.
 7. **Close out.** Before telling the user the task is done:
@@ -291,7 +305,8 @@ action that removes them — `00-conventions.md`'s Demo and test data.
 ## Exact calls
 Per write: the full `erp_execute_write` command (or the `--batch` step)
 and the payload JSON, exactly as it will run. Nothing is decided at
-execution time. Never record `confirmation_token` or `issued_at`: they
+execution time, except a name an earlier batch created (step 6). Never
+record `confirmation_token` or `issued_at`: they
 are one-time values, not part of the plan. Write "render, then execute
 with the rendered values and the user's reply".
 
