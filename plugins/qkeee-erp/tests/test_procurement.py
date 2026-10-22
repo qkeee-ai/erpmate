@@ -289,7 +289,9 @@ class KycMappingRunsAtRenderAndExecuteTests(unittest.TestCase):
             mapped = {("gstin" if k == "GSTIN" else k): v for k, v in (payload or {}).items()}
             return {"payload": mapped, "status": "ok", "detail": None,
                     "suggested_mappings": [], "unmatched": [], "high_risk": []}
-        with patch.object(schema_mapping, "map_payload_for_write", new=fake_map):
+        # Render runs the requester check as a dry run (HRMS run review issue 09).
+        with patch.object(schema_mapping, "map_payload_for_write", new=fake_map), \
+                patch.object(core_client, "_validate_prod_requester"):
             out = operations.prepare_only(
                 "procurement.generic",
                 {"doctype": "Supplier", "action": "create", "payload": {"supplier_name": "Acme"},

@@ -1138,8 +1138,12 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
                               session_id: str = None, domain_code: str = None,
                               channel: str = None, channel_metadata: dict = None,
                               prompt_summary: str = None, latest_prompt: str = None,
-                              credential: str = "bot") -> None:
+                              credential: str = "bot", dry: bool = False) -> None:
     """The requester-validation gate — RBAC pre-check, every environment.
+
+    `dry=True`: the same checks and refusals, but no gate-decision Audit
+    Log row. Render uses it (HRMS demo run review, issue 09) so no code is
+    shown for a step the requester cannot run; execute runs the real gate.
     (Name reflects a narrower PROD-only origin; the check itself is
     universal.)
 
@@ -1214,6 +1218,8 @@ def _validate_prod_requester(tag: str, requested_by: str, doctype: str, perm_typ
         exempt = PROD_GATE_EXEMPT_DOCTYPES
 
     def _log(allowed: bool, detail: dict) -> None:
+        if dry:
+            return
         _log_gate_decision(
             tag, perm_type=perm_type, doctype=doctype, docname=docname, requested_by=requested_by,
             allowed=allowed, detail=detail, session_id=session_id, domain_code=domain_code,

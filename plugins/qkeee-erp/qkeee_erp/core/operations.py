@@ -45,7 +45,8 @@ gates, and several tokens weren't bound to what was actually sent.
 ## Render
 
 prepare_only() runs steps 1-2 (plus the operation's render_defaults, which
-fill live facts such as `expected_modified`) and returns the prepared
+fill live facts such as `expected_modified`), the cheap gates and step 9 as
+a dry run (no gate row), and returns the prepared
 request, the full args to pass back unchanged, and the token +
 confirmation code. erp_execute_write phase `render` runs it.
 """
@@ -791,6 +792,13 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
     if op.enrich:
         op.enrich(req, args, ctx)
     _check_no_self_escalation(op, req, ctx)
+    # The requester's right for this action, as a dry run (no gate row):
+    # no code for a step the requester cannot run (HRMS run review issue
+    # 09). Execute runs the real gate again; the right can change between.
+    _c._validate_prod_requester(
+        ctx.tag, ctx.requested_by, req.rbac_doctype, req.rbac_ptype, docname=req.name,
+        for_write=True, domain=op.domain, credential=op.credential, dry=True,
+        **ctx.audit_kwargs())
     policy = op.policy_for(req)
     out = {"op": op.key, "summary": op.summary, "policy": policy, "args": args,
            "request": req.summary(), "notes": list(req.notes)}
