@@ -36,6 +36,9 @@ gates, and several tokens weren't bound to what was actually sent.
  9. RBAC         _validate_prod_requester(for_write=True), never exempt
 10. audit start  with the full WriteContext
 11. send         any exception -> audit Failure, re-raised as ConnectorError
+11b. read-back   submit/cancel: the record's docstatus must have changed,
+                 else audit Failure + StateNotConfirmedError (HRMS run
+                 review issue 03); an unreadable record -> state_confirmed None
 12. audit finish then post hooks (best-effort ones never fail the write)
 13. return       result always carries `_audit_log_status`
 
@@ -599,6 +602,27 @@ def _approval_basis(policy: str, verified: bool, agent_asserted: bool) -> str:
     return "agent-asserted" if agent_asserted else "none"
 
 
+_EXPECTED_DOCSTATUS = {"submit": 1, "cancel": 2}
+_READ_BACK_FIELDS = ("docstatus", "status", "error_message")
+_UNCHECKED = object()
+
+
+def _read_back_state(cfg: dict, req: PreparedRequest) -> Optional[dict]:
+    """The record's live docstatus, plus status and error_message when the
+    doctype has them, read with the sending credential's bot key: plumbing
+    for the write just sent, so no gate row and no Read audit row. None
+    when the read fails or returns no docstatus; the write is not undone."""
+    path = (f"/api/resource/{urllib.parse.quote(req.doctype)}/"
+            f"{urllib.parse.quote(req.name or '')}")
+    try:
+        data = (_c._request(cfg, "GET", path) or {}).get("data")
+    except Exception:  # noqa: BLE001 — the write was sent; a failed read never fails it
+        return None
+    if not isinstance(data, dict) or "docstatus" not in data:
+        return None
+    return {k: data[k] for k in _READ_BACK_FIELDS if k in data}
+
+
 def _send(op: Operation, req: PreparedRequest, ctx: WriteContext, *, user_approved: bool,
           skip_comment: bool = None, args: dict = None, approval_basis: str = None) -> dict:
     audit_cfg = _c.get_env_config(ctx.tag)
@@ -653,6 +677,25 @@ def _send(op: Operation, req: PreparedRequest, ctx: WriteContext, *, user_approv
                 exc.__cause__ = e
         _c.finish_audit_failure_and_reraise(audit_cfg, log_name, exc)
 
+    state_confirmed = _UNCHECKED
+    if req.transport == "resource" and req.action in _EXPECTED_DOCSTATUS:
+        read_back = _read_back_state(audit_cfg, req)
+        if read_back is None:
+            state_confirmed = None
+            req.notes.append(f"{req.action} of '{req.doctype}' '{req.name}': could not read the "
+                             f"record back, so its new state is not confirmed. Read it before "
+                             f"reporting the step as done.")
+        elif read_back.get("docstatus") != _EXPECTED_DOCSTATUS[req.action]:
+            detail = ", ".join(f"{k}={v!r}" for k, v in read_back.items())
+            exc = _c.StateNotConfirmedError(
+                f"{req.action} of '{req.doctype}' '{req.name}' was NOT applied: the call returned, "
+                f"but the record now shows {detail} (expected docstatus "
+                f"{_EXPECTED_DOCSTATUS[req.action]}). Report it as failed, with the "
+                f"error_message if any; never as done.", read_back)
+            _c.finish_audit_failure_and_reraise(audit_cfg, log_name, exc)
+        else:
+            state_confirmed = True
+
     data = result.get("data") if isinstance(result, dict) else None
     if data is None and isinstance(result, dict):
         data = result.get("message")
@@ -681,6 +724,8 @@ def _send(op: Operation, req: PreparedRequest, ctx: WriteContext, *, user_approv
         result["_audit_log_status"] = (_audit_status(req.audit_doctype, log_name, finish_ok)
                                        if op.audit else "exempt")
         result["_operation"] = op.key
+        if state_confirmed is not _UNCHECKED:
+            result["state_confirmed"] = state_confirmed
     return result
 
 
@@ -801,12 +846,18 @@ def run_batch(steps: list, ctx: WriteContext) -> dict:
                                                       _c.PartialOutcomeError)))
             if isinstance(e, _c.WriteRejectedError):
                 row["write_failure"] = e.failure
+            if isinstance(e, _c.StateNotConfirmedError):
+                row.update(outcome="not_applied", state_confirmed=False, read_back=e.read_back)
             rows.append(row)
             continue
         data = result.get("data") if isinstance(result, dict) else None
         row.update(status="succeeded",
                    name=(data or {}).get("name") if isinstance(data, dict) else args.get("name"),
                    audit_log_status=(result or {}).get("_audit_log_status"))
+        if isinstance(result, dict) and "state_confirmed" in result:
+            row["state_confirmed"] = result["state_confirmed"]
+        if isinstance(result, dict) and result.get("_notes"):
+            row["notes"] = list(result["_notes"])
         rows.append(row)
     counts = {s: sum(r["status"] == s for r in rows)
               for s in ("succeeded", "failed", "not_attempted")}

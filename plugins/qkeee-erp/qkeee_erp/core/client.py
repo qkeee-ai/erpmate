@@ -351,6 +351,19 @@ class WriteRejectedError(ConnectorError):
         self.failure = failure
 
 
+class StateNotConfirmedError(ConnectorError):
+    """A submit or cancel call returned, but reading the record back shows
+    it did not change state (HRMS demo run review, issue 03: a Payroll
+    Entry submit runs in a background job, and on failure the record stays
+    a draft with status Failed and an error_message). `.read_back` holds
+    the live docstatus, and status and error_message when the doctype has
+    them. The write is not applied: report it as failed, never as done."""
+
+    def __init__(self, message: str, read_back: dict):
+        super().__init__(message)
+        self.read_back = read_back
+
+
 class TransportTimeoutError(ConnectorError):
     """Raised when ERPNext did not answer in time (connect or read
     timeout). For a write the outcome is UNKNOWN: the request may have

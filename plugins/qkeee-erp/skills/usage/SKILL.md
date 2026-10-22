@@ -133,6 +133,11 @@ it again. A refusal that says "no email was sent" means nothing went out.
   again. Never fill a value the user did not give.
 - `outcome_unknown`: the write may or may not have happened. Read the
   record again before any retry.
+- A submit or cancel counts as done only with `state_confirmed: true`:
+  the plugin read the record back and saw the new docstatus. `false`
+  (`outcome: not_applied`) means the record did not change; show
+  `read_back.status` and `read_back.error_message`. `null` means the read
+  failed; read the record yourself before you report it.
 - A batch stops at the first failed step. Report each step as created,
   failed or not attempted.
 - `warnings` on a successful write (for example an audit-log problem):

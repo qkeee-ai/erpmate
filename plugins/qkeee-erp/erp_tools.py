@@ -203,6 +203,8 @@ class ErpTools:
         except client.WriteRejectedError as e:
             return _fail(f"ERPNext rejected the write: {e.failure.get('message')} — {_STOP_AND_ASK}",
                          write_failure=e.failure)
+        except client.StateNotConfirmedError as e:
+            return _fail(str(e), state_confirmed=False, outcome="not_applied", read_back=e.read_back)
         except client.InvalidArgumentsError as e:
             return _fail(f"invalid operation arguments, nothing was sent: {e}", invalid_arguments=True)
         except (client.TransportTimeoutError, client.PartialOutcomeError) as e:
