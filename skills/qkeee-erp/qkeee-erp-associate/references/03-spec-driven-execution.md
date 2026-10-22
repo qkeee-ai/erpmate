@@ -12,12 +12,25 @@ instead **crosses agent boundaries, needs to survive a restart, needs
 human input mid-task, or needs to stay discoverable later** — a
 multi-day payroll run with checkpoints, a bulk data migration, an
 onboarding checklist spanning HR + system-admin — propose Hermes' Kanban
-feature (`kanban_create`/`kanban_show`, `/kanban` CLI, dashboard) instead
-of, or alongside, a flat spec file. A spec file has no board view and
+feature (the `kanban_*` tools: `kanban_create`, `kanban_show`,
+`kanban_list`) instead of, or alongside, a flat spec file. A spec file has no board view and
 nothing else can discover or pick it up later; Kanban is durable,
 human-visible, and built for that shape of work. Write the spec below
 when the work fits one sitting with one actor — don't reach for Kanban by
 default.
+
+**Cards go through the tools.** Create, read and route cards only with
+the `kanban_*` tools; they run in the gateway, which records each card's
+requester for its workers. A card you create lands in triage: tell the
+user it waits there to be specified and split, then reaches workers.
+When the `kanban_*` tools are missing from your tool list, say so (the
+Operator runs `hermes qkeee-erp setup --apply-profile-fixes`) and keep
+the plan in a spec file.
+
+**The board runs the work.** Once the user picks a board for a task, the
+work runs as its cards. Work a card in chat only when the user asks for
+that, and record the result on the card with `kanban_comment`, so the
+board stays the index.
 
 **Two rules once a board is in play.** *Refer by name*: in anything a
 human reads — narration, a status update, a hand-off — name a card by

@@ -10,6 +10,7 @@ is already present; only a missing result is applied.
 | S1 credentials | step | `plugin-data/qkeee-erp/qkeee-erp.env` exists and no legacy `<profile>/qkeee-erp.env` remains (a lone legacy file is moved, mode 600) |
 | S2 config | step | no legacy `skills.config.qkeee_erp` section and no `scripts_dir` setting (settings.migrate_legacy_config) |
 | P1 toolsets | prerequisite | google_chat has `qkeee_erp`; no ERP chat platform (google_chat, or any but cli listing `qkeee_erp`) has `code_execution`; `known_plugin_toolsets` lists `qkeee_erp` for cli, discord and google_chat |
+| P3 kanban | prerequisite | the top-level `toolsets` lists `kanban` (chat gets the kanban tools, not the `hermes kanban` CLI in the terminal); `kanban.orchestrator_profile` and `kanban.default_assignee` name this Profile ("" or "default" for the root Profile) |
 | P2 terminal | prerequisite | `terminal.backend` is `ssh` with host, user and key set; on a host install, none of host, user, key or cwd still holds the Docker sidecar value that the shipped config.yaml carries |
 | S3 terminal key | step | the `terminal.ssh_key` file exists (created if missing) |
 | I2 exclusive target | step | no other Profile under the Hermes root records proven Isolation for the same `ssh_user@ssh_host` |
@@ -291,6 +292,64 @@ class _Toolsets(_Item):
         return changes
 
 
+KANBAN_TOOLSET = "kanban"
+DEFAULT_TOOLSETS = ["hermes-cli"]  # Hermes' default top-level `toolsets`
+KANBAN_PROFILE_KEYS = ("orchestrator_profile", "default_assignee")
+
+
+def profile_name(env) -> str:
+    """This Profile's name as Hermes' kanban settings take it: the directory
+    name under `<root>/profiles/`, or "" for the root (default) Profile."""
+    home = os.path.normpath(env.hermes_home)
+    if os.path.basename(os.path.dirname(home)) == "profiles":
+        return os.path.basename(home)
+    return ""
+
+
+def _names_profile(value, name: str) -> bool:
+    """Does a kanban profile setting name this Profile? "" and "default"
+    both mean the root Profile."""
+    value = value or ""
+    return value == name or (not name and value == "default")
+
+
+class _Kanban(_Item):
+    """dev-erp 2026-10-22: chat had no kanban tools (Hermes shows them only
+    when the top-level `toolsets` lists `kanban`), so the agent ran `hermes
+    kanban` in its terminal: the board landed in the sidecar, out of the
+    dispatcher's reach, and kanban_hooks never saw the create. Tasks must
+    also stay on this Profile: the requester-origin store is per Profile, so
+    a task decomposed onto another Profile blocks (kanban_hooks.py)."""
+    key, label, kind = "P3", "kanban", PREREQUISITE
+    writes_config = True
+
+    def check(self, cfg, env):
+        problems = []
+        toolsets = cfg.get("toolsets")
+        if not (isinstance(toolsets, list) and KANBAN_TOOLSET in toolsets):
+            problems.append(f"toplevel toolsets lacks {KANBAN_TOOLSET} (chat gets no kanban tools)")
+        kanban, name = _mapping(cfg.get("kanban")), profile_name(env)
+        for key in KANBAN_PROFILE_KEYS:
+            if not _names_profile(kanban.get(key), name):
+                problems.append(f"kanban.{key} is {kanban.get(key)!r}, not this Profile "
+                                f"{name or 'default'!r}")
+        return "; ".join(problems) or None
+
+    def apply(self, cfg, env, dry=False):
+        changes = []
+        if not isinstance(cfg.get("toolsets"), list):
+            cfg["toolsets"] = list(DEFAULT_TOOLSETS)
+        if KANBAN_TOOLSET not in cfg["toolsets"]:
+            cfg["toolsets"].append(KANBAN_TOOLSET)
+            changes.append(f"toolsets += {KANBAN_TOOLSET}")
+        kanban, name = _child(cfg, "kanban"), profile_name(env)
+        for key in KANBAN_PROFILE_KEYS:
+            if not _names_profile(kanban.get(key), name):
+                kanban[key] = name
+                changes.append(f"kanban.{key} = {name!r}")
+        return changes
+
+
 class _Terminal(_Item):
     key, label, kind = "P2", "terminal backend", PREREQUISITE
     writes_config = True
@@ -414,8 +473,8 @@ class _IsolationProbe(_Item):
         return [("Isolated: " if ok else "not Isolated: ") + reason]
 
 
-ITEMS = (_Credentials(), _Config(), _Toolsets(), _Terminal(), _TerminalKey(), _ExclusiveTarget(),
-         _IsolationProbe())
+ITEMS = (_Credentials(), _Config(), _Toolsets(), _Terminal(), _Kanban(), _TerminalKey(),
+         _ExclusiveTarget(), _IsolationProbe())
 
 
 # -- state -------------------------------------------------------------------

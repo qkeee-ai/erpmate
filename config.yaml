@@ -368,6 +368,17 @@ platform_toolsets:
     - todo
     - vision
     - web
+# Top-level toolsets: Hermes' default plus `kanban`. The kanban tools
+# (kanban_create, kanban_show, kanban_list, ...) show only when this list
+# names `kanban` (tools/kanban_tools.py, _profile_has_kanban_toolset), even
+# though every platform list above already resolves it. Without it, chat
+# ran `hermes kanban` in the terminal sidecar (dev-erp 2026-10-22): the board
+# landed out of the dispatcher's reach and kanban_hooks never saw the create.
+# `kanban.orchestrator_profile`/`default_assignee` name the Profile, so
+# `hermes qkeee-erp setup --apply-profile-fixes` sets them (item P3).
+toolsets:
+  - hermes-cli
+  - kanban
 # A plugin toolset is ON for a platform unless it is "known" here and absent
 # from that platform's list (hermes_cli/tools_config.py,
 # _enabled_plugin_toolsets). qkeee_erp is known for cli, discord and

@@ -18,6 +18,20 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/ssh/ssh_host_*
 
+# No Hermes CLI here. A `hermes` command in this container acts on its own
+# Hermes home, not the gateway's: dev-erp 2026-10-22 built a kanban board
+# no dispatcher sees, around kanban_hooks, and tried `hermes dashboard`.
+# The ssh backend only syncs files and runs bash, and execute_code stages
+# its own hermes_tools.py, so nothing here needs the entry points. The
+# Python packages stay (skill scripts share the venv). The plugin's
+# identity guard also blocks `hermes` and `python -m hermes_cli` calls.
+RUN set -e; \
+    for bin in hermes hermes-agent hermes-acp; do \
+        while path="$(command -v "$bin")"; do rm -f "$path"; done; \
+    done; \
+    find / -xdev \( -name hermes -o -name hermes-agent -o -name hermes-acp \) \
+        -path '*/bin/*' \( -type f -o -type l \) -delete 2>/dev/null || true
+
 COPY docker/terminal/sshd_config /etc/ssh/sshd_config
 COPY docker/terminal/entrypoint.sh /usr/local/bin/terminal-entrypoint
 RUN sed -i 's/\r$//' /etc/ssh/sshd_config /usr/local/bin/terminal-entrypoint \

@@ -18,6 +18,7 @@ VERSION = "0.2.0"
 
 FRESH = """\
 # erpmate shipped config (abridged)
+toolsets: [hermes-cli, kanban]
 platform_toolsets:
   cli: [clarify, code_execution, qkeee_erp, terminal]
   discord: [clarify, code_execution, terminal]
@@ -52,6 +53,7 @@ terminal:
 """
 
 HALF_DONE = """\
+toolsets: [hermes-cli, kanban]
 platform_toolsets:
   google_chat: [clarify, file, qkeee_erp, terminal]
 known_plugin_toolsets:
@@ -70,6 +72,7 @@ terminal:
 COMMENT_HEAVY = """\
 # Heavily commented config: nothing here needs a change,
 # so setup must not rewrite the file.
+toolsets: [hermes-cli, kanban]   # kanban: chat gets the kanban tools
 platform_toolsets:
   # google chat serves the Requesters
   google_chat: [clarify, qkeee_erp]   # trailing comment
@@ -279,6 +282,69 @@ class HalfDoneTests(SetupTestCase):
         report = setup.run(self.env(), apply_profile_fixes=True)
         self.assertEqual(set(self.statuses(report).values()), {setup.DONE})
         self.assertTrue(all(c.startswith(("P2", "S3", "I1")) for c in report["changes"]), report["changes"])
+
+
+class KanbanTests(SetupTestCase):
+    """P3 (dev-erp 2026-10-22): chat had no kanban tools, so the agent ran
+    `hermes kanban` in the terminal sidecar; and tasks must stay on this
+    Profile, whose origin store kanban_hooks writes."""
+
+    def named_profile(self, name="dev-erp"):
+        self.home = os.path.join(self.home, "profiles", name)
+        os.makedirs(self.home)
+        self.key = os.path.join(self.home, ".terminal-ssh", "id_ed25519").replace("\\", "/")
+
+    def test_profile_name(self):
+        self.assertEqual(setup.profile_name(self.env()), "")
+        self.named_profile()
+        self.assertEqual(setup.profile_name(self.env()), "dev-erp")
+
+    def test_missing_kanban_toolset_is_pending_without_the_flag(self):
+        self.config(FRESH.replace("toolsets: [hermes-cli, kanban]\n", ""))
+        self.credentials()
+        self.make_key()
+        report = setup.run(self.env())
+        item = next(i for i in report["items"] if i["key"] == "P3")
+        self.assertEqual(item["status"], setup.PENDING)
+        self.assertIn("kanban", item["reason"])
+        self.assertNotIn("toolsets", self.read())
+
+    def test_the_flag_adds_kanban_and_names_this_profile(self):
+        self.named_profile()
+        self.config(FRESH.replace("toolsets: [hermes-cli, kanban]\n", ""))
+        self.credentials()
+        self.make_key()
+        report = setup.run(self.env(), apply_profile_fixes=True)
+        self.assertEqual(self.statuses(report)["P3"], setup.DONE)
+        cfg = self.read()
+        self.assertEqual(cfg["toolsets"], ["hermes-cli", "kanban"])
+        self.assertEqual(cfg["kanban"], {"orchestrator_profile": "dev-erp",
+                                         "default_assignee": "dev-erp"})
+
+    def test_another_profile_as_assignee_is_corrected(self):
+        self.named_profile()
+        self.config(FRESH + "kanban:\n  orchestrator_profile: ''\n  default_assignee: other\n"
+                    "  auto_decompose: true\n")
+        self.credentials()
+        self.make_key()
+        self.assertIn("default_assignee", setup._Kanban().check(self.read(), self.env()))
+        setup.run(self.env(), apply_profile_fixes=True)
+        self.assertEqual(self.read()["kanban"], {"orchestrator_profile": "dev-erp",
+                                                 "default_assignee": "dev-erp",
+                                                 "auto_decompose": True})
+
+    def test_root_profile_accepts_empty_or_default(self):
+        for value in ("", "default"):
+            with self.subTest(value=value):
+                cfg = {"toolsets": ["kanban"], "kanban": {"orchestrator_profile": value}}
+                self.assertIsNone(setup._Kanban().check(cfg, self.env()))
+
+    def test_shipped_config_lists_kanban(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "config.yaml")
+        with open(path, encoding="utf-8") as f:
+            shipped = yaml.safe_load(f)
+        self.assertIn("kanban", shipped["toolsets"])
+        self.assertIn("hermes-cli", shipped["toolsets"])
 
 
 class CommentHeavyTests(SetupTestCase):

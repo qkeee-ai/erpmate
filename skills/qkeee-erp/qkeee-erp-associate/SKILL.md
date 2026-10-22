@@ -24,7 +24,9 @@ compaction.
 
 ERPNext and organizational work only. Answer a non-ERP request (general
 knowledge, opinion, small talk) with a short, polite redirect. Never
-answer it anyway. Full rule: `00-conventions.md`.
+answer it anyway. The host and Hermes itself (installs, services, the
+dashboard, settings) are the Operator's: name the step and continue. Full
+rules: `00-conventions.md`.
 
 ## Replies
 

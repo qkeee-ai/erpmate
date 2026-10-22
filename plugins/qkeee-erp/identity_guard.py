@@ -13,6 +13,14 @@ plain forms of that:
                     glob such as qkeee*.env) or a plugin-data directory
 - core_client       execute_code imports the ERP library's core.client
 - erpnext_api       execute_code calls ERPNext REST paths directly
+- hermes_cli        terminal / execute_code runs the `hermes` CLI. The
+                    terminal is the sidecar (agents ADR 0002): a Hermes
+                    command there acts on the sidecar's own Hermes home, not
+                    the gateway's (dev-erp 2026-10-22: `hermes kanban`
+                    built a board no dispatcher sees, around kanban_hooks;
+                    `hermes dashboard` tried an npm build). Kanban goes
+                    through the kanban_* tools; every other Hermes command
+                    is the Operator's.
 
 Pattern matching only: eval, base64 or a script written to disk and run later
 gets past it. Defence in depth, not a boundary; the boundary is the erp_*
@@ -48,6 +56,14 @@ _ENV_FILE = re.compile(r"""qkeee[^\s/'"]*\.e[^\s/'"]*|plugin-data""", re.IGNOREC
 _CORE_CLIENT = re.compile(r"\bcore\.client\b|\bfrom\s+core\s+import\b[^\n]*\bclient\b")
 
 _ERPNEXT_API = re.compile(r"/api/(?:resource|method)\b")
+
+# `hermes ...` in command position (line start, after ; & | ( ` $( or a
+# quote, after VAR=x prefixes, sudo/exec/env, or a path), and
+# `python -m hermes_cli`. `cd /opt/hermes`, `grep hermes f` do not match.
+_HERMES_CLI = re.compile(
+    r"""(?:^|[;&|(`'"]|\$\()\s*(?:\w+=\S*\s+)*(?:(?:sudo|exec|env|command|nohup)\s+)*"""
+    r"""(?:[^\s;&|'"]*/)?hermes(?=[\s'"]|$)|\bpython3?\s+-m\s+hermes_cli\b""",
+    re.MULTILINE)
 
 _HINT = "Use the erp_* tools for ERPNext; they bind the requester from the gateway session."
 
@@ -92,6 +108,13 @@ def pre_tool_call(tool_name=None, args=None, **_) -> Optional[dict]:
         return _block("env_file", "the ERPNext credentials file is gateway-only")
     if any(p.search(source) for p in _SESSION_OVERRIDE):
         return _block("session_override", "HERMES_SESSION_* values come from the gateway and cannot be changed")
+    if _HERMES_CLI.search(source):
+        return {"action": "block", "message": (
+            "qkeee-erp identity guard blocked this call (hermes_cli): the terminal is a separate "
+            "sidecar, so a `hermes` command there acts on a different Hermes than this gateway. "
+            "For Kanban use the kanban_* tools (kanban_create, kanban_show, kanban_list). Any "
+            "other Hermes command (dashboard, config, profile, setup, init-bot) is the "
+            "Operator's: name the step and stop.")}
     if tool_name == "execute_code":
         if _CORE_CLIENT.search(source):
             return _block("core_client", "execute_code cannot use the qkeee-erp client library")

@@ -98,6 +98,54 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("erp_", out["message"])
 
 
+class HermesCliTests(unittest.TestCase):
+    """dev-erp 2026-10-22: `hermes kanban` in the terminal sidecar built a
+    board out of the gateway dispatcher's reach, around kanban_hooks."""
+
+    BLOCKED = [
+        "hermes kanban boards create hrms-demo-qkeee",
+        "hermes -p dev-erp kanban --board x list",
+        "export HOME=/opt/data; hermes dashboard --port 9119",
+        "cd /opt/hermes && hermes kanban create 'T1'",
+        "HERMES_HOME=/opt/data/.hermes hermes kanban list",
+        "/opt/hermes/.venv/bin/hermes config get auxiliary",
+        "sudo hermes kanban list",
+        "bash -c 'hermes kanban list'",
+        "echo x | hermes kanban create t",
+        "out=$(hermes kanban list)",
+        "python3 -m hermes_cli kanban list",
+        "hermes",
+    ]
+    ALLOWED = [
+        "cd /opt/hermes && ls",
+        "ls -la /opt/hermes/web",
+        "grep -rn hermes notes.md",
+        "echo 'the hermes agent'",
+        "cat ~/.hermes/skills/x/SKILL.md",
+        "python hermes_report.py",
+        "id; whoami",
+    ]
+
+    def test_hermes_commands_are_blocked(self):
+        for command in self.BLOCKED:
+            with self.subTest(command=command):
+                out = identity_guard.pre_tool_call(tool_name="terminal", args={"command": command})
+                self.assertEqual((out or {}).get("action"), "block", command)
+                self.assertIn("hermes_cli", out["message"])
+                self.assertIn("kanban_create", out["message"])
+
+    def test_other_mentions_of_hermes_pass(self):
+        for command in self.ALLOWED:
+            with self.subTest(command=command):
+                self.assertIsNone(identity_guard.pre_tool_call(tool_name="terminal",
+                                                               args={"command": command}))
+
+    def test_execute_code_subprocess_is_blocked(self):
+        out = identity_guard.pre_tool_call(
+            tool_name="execute_code", args={"code": "import subprocess\nsubprocess.run(['hermes', 'kanban', 'list'])"})
+        self.assertIn("hermes_cli", out["message"])
+
+
 class ExecuteCodeTests(unittest.TestCase):
     def test_allowed_code_passes(self):
         for code in ALLOWED_CODE:
