@@ -76,7 +76,8 @@ import urllib.parse
 
 from .doctype_defs import (ALL_DOCTYPES, AUDIT_LOG, BOT_READ_GRANTS, MIGRATABLE_FIELDS,
                            PROVISION_PTYPES, ROLE_NAME, ROLE_PAYLOAD, UNSCOPED_PROVISION_DOCTYPES,
-                           DOMAIN_MASTER_DOCTYPES, DOMAIN_TEMPLATE_ROLES, is_bot_read_link)
+                           DOMAIN_MASTER_DOCTYPES, DOMAIN_TEMPLATE_ROLES, PERMLEVEL_PTYPES,
+                           SUBMIT_GATE_FIELDS, is_bot_read_link, level_key, split_level_key)
 
 
 # ---------------------------------------------------------------------------
@@ -292,22 +293,32 @@ def _is_the_bot_with_roles_before(req, args, ctx):
 
 
 def _grant_bot_permission_prepare(args, ctx):
-    """One permlevel-0 step on ROLE_NAME: "add" (a new row, read ticked) or
-    tick one of PROVISION_PTYPES. Never delete, never a privileged doctype."""
+    """One step on ROLE_NAME: "add" (a new row, read ticked) or tick one of
+    PROVISION_PTYPES. Never delete, never a privileged doctype. Permlevel 0,
+    except a submit-gate field's level (SUBMIT_GATE_FIELDS): only there,
+    only add/read/write; the precondition checks the level against meta."""
     steps = ("add",) + PROVISION_PTYPES
-    if set(args) != {"doctype", "step"} or args["step"] not in steps:
+    level = args.get("permlevel", 0)
+    if (set(args) - {"permlevel"} != {"doctype", "step"} or args["step"] not in steps
+            or isinstance(level, bool) or not isinstance(level, int) or level < 0):
         raise core_client.DoctypeNotAllowedError(
-            f"provisioning.grant_bot_permission takes doctype and step (one of {steps}).")
+            f"provisioning.grant_bot_permission takes doctype, step (one of {steps}) and an "
+            f"optional integer permlevel.")
     doctype = args["doctype"]
     if doctype in _privileged_doctypes():
         raise core_client.DoctypeNotAllowedError(
             f"provisioning.grant_bot_permission never grants on privileged doctype {doctype!r}.")
+    if level and (doctype not in SUBMIT_GATE_FIELDS
+                  or args["step"] not in ("add",) + PERMLEVEL_PTYPES):
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.grant_bot_permission grants above permlevel 0 only on a submit-gate "
+            f"field's level ({sorted(SUBMIT_GATE_FIELDS)}), and only {PERMLEVEL_PTYPES}.")
     if args["step"] == "add":
         path, body, ptype, audit_action = (_PM + "add", {"parent": doctype, "role": ROLE_NAME,
-                                                         "permlevel": 0}, "create", "Create")
+                                                         "permlevel": level}, "create", "Create")
     else:
         path, body, ptype, audit_action = (
-            _PM + "update", {"doctype": doctype, "role": ROLE_NAME, "permlevel": 0,
+            _PM + "update", {"doctype": doctype, "role": ROLE_NAME, "permlevel": level,
                              "ptype": args["step"], "value": 1, "if_owner": 0}, "write", "Update")
     return operations.PreparedRequest(
         transport="rpc", doctype="Custom DocPerm", action=f"grant_bot_permission_{args['step']}",
@@ -322,10 +333,36 @@ operations.register_operation(operations.Operation(
     token_policy=operations.POLICY_NONE, credential="admin", allowlist_domain=None,
     skip_comment=True, cli=False, self_escalation_exempt=True))
 
+def submit_gate_levels(tag: str, doctype: str) -> set:
+    """The permlevels above 0 of `doctype`'s SUBMIT_GATE_FIELDS, from its
+    live meta (admin key)."""
+    wanted = set(SUBMIT_GATE_FIELDS.get(doctype, ()))
+    if not wanted:
+        return set()
+    main = next((d for d in _meta_bundle(tag, doctype) if d.get("name") == doctype), {})
+    return _gate_levels(main, wanted)
+
+
+def _gate_levels(main: dict, wanted) -> set:
+    return {int(f.get("permlevel") or 0) for f in main.get("fields") or []
+            if f.get("fieldname") in wanted and int(f.get("permlevel") or 0)}
+
+
+def _level_is_a_submit_gate(req, args, ctx):
+    """Precondition: a row above permlevel 0 only at a level the live meta
+    gives one of the doctype's SUBMIT_GATE_FIELDS."""
+    level = args.get("permlevel", 0)
+    if level and level not in submit_gate_levels(ctx.tag, args["doctype"]):
+        raise core_client.DoctypeNotAllowedError(
+            f"provisioning.grant_bot_permission: permlevel {level} on {args['doctype']!r} holds "
+            f"none of {SUBMIT_GATE_FIELDS[args['doctype']]} on this instance.")
+
+
 operations.register_operation(operations.Operation(
     key="provisioning.grant_bot_permission", domain=None,
     summary=f"grant the {ROLE_NAME} role one business permission (never delete)",
     prepare=_grant_bot_permission_prepare, token_policy=operations.POLICY_NONE,
+    preconditions=(_level_is_a_submit_gate,),
     credential="admin", allowlist_domain=None, skip_comment=True, cli=False,
     self_escalation_exempt=True))
 
@@ -381,12 +418,21 @@ def template_rights(tag: str, domains) -> tuple:
     (doctype_defs.DOMAIN_TEMPLATE_ROLES) hold at permlevel 0, cut to
     PROVISION_PTYPES. An if_owner row is left out: the bot's row would hold
     the right on every record, not only its own. `empty_roles`: template
-    roles with no such row (missing on this instance)."""
+    roles with no such row (missing on this instance). A row above
+    permlevel 0 on a SUBMIT_GATE_FIELDS doctype is kept under
+    "<doctype>@<level>", cut to PERMLEVEL_PTYPES; bot_permission_matrix()
+    keeps it only when the level holds a listed field."""
     rights, empty = {}, []
     for role in sorted({r for d in domains for r in DOMAIN_TEMPLATE_ROLES.get(d, ())}):
         found = False
         for row in _role_permissions(tag, role):
-            if int(row.get("permlevel") or 0) or int(row.get("if_owner") or 0):
+            level = int(row.get("permlevel") or 0)
+            if int(row.get("if_owner") or 0):
+                continue
+            if level:
+                held = {p for p in PERMLEVEL_PTYPES if int(row.get(p) or 0)}
+                if held and row.get("parent") in SUBMIT_GATE_FIELDS:
+                    rights.setdefault(level_key(row["parent"], level), set()).update(held)
                 continue
             held = {p for p in PROVISION_PTYPES if int(row.get(p) or 0)}
             if held and row.get("parent"):
@@ -441,7 +487,7 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
         elif ptypes:
             matrix.setdefault(doctype, set()).update(ptypes)
 
-    for doctype in sorted(code_doctypes | set(templates)):
+    for doctype in sorted(code_doctypes | {k for k in templates if "@" not in k}):
         if doctype in privileged:
             skipped.add(doctype)
             continue
@@ -463,6 +509,9 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
         if main.get("issingle"):
             ptypes &= {"read"}
         grant(doctype, ptypes)
+        if ptypes and doctype in SUBMIT_GATE_FIELDS:
+            for level in _gate_levels(main, SUBMIT_GATE_FIELDS[doctype]):
+                grant(level_key(doctype, level), templates.get(level_key(doctype, level), set()))
         if ptypes & {"create", "write"}:
             for doc in bundle:
                 for f in doc.get("fields") or []:
@@ -473,7 +522,7 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
     # name one, while getdoctype still answers (demo_erp 2026-10-21: 404
     # "DocType Payment Gateway not found" mid-run). Plan only real ones.
     existing = _doctype_names(tag)
-    for doctype in sorted(dt for dt in matrix if dt not in existing):
+    for doctype in sorted(dt for dt in matrix if split_level_key(dt)[0] not in existing):
         del matrix[doctype]
         not_found.append(doctype)
     return matrix, sorted(skipped), sorted(not_found), empty_roles
@@ -496,15 +545,18 @@ def _business_plan(tag: str, domains) -> dict:
     """The steps to reach the matrix, and the role's rights beyond it
     (reported, never removed)."""
     matrix, skipped, not_found, empty_roles = bot_permission_matrix(tag, domains)
-    rows = {r.get("parent"): r for r in _live_role_permissions(tag)
-            if not int(r.get("permlevel") or 0)}
+    # Keyed like the matrix: "<doctype>" at permlevel 0, "<doctype>@<level>"
+    # above it (SUBMIT_GATE_FIELDS). if_owner rows are not the bot's
+    # business rows.
+    rows = {level_key(r.get("parent"), int(r.get("permlevel") or 0)): r
+            for r in _live_role_permissions(tag) if not int(r.get("if_owner") or 0)}
     steps = []
-    for doctype in sorted(matrix):
-        row = rows.get(doctype)
+    for key in sorted(matrix):
+        row = rows.get(key)
         have = {"read"} if row is None else {p for p in PROVISION_PTYPES if int(row.get(p) or 0)}
         if row is None:
-            steps.append(f"{doctype}: add")
-        steps += [f"{doctype}: {p}" for p in PROVISION_PTYPES if p in matrix[doctype] - have]
+            steps.append(f"{key}: add")
+        steps += [f"{key}: {p}" for p in PROVISION_PTYPES if p in matrix[key] - have]
     expected = {dt: set(p) for dt, p in matrix.items()}
     for dt in BOT_READ_GRANTS:
         expected.setdefault(dt, set()).add("read")
@@ -552,15 +604,18 @@ def assign_bot_role(tag: str, requested_by: str, change: dict, approval_note: st
 def grant_business_permissions(tag: str, requested_by: str, steps: list,
                                approval_note: str) -> list:
     for step in steps:
-        doctype, _, what = step.partition(": ")
-        operations.run_operation("provisioning.grant_bot_permission",
-                                 {"doctype": doctype, "step": what},
+        key, _, what = step.partition(": ")
+        doctype, level = split_level_key(key)
+        args = {"doctype": doctype, "step": what}
+        if level:
+            args["permlevel"] = level
+        operations.run_operation("provisioning.grant_bot_permission", args,
                                  operations.WriteContext(tag=tag, mode="read-write",
                                                          requested_by=requested_by,
                                                          user_approved=True,
                                                          approval_note=approval_note))
         print(f"Granted {ROLE_NAME} {'a new row (read)' if what == 'add' else what} on "
-              f"'{doctype}'.")
+              f"'{doctype}'{f' at permlevel {level}' if level else ''}.")
     return list(steps)
 
 

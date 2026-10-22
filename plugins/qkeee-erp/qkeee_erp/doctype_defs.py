@@ -173,6 +173,29 @@ DOMAIN_TEMPLATE_ROLES = {
 }
 
 
+# Fields whose value must be set before ERPNext allows submit, where the
+# field sits above permlevel 0 (agents ADR 0003 amendment 2026-10-22, HRMS
+# demo run review D3: "Only Leave Applications with status 'Approved' and
+# 'Rejected' can be submitted", and Leave Application `status` is
+# permlevel 1). init-bot copies a template role's row at that field's
+# permlevel, read and write only. Adding one is a code change.
+SUBMIT_GATE_FIELDS = {"Leave Application": ("status",)}
+# The ticks init-bot may set on a row above permlevel 0.
+PERMLEVEL_PTYPES = ("read", "write")
+
+
+def level_key(doctype: str, permlevel: int) -> str:
+    """The plan key of a permission row: "<doctype>" at permlevel 0,
+    "<doctype>@<level>" above it."""
+    return f"{doctype}@{permlevel}" if permlevel else doctype
+
+
+def split_level_key(key: str) -> tuple:
+    """(doctype, permlevel) from level_key()."""
+    doctype, sep, level = key.rpartition("@")
+    return (doctype, int(level)) if sep and level.isdigit() else (key, 0)
+
+
 def is_bot_read_link(field: dict) -> bool:
     """A Link field whose target the bot must be able to read: mandatory,
     or one a user can set (not hidden, not read-only, not fetched). The
