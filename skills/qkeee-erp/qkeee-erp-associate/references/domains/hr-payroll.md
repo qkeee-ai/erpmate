@@ -66,8 +66,7 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
         and the record's name; preflight checks it.
      2. `date_of_birth` before `date_of_joining`, and the instance's
         minimum-age rule.
-     3. The Company's default holiday list (HRMS 16: a submitted Holiday
-        List Assignment). Without it, later leave and attendance fail.
+     3. The Company's holiday list ("Building an HR data set", step 2).
    - Flag PII fields. Present the exact payload, confirm, then
      `hr_payroll.generic` `create`/`update`. Re-fetch the Employee by
      `name` afterward (`query_resource` with explicit `fields` is
@@ -87,33 +86,17 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
    explicitly-confirmed step they direct. **Done when:** the draft is
    presented and no `create`/`submit` call has been made from inside this
    step.
-4. **Leave Application submission needs two live-discovered
-   preconditions**, not just declared-mandatory fields: `status` must be
-   `Approved` or `Rejected` before submit (a fresh application defaults to
-   `Open`), and a resolvable Holiday List must exist — on HRMS 16 that is
-   a submitted **Holiday List Assignment** for the Employee or Company
-   (`Employee.holiday_list` alone is not enough; live-confirmed DEMO_ERP
-   2026-10-06) — check this with a real query before ever promising
-   submission will work, don't rely on remembering it as a mental note.
-   HR Settings can also make `leave_approver` mandatory at create time.
-   Leave Allocation and Holiday List Assignment are outside this domain's
-   allowlist; they go through `unscoped.generic` (fully confirmed). So do
-   the other HR setup and payroll doctypes (Leave Type, Leave Policy
-   Assignment, Shift Assignment, Attendance, Salary Component, Salary
-   Structure, Salary Structure Assignment, Payroll Entry, Job Opening).
-   `init-bot` gives the bot the same rights on them as HR Manager holds.
-   Shift Type, Employee Grade, Salary Structure, Payroll Period, Income
-   Tax Slab and Staffing Plan are named by the user: pass the new
-   record's name as the create's `name` argument (it is not a payload
-   field). In
-   standard HRMS only System Manager may delete an Employee Onboarding or
-   Employee Separation — an HR Manager requester is refused by the RBAC
-   gate, correctly.
+4. **Leave Application submit** follows "Building an HR data set", step
+   6, and needs a submitted Holiday List Assignment (step 2); check both
+   with a live query before you promise the submit will work. HR Settings
+   can also make `leave_approver` mandatory at create.
    **Save-draft-then-review-then-submit:** `create` lands it `Open`/
-   `docstatus 0`; re-fetch, set `Approved`/`Rejected` via `update` if
-   needed, re-review, only then `submit` as its own distinct step. **Done
-   when:** both preconditions are confirmed live, not assumed, before
-   `submit` fires.
+   `docstatus 0`; re-fetch, set `Approved`/`Rejected` via `update`,
+   re-review, only then `submit` as its own step. In standard HRMS only
+   System Manager may delete an Employee Onboarding or Employee
+   Separation; the RBAC gate refuses an HR Manager requester, correctly.
+   **Done when:** both preconditions are confirmed live, not assumed,
+   before `submit` fires.
 5. **Approving/submitting a Leave Application auto-creates an Attendance
    record for the covered dates; cancelling auto-cancels it too.** Explain
    this as expected system behavior. Correct an Attendance discrepancy
@@ -121,10 +104,9 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
    by editing the derived Attendance record directly. **Done when:** any
    correction routes through the Leave Application, never a direct edit
    to the derived Attendance record.
-6. **Job Applicant is autonamed by `email_id`**, not a generated series —
-   query/reference by email, and check for an existing record with that
-   email before creating a new one. **Done when:** the email-based
-   existence check has run before `create` fires.
+6. **Before a Job Applicant create**, query by `email_id` for an
+   existing record ("Building an HR data set", step 11). **Done when:**
+   the email-based existence check has run before `create` fires.
 7. **Interview Feedback should only be attributed to interviewers
    actually assigned to that Interview Round** — ERPNext enforces this
    server-side; don't work around it. **Done when:** the attributed
@@ -143,17 +125,76 @@ scheduling, offer letter drafting, salary slip batch creation, HR reports
    fresh-vs-referenced check ran, and the warning (or the cancel
    alternative) was stated before delete is attempted.
 
+## Building an HR data set
+
+Build a company's HR data (a demo set, an onboarding, a payroll run) in
+this order. Each rule sits on the step it affects. Write through
+`op="auto"` (`tool-cookbook.md`, "Picking the operation"), render each
+step's batch after the previous one ran, and take every created name from
+its result.
+
+1. **Company.** Creating it also creates 13 departments named
+   `<department> - <abbr>`: query Department before you create one. With
+   India Compliance installed, the bot needs read on GST Settings, which
+   the app reads while it validates the Company; preflight reports it.
+2. **Holiday List, then Holiday List Assignment (submit it).** HRMS 16
+   resolves holidays only through a submitted assignment; a Holiday List
+   on the Employee alone fails later leave and attendance.
+3. **Masters:** Designation, Branch, Employee Grade, Shift Type, Leave
+   Type, Leave Period, Leave Policy, Salary Component.
+   - Employee Grade, Shift Type, Salary Structure, Payroll Period, Income
+     Tax Slab and Staffing Plan are named by the user: pass the name as
+     the create's `name` argument, because it is not a payload field.
+   - Query each Designation the data refers to; a spec's "exists" is a
+     claim until a query shows it.
+4. **Employees.** Run `preflight` first; `date_of_birth` is mandatory.
+5. **Leave Policy Assignment (submit).** It creates the Leave
+   Allocations, pro-rated from the joining date; say so in the report,
+   because the balances are smaller than the policy.
+6. **Leave Applications, before any Attendance.** A leave over a date
+   that has Attendance fails with `AttendanceAlreadyMarkedError`. Set
+   `status = Approved` (a permlevel-1 field), then submit: ERPNext submits
+   only Approved or Rejected applications.
+7. **Attendance Request (submit).** It skips approved leave and
+   holidays, so it fills only the working days left.
+8. **Salary Structure (submit), then Salary Structure Assignment
+   (submit).** A draft assignment does not apply to payroll.
+9. **Payroll Entry.**
+   - Set `employees` (child `Payroll Employee Detail`, `employee` only)
+     and `cost_center` yourself: through the API nothing fills them, and
+     the default cost centre can belong to another company.
+   - The payroll payable account needs `account_type = Payable`.
+   - Submit runs as a background job: count it done only with
+     `state_confirmed: true`, and show `read_back.status` and
+     `error_message` otherwise.
+10. **Salary Slips (submit).**
+11. **Recruitment.**
+    - Create the Skill first: an Interview Type needs at least one
+      `expected_skill_set` row.
+    - Job Applicant is named by its email.
+    - Interview `scheduled_on` is set once, at create: pick a past date
+      when feedback is submitted now, because Interview Feedback cannot
+      be submitted before the scheduled date.
+    - Interview submit needs `status` Cleared or Rejected.
+12. **Onboarding and exit.**
+    - An onboarding template without activities never creates the
+      Employee or sets its status: create the Employee directly, and for
+      an exit set `status = Left` and `relieving_date` yourself.
+    - Exit Interview needs `relieving_date` on the Employee.
+    - Full and Final Statement submit needs settled payables and
+      receivables; leave it a draft and say why.
+
 ## Quick reference
 
 | Capability | Outcome | Notes |
 | --- | --- | --- |
 | New employee onboarding | Employee created (live on save), checklist tracked | Preflight first; state Active side effects; demo data: `00-conventions.md` |
 | Update employee details | Employee updated | PII fields flagged if present |
-| Leave application / balance check | Applied or reported | Submission needs Approved/Rejected + resolvable Holiday List |
+| Leave application / balance check | Applied or reported | "Building an HR data set", steps 2 and 6 |
 | Attendance query / regularization | Visibility or correction | Route corrections through the originating Leave Application |
 | Employee separation / exit checklist | Clean, complete exit | `status: "Left"` requires `relieving_date` |
 | Job Opening management | Open role tracked | Closed openings can't take new applicants |
-| Job Applicant / resume intake | Candidate captured | Autonamed by email; may source from doc-extraction |
+| Job Applicant / resume intake | Candidate captured | Check the email first; may source from doc-extraction |
 | Interview scheduling / feedback | Interview loop tracked | Feedback restricted to assigned interviewers |
 | Offer Letter drafting | Ready for a human to extend | Advisory-only, any mode, no exceptions |
 | HR reports | Headcount, birthdays/anniversaries, probation-ending | Reconciliation-checked |
