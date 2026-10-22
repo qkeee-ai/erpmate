@@ -128,9 +128,18 @@ SCHEMAS = {
                            "description": "Set only after the user confirmed this exact payload in "
                                           "a reply. On an operation with no confirmation token, the "
                                           "Audit Log records it as agent-asserted."},
-         "approval_note": {"type": "string"}},
+         "approval_note": {"type": "string"},
+         "full_result": {"type": "boolean",
+                         "description": "execute, one op: return the full written document. By "
+                                        "default the result has name, doctype, docstatus, modified, "
+                                        "the fields the payload set, and child tables as row "
+                                        "counts."}},
         required=("phase",)),
 }
+
+# An erp_query result above this many bytes carries a note (HRMS demo run
+# review, issue 05: a 27.8 KB Attendance list pulled only to count rows).
+_LARGE_RESULT_BYTES = 10_000
 
 _STOP_AND_ASK = ("Stop. Show the user the missing or invalid fields, ask for the values, update the "
                  "spec and re-confirm. Never fill a value the user did not give.")
@@ -267,11 +276,15 @@ class ErpTools:
     def _query(self, args):
         self._need(args, "doctype")
         requester = self._requester()
-        return _ok(client.query_resource(self.tag(args), args["doctype"], args.get("filters"),
-                                         args.get("fields"), int(args.get("limit") or 20),
-                                         order_by=args.get("order_by"),
-                                         count_only=bool(args.get("count_only")),
-                                         requested_by=requester, **self._audit(args)))
+        result = client.query_resource(self.tag(args), args["doctype"], args.get("filters"),
+                                       args.get("fields"), int(args.get("limit") or 20),
+                                       order_by=args.get("order_by"),
+                                       count_only=bool(args.get("count_only")),
+                                       requested_by=requester, **self._audit(args))
+        if isinstance(result, dict) and len(json.dumps(result, default=str)) > _LARGE_RESULT_BYTES:
+            result["_note"] = ("large result — use count_only to count, or ask for fewer fields "
+                               "or rows.")
+        return _ok(result)
 
     def _get(self, args):
         self._need(args, "doctype", "name")
@@ -367,7 +380,11 @@ class ErpTools:
             report = operations.run_batch(batch, ctx)
             return json.dumps({"ok": report["stopped_at"] is None, "result": report}, default=str)
         result = operations.run_operation(args["op"], args.get("args") or {}, ctx)
-        warnings = list((result.get("_notes") or []) if isinstance(result, dict) else [])
+        if (isinstance(result, dict) and isinstance(result.get("data"), dict)
+                and not args.get("full_result")):
+            result["data"] = operations.compact_record(
+                result["data"], (args.get("args") or {}).get("payload"))
+        warnings =list((result.get("_notes") or []) if isinstance(result, dict) else [])
         audit_status = result.get("_audit_log_status") if isinstance(result, dict) else None
         if audit_status not in ("ok", "exempt"):
             warnings.append(f"this write's Qkeee Bot Audit Log status is {audit_status!r}: the write "

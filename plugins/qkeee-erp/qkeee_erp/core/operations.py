@@ -864,6 +864,25 @@ def run_batch(steps: list, ctx: WriteContext) -> dict:
     return {"steps": rows, "stopped_at": stopped_at, "counts": counts}
 
 
+_COMPACT_KEYS = ("name", "doctype", "docstatus", "modified")
+
+
+def compact_record(data, payload) -> object:
+    """A written record cut to what the agent uses (HRMS demo run review,
+    issue 05): name, doctype, docstatus, modified and the top-level fields
+    `payload` set. A child table becomes "<n> rows". Anything that is not
+    a record dict is returned as is."""
+    if not isinstance(data, dict):
+        return data
+    keys = list(_COMPACT_KEYS) + [k for k in (payload or {}) if k not in _COMPACT_KEYS]
+    out = {}
+    for key in keys:
+        if key in data:
+            value = data[key]
+            out[key] = f"{len(value)} rows" if isinstance(value, list) else value
+    return out
+
+
 def requires_confirmation(op_key: str, args: dict) -> bool:
     """Cheap, I/O-free answer to "will this need a token?" — for the CLI's
     mandatory-context check, before prepare() does any live read."""

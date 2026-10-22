@@ -102,6 +102,10 @@ and the action, and say that access, not connectivity, is the problem.
   non-production). Never run `date` or another clock command in the
   terminal: the render already holds the time.
 - An operation that needs no confirmation says so in its render result.
+- An execute result holds the record's `name`, `docstatus`, `modified`
+  and the fields you set; a child table shows as a row count. Read the
+  new name from it. Pass `full_result=true` only when you need the whole
+  document.
 
 ## 7a. Task summary email
 
