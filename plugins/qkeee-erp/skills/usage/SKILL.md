@@ -95,7 +95,12 @@ and the action, and say that access, not connectivity, is the problem.
   `[approval: agent-asserted]`; a verified token records
   `[approval: token+code]`.
 - Any change after render is refused: other args, a changed record,
-  another Requester, or more than 15 minutes. Render again and ask again.
+  another Requester, or a reply after `expires_at`. Render again and ask
+  again.
+- Show the expiry as "expires at HH:MM UTC", taken from the render's
+  `expires_at` (`ttl_minutes` is the lifetime: 15 on production, 60 on
+  non-production). Never run `date` or another clock command in the
+  terminal: the render already holds the time.
 - An operation that needs no confirmation says so in its render result.
 
 ## 7a. Task summary email

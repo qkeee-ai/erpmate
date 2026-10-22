@@ -390,8 +390,8 @@ write flow.
   first — state the exact before/after or financial impact, then ask
   again, one turn later at minimum. A matching `confirmation_token` proves
   the call is byte-for-byte identical to what `erp_execute_write render` last returned
-  and that it happened within the token's freshness window (15 minutes,
-  `DEFAULT_TOKEN_TTL_SECONDS`) — it does **not** prove a human read and
+  and that it happened within the token's freshness window (the render's `expires_at`:
+  15 minutes on production, 60 on non-production) — it does **not** prove a human read and
   approved it. Never render a confirmation and consume its token in the
   same turn; `confirmation_token`/`issued_at` are only used after the
   user's own reply affirmatively confirms that specific rendered draft.

@@ -111,7 +111,8 @@ need no token. `list_ops` shows each operation's rule.
 **Refusals on execute:**
 
 - Any change between render and execute is refused: args, record,
-  requester, or 15 minutes elapsed. The record counts as changed when its
+  requester, or a reply after the render's `expires_at` (15 minutes on
+  production, 60 on non-production; never check the clock in the terminal). The record counts as changed when its
   `modified` timestamp moves after a submit/cancel/delete render.
   Render again and confirm again.
 - Never construct the reply text yourself.

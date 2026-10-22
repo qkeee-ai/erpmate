@@ -53,7 +53,7 @@ integrations, checking instance health.
 - **Know the token gate's limit before treating it as sufficient on its
   own.** A matching `confirmation_token` proves the call being made is
   byte-for-byte identical to what `erp_execute_write render` last returned, and that
-  it happened within 15 minutes — no more. It does **not** prove a human
+  it happened before the render's `expires_at` — no more. It does **not** prove a human
   read the rendered confirmation and said yes. `issued_at`/token must
   only be used after the user's own reply affirmatively confirms that
   specific rendered action, one turn later at minimum.

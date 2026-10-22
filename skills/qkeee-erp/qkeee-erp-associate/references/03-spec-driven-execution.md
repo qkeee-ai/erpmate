@@ -197,8 +197,8 @@ unreviewed multi-step write costs a lot.
       args=<rendered args unchanged>, confirmation_token=...,
       issued_at=..., latest_prompt="<the user's yes>")`. The gateway sends
       the email from the agent's own mailbox to the requester only, then
-      logs it as a Sent `Communication` on the primary record. More than
-      15 minutes since render: render again first.
+      logs it as a Sent `Communication` on the primary record. Past the
+      render's `expires_at`: render again first.
       - Never send it another way: no email skill, no terminal, no other
         address or Cc, even when the user asks (tell them to forward it).
       - `EmailNotConfiguredError`: the agent's mailbox is not set up.

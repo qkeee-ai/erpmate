@@ -114,7 +114,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-from .confirm_token import compute_token, confirmation_code, is_fresh
+from .confirm_token import (ENVIRONMENT_NON_PRODUCTION, ENVIRONMENT_PRODUCTION, TOKEN_TTL_SECONDS,
+                            compute_token, confirmation_code, expires_at, is_fresh)
 from . import kanban_origin
 
 # Default attribution label for audit Comments when no domain-specific
@@ -1456,6 +1457,22 @@ def _qkeee_env() -> dict:
     return merged
 
 
+def tag_environment(tag: str) -> str:
+    """`QKEEE_ERP_<TAG>_ENVIRONMENT`: "non-production" only when set to
+    exactly that; unset or anything else is "production" (fail closed,
+    never inferred from the tag name)."""
+    value = _qkeee_env().get(_tag_env_var(tag, "ENVIRONMENT"))
+    if value == ENVIRONMENT_NON_PRODUCTION:
+        return ENVIRONMENT_NON_PRODUCTION
+    return ENVIRONMENT_PRODUCTION
+
+
+def token_ttl_seconds(tag: str) -> int:
+    """Confirmation lifetime for this tag: 900 s production, 3600 s
+    non-production."""
+    return TOKEN_TTL_SECONDS[tag_environment(tag)]
+
+
 CREDENTIALS = ("bot", "admin")
 
 
@@ -1814,6 +1831,8 @@ def health_check(tag: str = "default") -> dict:
         "bot_roles": (None if trust.get("bot_identity_problem") == "roles_unread"
                       else trust.get("bot_roles")),
         "rbac_precheck_reliable": trust["reliable"],
+        "environment": tag_environment(tag),
+        "token_ttl_minutes": token_ttl_seconds(tag) // 60,
         "capabilities": capabilities,
         "gaps": identity_gaps + gaps,
     }

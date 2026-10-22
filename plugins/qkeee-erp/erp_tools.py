@@ -337,7 +337,9 @@ class ErpTools:
             if out.get("policy") == operations.POLICY_NONE:
                 out["_note"] = "This operation needs no confirmation token for these args."
             else:
-                out["_note"] = ("Show `request` and `confirmation_code` to the user. Execute with "
+                out["_note"] = ("Show `request` and `confirmation_code` to the user, and \"expires at "
+                                "HH:MM UTC\" taken from `expires_at` (never run a clock command). "
+                                "Execute with "
                                 "phase=execute, the same op, these `args` unchanged, "
                                 "confirmation_token and issued_at as given, and the user's own reply "
                                 "as user_confirmation_text.")

@@ -275,10 +275,13 @@ def _verify_token(op: Operation, policy: str, req: PreparedRequest, ctx: WriteCo
             f"pass the printed args/token/issued_at back unchanged. Never hand-construct one."
         )
     issued = _c.coerce_issued_at(ctx.issued_at)
-    if not _c.is_fresh(issued):
+    ttl = _c.token_ttl_seconds(ctx.tag)
+    if not _c.is_fresh(issued, ttl):
         raise _c.StaleConfirmationError(
-            f"The confirmation for {op.key} on '{req.doctype}' has expired or its issued_at is "
-            f"implausible — re-render against current data and reconfirm before retrying."
+            f"The confirmation for {op.key} on '{req.doctype}' has expired (it expired at "
+            f"{_c.expires_at(issued, ttl)}; lifetime {ttl // 60} minutes on this "
+            f"{_c.tag_environment(ctx.tag)} Instance) or its issued_at is implausible — "
+            f"re-render against current data and reconfirm before retrying."
         )
     expected = operation_token(op.key, req, ctx.requested_by, issued)
     if ctx.confirmation_token != expected:
@@ -749,7 +752,9 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
     if policy != POLICY_NONE:
         issued = int(time.time()) if issued_at is None else _c.coerce_issued_at(issued_at)
         token = operation_token(op.key, req, ctx.requested_by, issued)
-        out.update(confirmation_token=token, issued_at=issued)
+        ttl = _c.token_ttl_seconds(ctx.tag)
+        out.update(confirmation_token=token, issued_at=issued,
+                   expires_at=_c.expires_at(issued, ttl), ttl_minutes=ttl // 60)
         if policy == POLICY_TOKEN_USER_CODE:
             out["confirmation_code"] = _c.confirmation_code(token)
     return out

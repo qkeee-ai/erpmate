@@ -38,6 +38,20 @@ import time
 # facts that have since changed (e.g. a revalued asset, an amended draft).
 DEFAULT_TOKEN_TTL_SECONDS = 900
 
+# Lifetime per Instance environment (HRMS demo run review, D1): a user
+# replied ~21 minutes after a render on demo_erp, so non-production tags
+# get 60 minutes. Only these two values exist, so a typo in the setting
+# cannot stretch the window; anything else is production.
+ENVIRONMENT_PRODUCTION = "production"
+ENVIRONMENT_NON_PRODUCTION = "non-production"
+TOKEN_TTL_SECONDS = {ENVIRONMENT_PRODUCTION: DEFAULT_TOKEN_TTL_SECONDS,
+                     ENVIRONMENT_NON_PRODUCTION: 3600}
+
+
+def expires_at(issued_at: int, ttl_seconds: int) -> str:
+    """ISO 8601 UTC expiry of a token issued at `issued_at`."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(issued_at) + int(ttl_seconds)))
+
 # Small tolerance for clock skew between the process that issued the token
 # and the process that later validates it — not a security boundary, just
 # enough to avoid rejecting a legitimately-fresh token over a few seconds
