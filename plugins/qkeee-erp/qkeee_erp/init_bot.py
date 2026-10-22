@@ -76,7 +76,8 @@ import urllib.parse
 
 from .doctype_defs import (ALL_DOCTYPES, AUDIT_LOG, BOT_READ_GRANTS, MIGRATABLE_FIELDS,
                            PROVISION_PTYPES, ROLE_NAME, ROLE_PAYLOAD, UNSCOPED_PROVISION_DOCTYPES,
-                           DOMAIN_MASTER_DOCTYPES, DOMAIN_TEMPLATE_ROLES, PERMLEVEL_PTYPES,
+                           DOMAIN_MASTER_DOCTYPES, DOMAIN_TEMPLATE_ROLES, HIDDEN_READS,
+                           PERMLEVEL_PTYPES,
                            SUBMIT_GATE_FIELDS, is_bot_read_link, level_key, split_level_key)
 
 
@@ -513,6 +514,13 @@ def bot_permission_matrix(tag: str, domains) -> tuple:
             for level in _gate_levels(main, SUBMIT_GATE_FIELDS[doctype]):
                 grant(level_key(doctype, level), templates.get(level_key(doctype, level), set()))
         if ptypes & {"create", "write"}:
+            # Reads an app makes inside its own checks (HIDDEN_READS). A
+            # target missing on the instance (app not installed) is dropped
+            # with the other missing doctypes below.
+            for (_, target), reads in HIDDEN_READS.items():
+                if target == doctype:
+                    for read in reads:
+                        grant(read, {"read"})
             for doc in bundle:
                 for f in doc.get("fields") or []:
                     if is_bot_read_link(f):

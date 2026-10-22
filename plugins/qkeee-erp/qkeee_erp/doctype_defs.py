@@ -173,6 +173,21 @@ DOMAIN_TEMPLATE_ROLES = {
 }
 
 
+# Reads the server makes with the user's rights inside its own checks, per
+# (installed app, target doctype): the doctypes read (HRMS demo run review
+# F10, demo_erp 2026-10-22: Company create 403 on GST Settings, which India
+# Compliance reads while it validates the Company). Preflight probes the
+# bot's read on each; init-bot grants it with the target. Adding one is a
+# code change that cites the run that found it.
+HIDDEN_READS = {("india_compliance", "Company"): ("GST Settings",)}
+
+
+def hidden_reads(doctype: str, apps) -> dict:
+    """{read doctype: app} for `doctype` given the installed `apps`."""
+    return {read: app for (app, target), reads in HIDDEN_READS.items()
+            if target == doctype and app in set(apps or ()) for read in reads}
+
+
 # Fields whose value must be set before ERPNext allows submit, where the
 # field sits above permlevel 0 (agents ADR 0003 amendment 2026-10-22, HRMS
 # demo run review D3: "Only Leave Applications with status 'Approved' and

@@ -1739,13 +1739,14 @@ def requester_permission_readiness(tag: str, doctype: str, perm_type: str,
 
 
 def _probe_gap(tag: str, cfg: dict, bot_user: str, capability: str, path: str, params,
-               doctype: str, perm: str, effect: str):
-    """One read as the bot: None when it works, else its gap."""
+               doctype: str, perm: str, effect: str, denied_steps: str = None):
+    """One read as the bot: None when it works, else its gap. `denied_steps`:
+    the grant steps for a 401/403 (default: the Role Permission Manager row)."""
     try:
         _request(cfg, "GET", path, params=params)
         return None
     except ConnectorError as e:
-        steps = None
+        steps = denied_steps
         if not (isinstance(e, ERPNextAPIError) and e.status in (401, 403)):
             # Transport, URL or server error: no role grant fixes it.
             steps = (f"not a permission error ({type(e).__name__}); no role grant fixes it. "
@@ -1803,6 +1804,31 @@ def probe_bot_link_reads(tag: str, doctype: str, links: dict) -> list:
             {"fields": '["name"]', "limit_page_length": 1}, target, "read",
             f"the agent cannot list or check valid values for {doctype} field(s) "
             f"{', '.join(sorted(links[target]))}")
+        if gap:
+            gaps.append(gap)
+    return gaps
+
+
+def probe_bot_hidden_reads(tag: str, doctype: str, reads: dict) -> list:
+    """Gaps for the reads an installed app makes inside its own checks on a
+    `doctype` write (doctype_defs.HIDDEN_READS): `reads` is {read doctype:
+    app}. A missing read makes ERPNext refuse the write with 403. One list
+    read per target, as the bot."""
+    cfg = get_env_config(tag)
+    bot_user = _bot_identity(tag).get("user") or ""
+    gaps = []
+    for target in sorted(reads):
+        gap = _probe_gap(
+            tag, cfg, bot_user, f"hidden_read:{doctype}.{target}",
+            f"/api/resource/{urllib.parse.quote(target)}",
+            {"fields": '["name"]', "limit_page_length": 1}, target, "read",
+            f"ERPNext refuses a {doctype} write with 403: the app {reads[target]} reads "
+            f"{target} while it validates {doctype}",
+            denied_steps=(f"An Operator runs `hermes qkeee-erp init-bot --dry-run --requested-by "
+                          f"<a System Manager>`, then again with the printed token: it grants "
+                          f"{BOT_ROLE_NAME!r} read on {target}. Or an admin adds the row: Role "
+                          f"Permission Manager → Document Type \"{target}\" → Role "
+                          f"\"{BOT_ROLE_NAME}\", Level 0 → tick read → Save."))
         if gap:
             gaps.append(gap)
     return gaps
