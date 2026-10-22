@@ -1867,11 +1867,61 @@ def health_check(tag: str = "default") -> dict:
     return out
 
 
-def query_resource(tag: str, doctype: str, filters: list = None, fields: list = None, limit: int = 20,
-                    *, session_id: str = None, domain_code: str = None,
+_FILTER_SHAPE_HELP = ('Pass filters as a list of [field, operator, value] lists, e.g. '
+                      '[["field", "=", "value"]] or [["employee", "in", ["E-1", "E-2"]]]; an object '
+                      '{"field": value} or {"field": [operator, value]} is also accepted.')
+_ORDER_BY_RE = re.compile(r"^[a-z0-9_]+( (asc|desc))?$")
+
+
+def normalize_filters(filters):
+    """Frappe list filters in list form. ERPNext v16 answers a dict with
+    HTTP 500 `KeyError: 1` (HRMS demo run review, F5), so {field: value}
+    becomes [[field, "=", value]] and {field: [op, value]} becomes
+    [[field, op, value]]. A list of 3- or 4-item lists is kept. Anything
+    else raises InvalidArgumentsError, before any call."""
+    def bad(why):
+        return InvalidArgumentsError(f"erp_query filters: {why}. {_FILTER_SHAPE_HELP}")
+    if not filters:
+        return None
+    if isinstance(filters, dict):
+        out = []
+        for field, value in filters.items():
+            if isinstance(value, (list, tuple)):
+                if len(value) != 2 or not isinstance(value[0], str):
+                    raise bad(f"{field!r} must map to a value or to [operator, value]")
+                out.append([field, value[0], value[1]])
+            elif isinstance(value, dict):
+                raise bad(f"{field!r} maps to an object")
+            else:
+                out.append([field, "=", value])
+        return out
+    if isinstance(filters, (list, tuple)):
+        for i, row in enumerate(filters, start=1):
+            if (not isinstance(row, (list, tuple)) or len(row) not in (3, 4)
+                    or not all(isinstance(x, str) for x in row[:-1])):
+                raise bad(f"item {i} ({row!r}) is not a [field, operator, value] list")
+        return [list(row) for row in filters]
+    raise bad(f"got {type(filters).__name__}")
+
+
+def _check_order_by(order_by):
+    if order_by is not None and not _ORDER_BY_RE.match(str(order_by)):
+        raise InvalidArgumentsError(
+            f"erp_query order_by {order_by!r} refused: use \"<field> asc\" or \"<field> desc\" "
+            f"with one lower-case fieldname (letters, digits, _).")
+
+
+def query_resource(tag: str, doctype: str, filters=None, fields: list = None, limit: int = 20,
+                    *, order_by: str = None, count_only: bool = False,
+                    session_id: str = None, domain_code: str = None,
                     requested_by: str = None, channel: str = None, channel_metadata: dict = None,
                     prompt_summary: str = None, latest_prompt: str = None) -> dict:
     """Generic resource query — read any DocType with filters/fields.
+
+    `filters` goes through normalize_filters() first; `order_by` is one
+    "<field> asc|desc" and nothing else, so no SQL passes through it.
+    `count_only` returns {"count": n} from frappe.client.get_count, with
+    the same gate and the same Read audit row as a list.
 
     Fetches one extra row beyond `limit` to detect truncation, then trims
     back to `limit` — callers get an explicit `has_more` flag instead of a
@@ -1882,16 +1932,30 @@ def query_resource(tag: str, doctype: str, filters: list = None, fields: list = 
     the biggest source in the audit trail) in exchange for an audit row on
     every access, no exceptions.
     """
+    filters = normalize_filters(filters)
+    _check_order_by(order_by)
     _validate_prod_requester(tag, requested_by, doctype, "read",
                               session_id=session_id, domain_code=domain_code,
                               channel=channel, channel_metadata=channel_metadata,
                               prompt_summary=prompt_summary, latest_prompt=latest_prompt)
     cfg = get_env_config(tag)
+    if count_only:
+        params = {"doctype": doctype}
+        if filters:
+            params["filters"] = json.dumps(filters)
+        result = _request(cfg, "GET", "/api/method/frappe.client.get_count", params=params)
+        response = {"count": result.get("message")}
+        _log_read(cfg, doctype, None, requested_by, session_id, domain_code, channel,
+                  channel_metadata, response_payload=response, prompt_summary=prompt_summary,
+                  latest_prompt=latest_prompt)
+        return response
     params = {"limit_page_length": limit + 1}
     if filters:
         params["filters"] = json.dumps(filters)
     if fields:
         params["fields"] = json.dumps(fields)
+    if order_by:
+        params["order_by"] = order_by
     path = f"/api/resource/{urllib.parse.quote(doctype)}"
     result = _request(cfg, "GET", path, params=params)
     rows = result.get("data", [])

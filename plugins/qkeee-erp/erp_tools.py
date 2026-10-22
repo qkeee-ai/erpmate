@@ -55,9 +55,16 @@ SCHEMAS = {
     "erp_query": _schema(
         "erp_query", "List ERPNext records of one DocType (gated and audited read).",
         {"doctype": {"type": "string"},
-         "filters": {"type": "array", "description": 'Frappe filters, e.g. [["status","=","Open"]].'},
+         "filters": {"type": ["array", "object"],
+                     "description": 'Frappe filters as a list: [["status","=","Open"]]. An object '
+                                    '{"status": "Open"} or {"employee": ["in", [...]]} is turned into '
+                                    'that list form.'},
          "fields": {"type": "array", "items": {"type": "string"}},
-         "limit": {"type": "integer", "default": 20}},
+         "limit": {"type": "integer", "default": 20},
+         "order_by": {"type": "string", "description": '"<field> asc" or "<field> desc".'},
+         "count_only": {"type": "boolean",
+                        "description": "Return only {count} for the filters, no rows. Use it to "
+                                       "count."}},
         required=("doctype",)),
     "erp_get": _schema(
         "erp_get", "Read one ERPNext record with its child tables (gated and audited read).",
@@ -262,6 +269,8 @@ class ErpTools:
         requester = self._requester()
         return _ok(client.query_resource(self.tag(args), args["doctype"], args.get("filters"),
                                          args.get("fields"), int(args.get("limit") or 20),
+                                         order_by=args.get("order_by"),
+                                         count_only=bool(args.get("count_only")),
                                          requested_by=requester, **self._audit(args)))
 
     def _get(self, args):
