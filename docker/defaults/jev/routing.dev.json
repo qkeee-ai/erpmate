@@ -1,0 +1,112 @@
+{
+  "mode": "redacted-text",
+  "min_confidence": 0.6,
+  "simple_needs_confidence": 0.85,
+  "hard_needs_probability": 0.6,
+  "simple_needs_probability": 0.7,
+  "ask_chars": 2500,
+  "ask_sections": [
+    "Prompt",
+    "Task",
+    "Request",
+    "Instruction",
+    "Objective",
+    "Goal"
+  ],
+  "drop_sections": [
+    "Your previous run's output",
+    "Script Output",
+    "Output from job",
+    "Previous output",
+    "Prior run",
+    "Last run"
+  ],
+  "cache_repeat_asks": true,
+  "cache_size": 512,
+  "sticky_context_tokens": 32000,
+  "escalation": {
+    "enabled": false,
+    "rungs": []
+  },
+  "exclude": [
+    "*:free",
+    "cloudflare-ai-gateway:*",
+    "openrouter:anthropic/*",
+    "openrouter:openai/*",
+    "openrouter:google/*",
+    "openrouter:moonshotai/*",
+    "openrouter:x-ai/*"
+  ],
+  "private_profiles": [],
+  "tiers": {
+    "simple": {
+      "general": [
+        "openrouter:deepseek/deepseek-v4-flash",
+        "openrouter:nex-agi/nex-n2.5-pro"
+      ],
+      "vision": [
+        "openrouter:deepseek/deepseek-v4.1-flash-1017",
+        "openrouter:nex-agi/nex-n2.5-pro"
+      ],
+      "coding": [
+        "openrouter:deepseek/deepseek-v4-flash",
+        "openrouter:nex-agi/nex-n2.5-pro"
+      ],
+      "writing": [
+        "openrouter:deepseek/deepseek-v4-flash",
+        "openrouter:nex-agi/nex-n2.5-pro"
+      ],
+      "research": [
+        "openrouter:deepseek/deepseek-v4-flash",
+        "openrouter:nex-agi/nex-n2.5-pro"
+      ]
+    },
+    "medium": {
+      "general": [
+        "openrouter:deepseek/deepseek-v4.1-flash-1017",
+        "openrouter:deepseek/deepseek-v3.2",
+        "openrouter:deepseek/deepseek-v4.1-flash"
+      ],
+      "vision": [
+        "openrouter:deepseek/deepseek-v4.1-flash",
+        "openrouter:deepseek/deepseek-v4-flash-vision-exp"
+      ],
+      "coding": [
+        "openrouter:deepseek/deepseek-v4.1-flash-1017",
+        "openrouter:deepseek/deepseek-v4.1-flash"
+      ],
+      "writing": [
+        "openrouter:deepseek/deepseek-v4.1-flash-1017",
+        "openrouter:deepseek/deepseek-v3.2",
+        "openrouter:deepseek/deepseek-v4.1-flash"
+      ],
+      "research": [
+        "openrouter:deepseek/deepseek-v4-pro",
+        "openrouter:deepseek/deepseek-v4.1-flash"
+      ]
+    },
+    "hard": {
+      "general": [
+        "openrouter:deepseek/deepseek-v4-pro",
+        "openrouter:deepseek/deepseek-v4-pro-0813",
+        "openrouter:deepseek/deepseek-v4.1-flash"
+      ],
+      "vision": [
+        "openrouter:deepseek/deepseek-v4.1-flash",
+        "openrouter:deepseek/deepseek-v4-flash-vision-exp"
+      ],
+      "coding": [
+        "openrouter:deepseek/deepseek-v4-pro",
+        "openrouter:deepseek/deepseek-v4-pro-0813"
+      ],
+      "writing": [
+        "openrouter:deepseek/deepseek-v4-pro",
+        "openrouter:deepseek/deepseek-v4.1-flash"
+      ],
+      "research": [
+        "openrouter:deepseek/deepseek-v4-pro-0813",
+        "openrouter:deepseek/deepseek-v4-pro"
+      ]
+    }
+  }
+}
