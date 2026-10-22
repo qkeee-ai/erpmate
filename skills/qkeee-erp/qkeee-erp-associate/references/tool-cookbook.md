@@ -92,6 +92,17 @@ through every gate, so they stay valid as the code changes.
 `create`/`update` on any other `<domain>.generic` operation are drafts and
 need no token. `list_ops` shows each operation's rule.
 
+**Picking the operation:** for a plain doctype write, pass `op="auto"`.
+Render resolves it from `args.doctype` to the domain's `<domain>.generic`
+or to `unscoped.generic`, shows it as `resolved_op`, and the token binds
+it. A bespoke operation (for example `fixed_assets.scrap`) still needs
+its own key. The HR doctypes:
+
+| Doctype | Operation |
+|---|---|
+| Employee, Employee Onboarding, Employee Separation, Job Offer, Leave Application | `hr_payroll.generic` |
+| Every other HR doctype (Attendance, Leave Allocation, Salary Structure, Payroll Entry, Interview, Interview Type, Exit Interview, ...) | `unscoped.generic` |
+
 ### The confirmed write: render, show, execute
 
 1. **Render.** The result has `request` (exactly what will be sent),

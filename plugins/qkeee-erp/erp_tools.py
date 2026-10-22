@@ -113,7 +113,9 @@ SCHEMAS = {
         "first failure. On write_failure, ask the user for the named fields; never fill a value they "
         "did not give.",
         {"phase": {"type": "string", "enum": ["list_ops", "render", "execute"]},
-         "op": {"type": "string", "description": "Operation key from list_ops, e.g. sales.generic. "
+         "op": {"type": "string", "description": "Operation key from list_ops, e.g. sales.generic, or "
+                                                 "\"auto\" for a plain doctype write: render resolves "
+                                                 "it from args.doctype and shows resolved_op. "
                                                  "list_ops: return only this operation."},
          "domain": {"type": "string",
                     "description": "list_ops only: return only operations whose key starts with "

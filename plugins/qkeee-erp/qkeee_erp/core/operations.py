@@ -252,6 +252,32 @@ def get_operation(key: str) -> Operation:
     return REGISTRY[key]
 
 
+AUTO_OP = "auto"
+
+
+def resolve_op_key(op_key: str, args: dict) -> str:
+    """`auto` (HRMS demo run review, D5) -> the bot-credential
+    `<domain>.generic` whose allowlist holds args["doctype"], else
+    `unscoped.generic`. Any other key is returned unchanged. It never
+    resolves to a named gated operation or to an admin-key operation; the
+    resolved operation's gates then run unchanged (a deny-list doctype is
+    still refused), and the token binds the resolved key."""
+    if op_key != AUTO_OP:
+        return op_key
+    doctype = (args or {}).get("doctype")
+    if not doctype:
+        raise _c.InvalidArgumentsError("op 'auto' needs args.doctype to pick the operation.")
+    owners = sorted(
+        domain for domain, allowed in _c.DOMAIN_WRITE_ALLOWLISTS.items()
+        if doctype in allowed and f"{domain}.generic" in REGISTRY
+        and REGISTRY[f"{domain}.generic"].credential == "bot")
+    if len(owners) > 1:
+        raise _c.DoctypeNotAllowedError(
+            f"op 'auto' is ambiguous for '{doctype}': domains {owners} all allow it. Name the "
+            f"operation yourself (erp_execute_write phase list_ops).")
+    return f"{owners[0]}.generic" if owners else "unscoped.generic"
+
+
 def list_operations(cli_only: bool = True) -> list:
     return [REGISTRY[k] for k in sorted(REGISTRY) if REGISTRY[k].cli or not cli_only]
 
@@ -747,7 +773,7 @@ def _prepare(op: Operation, args: dict, ctx: WriteContext) -> PreparedRequest:
 
 
 def run_operation(op_key: str, args: dict, ctx: WriteContext) -> dict:
-    op = get_operation(op_key)                                    # 1
+    op = get_operation(resolve_op_key(op_key, args))              # 1
     args = dict(args or {})
     req = _prepare(op, args, ctx)                                 # 2
     _check_mode_and_requester(req, ctx)                           # 3, 4
@@ -781,7 +807,7 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
     """Render: steps 1-2 plus render_defaults; no gate, no write. The
     returned `args` are what the execute step must be given back
     unchanged — they include live facts the render filled in."""
-    op = get_operation(op_key)
+    op = get_operation(resolve_op_key(op_key, args))
     args = dict(args or {})
     if op.render_defaults:
         args = op.render_defaults(args, ctx)
@@ -802,6 +828,8 @@ def prepare_only(op_key: str, args: dict, ctx: WriteContext, issued_at: int = No
     policy = op.policy_for(req)
     out = {"op": op.key, "summary": op.summary, "policy": policy, "args": args,
            "request": req.summary(), "notes": list(req.notes)}
+    if op_key == AUTO_OP:
+        out["resolved_op"] = op.key
     if policy != POLICY_NONE:
         issued = int(time.time()) if issued_at is None else _c.coerce_issued_at(issued_at)
         token = operation_token(op.key, req, ctx.requested_by, issued)
@@ -894,7 +922,7 @@ def compact_record(data, payload) -> object:
 def requires_confirmation(op_key: str, args: dict) -> bool:
     """Cheap, I/O-free answer to "will this need a token?" — for the CLI's
     mandatory-context check, before prepare() does any live read."""
-    op = get_operation(op_key)
+    op = get_operation(resolve_op_key(op_key, args))
     if not callable(op.token_policy):
         return op.token_policy != POLICY_NONE
     action = (args or {}).get("action")
