@@ -10,7 +10,7 @@ is already present; only a missing result is applied.
 | S1 credentials | step | `plugin-data/qkeee-erp/qkeee-erp.env` exists and no legacy `<profile>/qkeee-erp.env` remains (a lone legacy file is moved, mode 600) |
 | S2 config | step | no legacy `skills.config.qkeee_erp` section and no `scripts_dir` setting (settings.migrate_legacy_config) |
 | P1 toolsets | prerequisite | google_chat has `qkeee_erp`; no ERP chat platform (google_chat, or any but cli listing `qkeee_erp`) has `code_execution`; `known_plugin_toolsets` lists `qkeee_erp` for cli, discord and google_chat |
-| P3 kanban | prerequisite | the top-level `toolsets` lists `kanban` (chat gets the kanban tools, not the `hermes kanban` CLI in the terminal); `kanban.orchestrator_profile` and `kanban.default_assignee` name this Profile ("" or "default" for the root Profile) |
+| P3 kanban | prerequisite | the top-level `toolsets` lists `kanban`, and so do the saved `platform_toolsets` lists of google_chat and cli (chat and Kanban workers get the kanban tools, not the `hermes kanban` CLI in the terminal); `kanban.orchestrator_profile` and `kanban.default_assignee` name this Profile ("" or "default" for the root Profile) |
 | P2 terminal | prerequisite | `terminal.backend` is `ssh` with host, user and key set; on a host install, none of host, user, key or cwd still holds the Docker sidecar value that the shipped config.yaml carries |
 | S3 terminal key | step | the `terminal.ssh_key` file exists (created if missing) |
 | I2 exclusive target | step | no other Profile under the Hermes root records proven Isolation for the same `ssh_user@ssh_host` |
@@ -65,7 +65,7 @@ SETUP_COMMAND = "hermes qkeee-erp setup"
 # Values from the shipped Profile config.yaml that P1/P2 write with the flag
 # (tests/test_plugin_setup.py ShippedValuesTests keeps them equal).
 CHAT_PLATFORM = "google_chat"
-SHIPPED_GOOGLE_CHAT = ["clarify", "cronjob", "delegation", "file", "memory", "qkeee_erp",
+SHIPPED_GOOGLE_CHAT = ["clarify", "cronjob", "delegation", "file", "kanban", "memory", "qkeee_erp",
                        "session_search", "skills", "terminal", "todo", "vision", "web"]
 KNOWN_TOOLSET_PLATFORMS = ("cli", "discord", "google_chat")
 OPERATOR_PLATFORM = "cli"  # Kanban workers and the Operator: may keep code_execution
@@ -293,6 +293,13 @@ class _Toolsets(_Item):
 
 
 KANBAN_TOOLSET = "kanban"
+# Platforms whose explicit list must name `kanban`: current Hermes treats it
+# as a configurable toolset, so a saved list without it disables the tools
+# (dev-erp 2026-10-22: `hermes tools list --platform google_chat` showed
+# kanban disabled after P3 had set the top-level list). google_chat serves
+# chat; cli is the list Kanban workers run with. A platform with no saved
+# list falls back to its composite, which already has kanban.
+KANBAN_PLATFORMS = ("google_chat", "cli")
 DEFAULT_TOOLSETS = ["hermes-cli"]  # Hermes' default top-level `toolsets`
 KANBAN_PROFILE_KEYS = ("orchestrator_profile", "default_assignee")
 
@@ -328,6 +335,11 @@ class _Kanban(_Item):
         toolsets = cfg.get("toolsets")
         if not (isinstance(toolsets, list) and KANBAN_TOOLSET in toolsets):
             problems.append(f"toplevel toolsets lacks {KANBAN_TOOLSET} (chat gets no kanban tools)")
+        lists = _mapping(cfg.get("platform_toolsets"))
+        for platform in KANBAN_PLATFORMS:
+            if isinstance(lists.get(platform), list) and KANBAN_TOOLSET not in lists[platform]:
+                problems.append(f"platform_toolsets.{platform} lacks {KANBAN_TOOLSET} (the "
+                                f"kanban tools stay disabled there)")
         kanban, name = _mapping(cfg.get("kanban")), profile_name(env)
         for key in KANBAN_PROFILE_KEYS:
             if not _names_profile(kanban.get(key), name):
@@ -342,6 +354,11 @@ class _Kanban(_Item):
         if KANBAN_TOOLSET not in cfg["toolsets"]:
             cfg["toolsets"].append(KANBAN_TOOLSET)
             changes.append(f"toolsets += {KANBAN_TOOLSET}")
+        lists = _child(cfg, "platform_toolsets")
+        for platform in KANBAN_PLATFORMS:
+            if isinstance(lists.get(platform), list) and KANBAN_TOOLSET not in lists[platform]:
+                lists[platform].append(KANBAN_TOOLSET)
+                changes.append(f"platform_toolsets.{platform} += {KANBAN_TOOLSET}")
         kanban, name = _child(cfg, "kanban"), profile_name(env)
         for key in KANBAN_PROFILE_KEYS:
             if not _names_profile(kanban.get(key), name):

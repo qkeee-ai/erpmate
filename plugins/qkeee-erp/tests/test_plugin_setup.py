@@ -20,9 +20,9 @@ FRESH = """\
 # erpmate shipped config (abridged)
 toolsets: [hermes-cli, kanban]
 platform_toolsets:
-  cli: [clarify, code_execution, qkeee_erp, terminal]
+  cli: [clarify, code_execution, qkeee_erp, terminal, kanban]
   discord: [clarify, code_execution, terminal]
-  google_chat: [clarify, file, qkeee_erp, terminal]
+  google_chat: [clarify, file, qkeee_erp, terminal, kanban]
 known_plugin_toolsets:
   cli: [qkeee_erp, spotify]
   discord: [qkeee_erp, spotify]
@@ -55,7 +55,7 @@ terminal:
 HALF_DONE = """\
 toolsets: [hermes-cli, kanban]
 platform_toolsets:
-  google_chat: [clarify, file, qkeee_erp, terminal]
+  google_chat: [clarify, file, qkeee_erp, terminal, kanban]
 known_plugin_toolsets:
   cli: [qkeee_erp]
   discord: [qkeee_erp]
@@ -75,7 +75,7 @@ COMMENT_HEAVY = """\
 toolsets: [hermes-cli, kanban]   # kanban: chat gets the kanban tools
 platform_toolsets:
   # google chat serves the Requesters
-  google_chat: [clarify, qkeee_erp]   # trailing comment
+  google_chat: [clarify, qkeee_erp, kanban]   # trailing comment
 known_plugin_toolsets:
   cli: [qkeee_erp]
   discord: [qkeee_erp]
@@ -345,6 +345,26 @@ class KanbanTests(SetupTestCase):
             shipped = yaml.safe_load(f)
         self.assertIn("kanban", shipped["toolsets"])
         self.assertIn("hermes-cli", shipped["toolsets"])
+        for platform in setup.KANBAN_PLATFORMS:
+            self.assertIn("kanban", shipped["platform_toolsets"][platform])
+
+    def test_platform_list_without_kanban_is_pending_and_the_flag_adds_it(self):
+        # dev-erp 2026-10-22, after 931dfba: `hermes tools list --platform
+        # google_chat` showed kanban disabled. Hermes (current image) treats
+        # kanban as a configurable toolset, so an explicit platform list must
+        # name it; cli too, because Kanban workers run with the cli list.
+        self.named_profile()
+        self.config(FRESH.replace("google_chat: [clarify, file, qkeee_erp, terminal, kanban]",
+                                  "google_chat: [clarify, file, qkeee_erp, terminal]"))
+        self.credentials()
+        self.make_key()
+        self.assertIn("platform_toolsets.google_chat", setup._Kanban().check(self.read(), self.env()))
+        report = setup.run(self.env(), apply_profile_fixes=True)
+        self.assertEqual(self.statuses(report)["P3"], setup.DONE)
+        lists = self.read()["platform_toolsets"]
+        self.assertIn("kanban", lists["google_chat"])
+        self.assertIn("kanban", lists["cli"])
+        self.assertNotIn("kanban", lists["discord"])
 
 
 class CommentHeavyTests(SetupTestCase):
