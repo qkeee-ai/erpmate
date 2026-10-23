@@ -1572,6 +1572,11 @@ def get_env_config(tag: str = "default", credential: str = "bot") -> dict:
         "api_key": api_key,
         "api_secret": api_secret,
         "credential": credential,
+        # Optional, Operator-maintained (agents issue 04/ADR 0008): the ERP
+        # admin's cc address on a job-approval email. Not in `missing`
+        # above — most operations never need it; notify.job_approval_request
+        # checks for it itself and refuses with setup guidance when blank.
+        "admin_email": env.get(_tag_env_var(tag, "ADMIN_EMAIL")) or "",
     }
 
 

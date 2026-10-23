@@ -82,6 +82,31 @@ class MailerTests(unittest.TestCase):
         with self.assertRaises(mailer.EmailSendError):
             self._send(refused={"r@org.com": (550, b"no")})
 
+    def test_cc_is_an_optional_second_recipient(self):
+        server = MagicMock()
+        server.send_message.return_value = {}
+        with patch.object(mailer.smtplib, "SMTP", return_value=server):
+            result = mailer.send_html("r@org.com", "S", "<p>h</p>", "t", cc="admin@org.com")
+        self.assertEqual(server.send_message.call_args.kwargs["to_addrs"],
+                         ["r@org.com", "admin@org.com"])
+        msg = server.send_message.call_args.args[0]
+        self.assertEqual(msg["Cc"], "admin@org.com")
+        self.assertEqual(result["cc"], "admin@org.com")
+
+    def test_no_cc_means_no_cc_header_and_one_recipient(self):
+        result, server, _ = self._send()
+        self.assertEqual(server.send_message.call_args.kwargs["to_addrs"], ["r@org.com"])
+        msg = server.send_message.call_args.args[0]
+        self.assertNotIn("Cc", msg)
+        self.assertIsNone(result["cc"])
+
+    def test_malformed_cc_is_refused(self):
+        for cc in ("a@x.com, b@y.com", "a@x.com;b@y.com", "nobody"):
+            with self.subTest(cc=cc), patch.object(mailer.smtplib, "SMTP") as cls:
+                with self.assertRaises(mailer.EmailSendError):
+                    mailer.send_html("r@org.com", "S", "h", "t", cc=cc)
+                cls.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

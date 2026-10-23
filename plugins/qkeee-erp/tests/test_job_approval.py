@@ -11,7 +11,9 @@ store, and the two dedicated (cli=False, internal-only) operations."""
 
 import copy
 import json
+import time
 import unittest
+from unittest.mock import patch
 
 from qkeee_erp_plugin.qkeee_erp.core import client as core_client
 from qkeee_erp_plugin.qkeee_erp.core import operations
@@ -199,6 +201,131 @@ class GateExemptionTests(unittest.TestCase):
         self.assertNotIn("Qkeee Bot Job Approval", core_client.AUDIT_EXEMPT_DOCTYPES)
         self.assertTrue(operations.get_operation("job_approval.create").audit)
         self.assertTrue(operations.get_operation("job_approval.mark_approved").audit)
+
+
+def _row(**over):
+    row = dict(job_id="JOB-9", requested_by=testsupport.REQ, token="deadbeefcafef00d",
+              step_count=1, status="Pending", issued_at=int(time.time()),
+              plan=json.dumps([[NO_CODE_STEP]]))
+    row.update(over)
+    return row
+
+
+class GetJobApprovalTests(unittest.TestCase):
+    """Issue 04/05's one shared read of the authoritative stored row —
+    internal=True, same bookkeeping-doctype bypass _check_job_still_pending
+    already uses (ADR 0009: a business Requester holds no direct
+    permission on this doctype)."""
+
+    def test_reads_the_stored_row_bypassing_the_requester_gate(self):
+        with connector() as m:
+            m["get_resource"].return_value = {"data": _row()}
+            data = operations.get_job_approval("JOB-9", testsupport.ctx())
+        self.assertEqual(data["status"], "Pending")
+        self.assertEqual(m["get_resource"].call_args.args[1], core_client.JOB_APPROVAL_DOCTYPE)
+        self.assertEqual(m["get_resource"].call_args.args[2], "JOB-9")
+        self.assertTrue(m["get_resource"].call_args.kwargs["internal"])
+
+    def test_missing_job_is_an_empty_dict(self):
+        with connector() as m:
+            m["get_resource"].return_value = {"data": None}
+            self.assertEqual(operations.get_job_approval("JOB-9", testsupport.ctx()), {})
+
+
+class RenderStoredJobTests(unittest.TestCase):
+    """Issue 04: the email's plan/lines/code are rebuilt from the STORED
+    row, never from caller-supplied args — the display can't drift from
+    what job_token() actually bound."""
+
+    def test_rebuilds_lines_and_code_from_the_stored_token(self):
+        with connector() as m:
+            m["get_resource"].return_value = {"data": _row()}
+            out = operations.render_stored_job("JOB-9", testsupport.ctx())
+        self.assertEqual(out["confirmation_code"], core_client.confirmation_code("deadbeefcafef00d"))
+        self.assertEqual(out["status"], "Pending")
+        self.assertEqual(out["requested_by"], testsupport.REQ)
+        self.assertEqual(out["step_count"], 1)
+        self.assertEqual(len(out["batches"]), 1)
+        self.assertIn("hr_payroll.generic", out["batches"][0]["steps"][0]["line"])
+
+    def test_confirmation_code_ignores_live_drift(self):
+        """Re-rendering never recomputes a fresh token from current live
+        state — only the confirmation_code derived from the ORIGINAL
+        stored token is ever shown, so it can't diverge from what issue
+        06's later check will validate against."""
+        with connector() as m:
+            m["get_resource"].return_value = {"data": _row(token="00000000deadbeef")}
+            out = operations.render_stored_job("JOB-9", testsupport.ctx())
+        self.assertEqual(out["confirmation_code"], core_client.confirmation_code("00000000deadbeef"))
+
+
+class VerifyJobReplyTests(unittest.TestCase):
+    """Issue 05/ADR 0008's two-factor proof: the reply's code AND its
+    resolved sender must both match the stored row; either alone, or
+    neither, is refused and the message says which."""
+
+    CODE = core_client.confirmation_code("deadbeefcafef00d")
+
+    def _verify(self, reply_text, sender=testsupport.REQ, row=None):
+        data = row if row is not None else _row()
+        with connector() as m, patch.object(core_client, "session_identity",
+                                            return_value={"resolved_sender_email": sender}):
+            m["get_resource"].return_value = {"data": data}
+            result = operations.verify_job_reply("JOB-9", reply_text, testsupport.ctx())
+        return result, m
+
+    def test_code_and_sender_both_match_approves(self):
+        result, m = self._verify(f"yes {self.CODE}")
+        self.assertEqual(m["_do_mutate"].call_args.args[1:4],
+                         ("Qkeee Bot Job Approval", "update", {"status": "Approved"}))
+        self.assertEqual(m["_do_mutate"].call_args.args[4], "JOB-9")
+        self.assertEqual(result["_audit_log_status"], "ok")
+
+    def test_code_matching_is_case_insensitive(self):
+        self._verify(f"yes {self.CODE.lower()}")  # no raise
+
+    def test_code_missing_refuses_naming_only_that_check(self):
+        with self.assertRaises(core_client.UnconfirmedByUserError) as e:
+            self._verify("yes, approved, no code here")
+        msg = str(e.exception)
+        self.assertIn("does not contain confirmation code", msg)
+        self.assertNotIn("does not match the Requester", msg)
+
+    def test_wrong_sender_refuses_naming_only_that_check(self):
+        with self.assertRaises(core_client.UnconfirmedByUserError) as e:
+            self._verify(f"yes {self.CODE}", sender="someone.else@example.com")
+        msg = str(e.exception)
+        self.assertIn("does not match the Requester", msg)
+        self.assertNotIn("does not contain confirmation code", msg)
+
+    def test_no_resolved_sender_refuses(self):
+        with self.assertRaises(core_client.UnconfirmedByUserError):
+            self._verify(f"yes {self.CODE}", sender="")
+
+    def test_both_checks_failing_names_both(self):
+        with self.assertRaises(core_client.UnconfirmedByUserError) as e:
+            self._verify("no code at all", sender="someone.else@example.com")
+        msg = str(e.exception)
+        self.assertIn("does not contain confirmation code", msg)
+        self.assertIn("does not match the Requester", msg)
+
+    def test_already_approved_job_is_refused(self):
+        with self.assertRaises(core_client.PreconditionFailedError):
+            self._verify(f"yes {self.CODE}", row=_row(status="Approved"))
+
+    def test_expired_approval_window_is_refused(self):
+        stale = _row(issued_at=int(time.time()) - operations.JOB_TOKEN_TTL_SECONDS - 3600)
+        with self.assertRaises(core_client.StaleConfirmationError):
+            self._verify(f"yes {self.CODE}", row=stale)
+
+    def test_unknown_job_id_is_refused(self):
+        with self.assertRaises(core_client.PreconditionFailedError):
+            self._verify(f"yes {self.CODE}", row={})
+
+    def test_empty_job_id_is_refused(self):
+        with connector():
+            with self.assertRaises(core_client.InvalidArgumentsError):
+                operations.verify_job_reply("", "yes", testsupport.ctx())
 
 
 if __name__ == "__main__":

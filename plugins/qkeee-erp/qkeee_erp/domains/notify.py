@@ -522,3 +522,174 @@ operations.register_operation(operations.Operation(
                "rows": "filled by render", "has_more": "filled by render",
                "instance": "filled by render", "generated_on": "filled by render"},
 ))
+
+
+# ================================================================ notify.job_approval_request
+#
+# ADR 0008: a kanban job's full ordered plan — every batch, every step —
+# goes out once as one email to the Requester (cc the ERP admin, audit
+# only) instead of one chat confirmation per batch. The Requester's reply
+# binds the job-level token (issue 05, operations.verify_job_reply()).
+#
+# The only argument is job_id: render re-fetches the plan from the stored
+# "Qkeee Bot Job Approval" row (operations.render_stored_job(), ADR 0009)
+# rather than trusting whatever batches/token an agent's own args might
+# claim — the email the Requester approves must show exactly what
+# job_token() actually bound, never a shape the caller made up.
+
+_JOB_APPROVAL_RENDERED_KEYS = ("status", "requested_by", "step_count", "issued_at", "expires_at",
+                              "ttl_minutes", "confirmation_code", "batches")
+
+
+def _job_not_pending_refusal(job_id, status) -> core_client.PreconditionFailedError:
+    return core_client.PreconditionFailedError(
+        f"notify.job_approval_request: job {job_id!r} is not Pending (status={status!r}); "
+        f"refusing to send an approval email for it.")
+
+
+def _job_approval_render(args, ctx):
+    args = dict(args)
+    require_args(args, ["job_id"], [])
+    _require_bot_can_log(ctx)
+    stored = operations.render_stored_job(args["job_id"], ctx)
+    if stored["status"] != "Pending":
+        raise _job_not_pending_refusal(args["job_id"], stored["status"])
+    cfg = core_client.get_env_config(ctx.tag)
+    admin_email = cfg.get("admin_email") or ""
+    if not admin_email:
+        raise core_client.ConnectorError(
+            f"notify.job_approval_request needs an ERP admin address to cc — an Operator sets "
+            f"{core_client._tag_env_var(ctx.tag, 'ADMIN_EMAIL')} in the profile's qkeee-erp.env. "
+            f"Nothing was sent.")
+    args.update(stored)
+    args["admin_email"] = admin_email
+    # Always from config, never from the caller: the email's own text links
+    # only to this Instance.
+    args["instance"] = cfg.get("base_url", "")
+    return args
+
+
+def _check_job_still_pending_for_email(req, args, ctx):
+    """Step 7 (live, between render and send): the job could have been
+    approved, or its plan changed and re-rendered under the same job_id,
+    in the time between render and execute — _job_approval_render's own
+    check above only saw a render-time snapshot. Mirrors
+    operations._check_job_still_pending()'s same live re-check for
+    job_approval.mark_approved."""
+    data = operations.get_job_approval(args["job_id"], ctx)
+    if data.get("status") != "Pending":
+        raise _job_not_pending_refusal(args["job_id"], data.get("status"))
+
+
+def render_job_approval(*, job_id, confirmation_code, step_count, batches, expires_at, ttl_minutes,
+                        requester, tag, instance) -> tuple:
+    """(subject, html, text) for the job's one approval email: every
+    batch's every step in plain words (each submit/cancel/delete step
+    already marked by _step_line()), the job's one confirmation code, and
+    the fixed window it expires in. Pure: every value is escaped."""
+    e = html.escape
+    subject = f"[{tag}] Approval needed: job {job_id} ({step_count} step(s))"
+    sections, lines_text = [], []
+    for batch in batches:
+        rows = "".join(f'<li style="margin:4px 0">{e(s["line"])}</li>' for s in batch["steps"])
+        sections.append(
+            f'<h3 style="font-size:14px;margin:20px 0 6px;color:#111827">Batch {batch["batch"]}</h3>'
+            f'<ul style="margin:0;padding-left:20px;color:#374151">{rows}</ul>')
+        lines_text.append(f"Batch {batch['batch']}:")
+        lines_text += [f"  {s['line']}" for s in batch["steps"]]
+    code_box = (
+        '<div style="margin:16px 0;padding:14px 16px;background:#f0f9ff;border:1px solid #bae6fd;'
+        'border-radius:6px">'
+        '<div style="font-size:12px;color:#0369a1;font-weight:600">CONFIRMATION CODE</div>'
+        f'<div style="font-size:22px;font-weight:700;letter-spacing:.08em;margin-top:4px">'
+        f'{e(confirmation_code)}</div>'
+        f'<div style="margin-top:6px;color:#374151">Reply to this email with this code to approve '
+        f'every step above. This approval expires {e(expires_at)} ({ttl_minutes // 60}h from send).'
+        '</div></div>')
+    body = (
+        '<!doctype html><html><body style="margin:0;padding:0;background:#f3f4f6">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="background:#f3f4f6;padding:24px 0"><tr><td align="center">'
+        '<table role="presentation" width="640" cellpadding="0" cellspacing="0" '
+        'style="max-width:640px;width:100%;background:#ffffff;border:1px solid #e5e7eb;'
+        'border-radius:8px;font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#111827">'
+        '<tr><td style="padding:20px 24px;border-bottom:1px solid #e5e7eb">'
+        '<div style="font-size:12px;color:#b45309;font-weight:600;letter-spacing:.04em">'
+        'APPROVAL NEEDED</div>'
+        f'<h2 style="margin:6px 0 0;font-size:18px">Job {e(job_id)} — {step_count} step(s)</h2>'
+        '</td></tr><tr><td style="padding:16px 24px">'
+        + code_box + "".join(sections) +
+        '</td></tr><tr><td style="padding:14px 24px;border-top:1px solid #e5e7eb;'
+        'font-size:12px;color:#6b7280">'
+        f'Instance <b>{e(tag)}</b> ({e(instance)}) · Requested by {e(requester)}<br>Reply from this '
+        'address only — a reply from anywhere else is not accepted. Sent by the ERPNext associate.'
+        '</td></tr></table></td></tr></table></body></html>')
+    text = (
+        [f"Approval needed: job {job_id} ({step_count} step(s))", "",
+         f"Confirmation code: {confirmation_code}",
+         f"Reply to this email with this code to approve every step below. Expires {expires_at} "
+         f"({ttl_minutes // 60}h from send).", ""] + lines_text +
+        ["", f"Instance {tag} ({instance}) · Requested by {requester}",
+         "Reply from this address only. Sent by the ERPNext associate."])
+    return subject, body, "\n".join(text)
+
+
+def _job_approval_prepare(args, ctx):
+    required = ["job_id", "instance", "admin_email"] + list(_JOB_APPROVAL_RENDERED_KEYS)
+    require_args(args, required, [])
+    if args["status"] != "Pending":
+        raise core_client.ConnectorError(
+            "render first: notify.job_approval_request needs a freshly rendered Pending job — "
+            "never hand-construct these args.")
+    subject, html_body, text = render_job_approval(
+        job_id=args["job_id"], confirmation_code=args["confirmation_code"],
+        step_count=int(args["step_count"]), batches=args["batches"], expires_at=args["expires_at"],
+        ttl_minutes=int(args["ttl_minutes"]), requester=args["requested_by"], tag=ctx.tag,
+        instance=args["instance"])
+    return PreparedRequest(
+        transport="resource", doctype="Communication", action="create",
+        body={"communication_type": "Communication", "communication_medium": "Email",
+              "sent_or_received": "Sent", "subject": subject, "content": html_body,
+              "recipients": args["requested_by"], "cc": args["admin_email"],
+              "reference_doctype": core_client.JOB_APPROVAL_DOCTYPE,
+              "reference_name": args["job_id"]},
+        # No single business record to gate a read on (ADR 0009's consequence
+        # for this issue): anchor both RBAC and audit on the Job Approval row
+        # itself, the same bookkeeping-doctype exemption Audit Log/Comment get.
+        rbac_doctype=core_client.JOB_APPROVAL_DOCTYPE, rbac_ptype="read",
+        audit_doctype=core_client.JOB_APPROVAL_DOCTYPE, audit_reference=args["job_id"],
+        bound={"text": text},
+        notes=["Execute with these args, confirmation_token and issued_at only: the gateway "
+               "sends this email to the Requester, cc's the ERP admin, then logs it against the "
+               "Job Approval row. Never send it any other way."])
+
+
+def _send_job_approval_email(req, args, ctx):
+    """pre_send: every gate has passed. Send; the pipeline then logs."""
+    _require_bot_can_log(ctx)
+    body = req.body
+    sent = mailer.send_html(body["recipients"], body["subject"], body["content"],
+                            req.bound["text"], cc=body.get("cc") or None)
+    body["message_id"] = sent["message_id"]
+    body["sender"] = sent["from"]
+    req.notes.append(
+        f"Email sent from {sent['from']} to {sent['to']}"
+        + (f", cc {sent['cc']}" if sent.get("cc") else "") + f", Message-ID {sent['message_id']}.")
+
+
+operations.register_operation(operations.Operation(
+    key="notify.job_approval_request", domain=DOMAIN_NAME,
+    summary="ADR 0008: the kanban job's full ordered plan as one approval email to the Requester "
+            "(cc the ERP admin, audit-only) instead of one chat confirmation per batch",
+    prepare=_job_approval_prepare, render_defaults=_job_approval_render,
+    preconditions=(_check_job_still_pending_for_email,),
+    pre_send=_send_job_approval_email, on_failure=_sent_but_not_logged,
+    token_policy=operations.POLICY_TOKEN, skip_comment=True,
+    example_args={"job_id": "JOB-1"},
+    args_help={"job_id": "the kanban job id operations.prepare_job() stored the plan under",
+               "status": "filled by render", "requested_by": "filled by render",
+               "step_count": "filled by render", "issued_at": "filled by render",
+               "expires_at": "filled by render", "ttl_minutes": "filled by render",
+               "confirmation_code": "filled by render", "batches": "filled by render",
+               "instance": "filled by render", "admin_email": "filled by render"},
+))

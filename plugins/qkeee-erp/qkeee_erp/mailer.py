@@ -80,12 +80,14 @@ def mailbox() -> dict:
     return cfg
 
 
-def build_message(cfg: dict, to: str, subject: str, html: str, text: str) -> MIMEMultipart:
+def build_message(cfg: dict, to: str, subject: str, html: str, text: str, cc: str = None) -> MIMEMultipart:
     msg = MIMEMultipart("alternative")
     domain = cfg["address"].rsplit("@", 1)[-1] or "localhost"
     msg["Message-ID"] = f"<qkeee-{uuid.uuid4().hex[:16]}@{domain}>"
     msg["From"] = formataddr((cfg["from_name"], cfg["address"])) if cfg["from_name"] else cfg["address"]
     msg["To"] = to
+    if cc:
+        msg["Cc"] = cc
     msg["Subject"] = subject
     msg["Date"] = formatdate(localtime=True)
     msg["Auto-Submitted"] = "auto-generated"
@@ -102,12 +104,17 @@ def _context(cfg) -> ssl.SSLContext:
     return ctx
 
 
-def send_html(to: str, subject: str, html: str, text: str) -> dict:
-    """Send one message to `to` only. Returns {message_id, from, to}."""
+def send_html(to: str, subject: str, html: str, text: str, cc: str = None) -> dict:
+    """Send one message to `to`, optionally cc'ing one more address (agents
+    issue 04: the job-approval email, To the Requester, Cc the ERP admin —
+    audit-only, gets no gating role). Returns {message_id, from, to, cc}."""
     if not to or "@" not in to or any(c in to for c in ",;\r\n"):
         raise EmailSendError(f"Refusing to send: {to!r} is not one email address.")
+    if cc and ("@" not in cc or any(c in cc for c in ",;\r\n")):
+        raise EmailSendError(f"Refusing to send: cc {cc!r} is not one email address.")
     cfg = mailbox()
-    msg = build_message(cfg, to, subject, html, text)
+    msg = build_message(cfg, to, subject, html, text, cc=cc)
+    to_addrs = [to] + ([cc] if cc else [])
     try:
         if cfg["security"] in ("tls", "ssl"):
             smtp = smtplib.SMTP_SSL(cfg["host"], cfg["port"], context=_context(cfg),
@@ -118,7 +125,7 @@ def send_html(to: str, subject: str, html: str, text: str) -> dict:
             if cfg["security"] == "starttls":
                 smtp.starttls(context=_context(cfg))
             smtp.login(cfg["address"], _setting("EMAIL_PASSWORD"))
-            refused = smtp.send_message(msg, from_addr=cfg["address"], to_addrs=[to])
+            refused = smtp.send_message(msg, from_addr=cfg["address"], to_addrs=to_addrs)
         finally:
             try:
                 smtp.quit()
@@ -131,5 +138,6 @@ def send_html(to: str, subject: str, html: str, text: str) -> dict:
         raise EmailSendError(f"SMTP send to {to} failed: {e}. The email was not sent, or its "
                              f"delivery is unknown; do not resend without telling the user.") from e
     if refused:
-        raise EmailSendError(f"SMTP server refused recipient {to}: {refused}. Nothing was sent.")
-    return {"message_id": msg["Message-ID"], "from": cfg["address"], "to": to}
+        raise EmailSendError(f"SMTP server refused recipient(s) {refused}. Nothing was sent, or "
+                             f"only partially delivered — do not resend without checking.")
+    return {"message_id": msg["Message-ID"], "from": cfg["address"], "to": to, "cc": cc}

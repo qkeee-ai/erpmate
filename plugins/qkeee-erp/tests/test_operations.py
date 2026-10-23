@@ -38,7 +38,7 @@ from testsupport import REQ
 _DOMAINS_DIR = os.path.dirname(os.path.abspath(domains.__file__))
 
 CFG = {"tag": "test", "base_url": "https://erp.example", "api_key": "k", "api_secret": "s",
-       "credential": "bot"}
+       "credential": "bot", "admin_email": "admin@example.com"}
 
 # One live record that satisfies every render/precondition read below.
 LIVE = {"name": "X", "modified": "M1", "asset": "A-1",
@@ -47,7 +47,15 @@ LIVE = {"name": "X", "modified": "M1", "asset": "A-1",
         "depreciation_schedule": [
             {"schedule_date": "2026-01-31", "depreciation_amount": 10.0, "journal_entry": None},
             {"schedule_date": "2026-02-28", "depreciation_amount": 10.0, "journal_entry": None},
-            {"schedule_date": "2099-01-31", "depreciation_amount": 10.0, "journal_entry": None}]}
+            {"schedule_date": "2099-01-31", "depreciation_amount": 10.0, "journal_entry": None}],
+        # notify.job_approval_request (agents issue 04): render re-fetches
+        # the stored "Qkeee Bot Job Approval" row by job_id — this doubles
+        # as that row for the matrix test.
+        "status": "Pending", "requested_by": REQ, "token": "deadbeefcafef00d",
+        "issued_at": 1000, "step_count": 1,
+        "plan": json.dumps([[{"op": "hr_payroll.generic",
+                              "args": {"doctype": "Employee", "action": "create",
+                                       "payload": {"first_name": "Arjun"}}}]])}
 
 MAPPED_INVOICE = {"doctype": "Sales Invoice", "company": "Acme", "customer": None,
                   "items": [{"item_code": "LAPTOP", "asset": "ACC-ASS-2026-00001", "is_fixed_asset": 1,
@@ -69,6 +77,7 @@ TAMPER = {
     "system_admin.permission_add": "reason", "system_admin.permission_update": "reason",
     "system_admin.permission_remove": "reason", "system_admin.permission_reset": "reason",
     "notify.summary_email": "title", "notify.share_records": "title",
+    "notify.job_approval_request": "job_id",
 }
 NO_EXAMPLE = {"mis.generic"}  # refuses every write — see OwnershipAndUnscopedTests
 
@@ -457,7 +466,7 @@ class InvariantTests(unittest.TestCase):
                       "get_bin_qty": "gated read", "bin_rows_to_actual_source_qty": "pure"},
         "fixed_assets": {"map_sales_invoice": "gated read"},
         "notify": {"render_summary": "pure", "render_summary_text": "pure",
-                   "render_share": "pure"},
+                   "render_share": "pure", "render_job_approval": "pure"},
         "system_admin": {"get_roles_and_doctypes": "gated read",
                          "get_permissions": "gated read", "get_scheduler_status": "gated read"},
     }

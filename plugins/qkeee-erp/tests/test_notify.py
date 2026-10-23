@@ -3,6 +3,7 @@ goes to the requester only, its HTML comes from the plugin template with
 every value escaped, and execute logs exactly the rendered email."""
 
 import copy
+import json
 import unittest
 from unittest.mock import patch
 
@@ -301,6 +302,118 @@ class ShareRecordsTests(unittest.TestCase):
             with self.assertRaises(core_client.TokenMismatchError):
                 operations.run_operation(SHARE, full_args, ctx)
             m["send_html"].assert_not_called()
+
+
+JOB_KEY = "notify.job_approval_request"
+JOB_ID = "JOB-42"
+JOB_ROW = {
+    "job_id": JOB_ID, "requested_by": testsupport.REQ, "token": "deadbeefcafef00d",
+    "issued_at": 1000, "step_count": 1, "status": "Pending",
+    "plan": json.dumps([[{"op": "hr_payroll.generic",
+                          "args": {"doctype": "Employee", "action": "create",
+                                   "payload": {"first_name": "Arjun"}}}]]),
+}
+
+
+def _env_config(admin_email="admin@example.com"):
+    return lambda tag, credential="bot": {"base_url": "https://erp.example",
+                                          "admin_email": admin_email, "credential": credential}
+
+
+class JobApprovalRequestTests(unittest.TestCase):
+    """notify.job_approval_request (ADR 0008, agents issue 04): the kanban
+    job's full plan as one email to the Requester, cc the ERP admin,
+    logged against the Job Approval row (ADR 0009's resolved anchor
+    question) instead of a business record."""
+
+    def _render(self, job_row=None, admin_email="admin@example.com"):
+        row = job_row if job_row is not None else JOB_ROW
+        with connector() as m, patch.object(core_client, "get_env_config",
+                                            side_effect=_env_config(admin_email)):
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(row)}
+            return testsupport.render(JOB_KEY, {"job_id": JOB_ID})
+
+    def test_render_rebuilds_the_plan_from_the_stored_row(self):
+        full_args, ctx, out = self._render()
+        body = out["request"]["body"]
+        self.assertEqual(out["policy"], operations.POLICY_TOKEN)
+        self.assertEqual(body["recipients"], testsupport.REQ)
+        self.assertEqual(body["cc"], "admin@example.com")
+        self.assertEqual(body["reference_doctype"], core_client.JOB_APPROVAL_DOCTYPE)
+        self.assertEqual(body["reference_name"], JOB_ID)
+        self.assertIn(f"job {JOB_ID}", body["subject"])
+        html_content = body["content"]
+        self.assertIn("DEADBE", html_content)  # code derives from the stored token, not render-time
+        self.assertIn("create Employee", html_content)
+
+    def test_extra_or_fabricated_args_are_refused(self):
+        """Only job_id is read: an agent cannot pass its own batches/token
+        and have the email show something other than the stored plan."""
+        with connector() as m, patch.object(core_client, "get_env_config",
+                                            side_effect=_env_config()):
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(JOB_ROW)}
+            with self.assertRaises(core_client.ConnectorError):
+                testsupport.render(JOB_KEY, {"job_id": JOB_ID, "batches": [{"fabricated": True}]})
+
+    def test_refuses_when_the_job_is_not_pending(self):
+        with self.assertRaises(core_client.PreconditionFailedError):
+            self._render(dict(JOB_ROW, status="Approved"))
+
+    def test_refuses_without_an_admin_email_configured(self):
+        with self.assertRaises(core_client.ConnectorError):
+            self._render(admin_email="")
+
+    def test_execute_sends_with_cc_and_logs_against_the_job_approval_row(self):
+        full_args, ctx, out = self._render()
+        with connector() as m:
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(JOB_ROW)}
+            result = operations.run_operation(JOB_KEY, full_args, ctx)
+        to, subject, html_content, text = m["send_html"].call_args.args
+        body = out["request"]["body"]
+        self.assertEqual(m["send_html"].call_args.kwargs.get("cc"), "admin@example.com")
+        self.assertEqual((to, subject, html_content), (testsupport.REQ, body["subject"], body["content"]))
+        self.assertIn("DEADBE", text)
+        sent = m["_do_mutate"].call_args.args
+        self.assertEqual(sent[1:3], ("Communication", "create"))
+        start = m["record_audit_log_start"].call_args.kwargs
+        self.assertEqual(start["doctype"], core_client.JOB_APPROVAL_DOCTYPE)
+        self.assertEqual(start["name"], JOB_ID)
+        self.assertEqual(result["_audit_log_status"], "ok")
+
+    def test_execute_refuses_a_job_approved_since_render(self):
+        """The live precondition (step 7) re-checks the stored row — a job
+        approved, or re-rendered under the same job_id, between render and
+        execute must not still get an approval email sent for it."""
+        full_args, ctx, _ = self._render()
+        with connector() as m:
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {
+                "data": dict(JOB_ROW, status="Approved")}
+            with self.assertRaises(core_client.PreconditionFailedError):
+                operations.run_operation(JOB_KEY, full_args, ctx)
+            m["send_html"].assert_not_called()
+            self.assertFalse(m["_do_mutate"].called)
+
+    def test_failed_send_logs_nothing(self):
+        full_args, ctx, _ = self._render()
+        for error in (mailer.EmailNotConfiguredError("no mailbox"), mailer.EmailSendError("smtp")):
+            with self.subTest(error=type(error).__name__), connector() as m:
+                m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(JOB_ROW)}
+                m["send_html"].side_effect = error
+                with self.assertRaises(type(error)):
+                    operations.run_operation(JOB_KEY, full_args, ctx)
+                self.assertFalse(m["_do_mutate"].called)
+
+    def test_render_job_approval_is_pure_and_escapes(self):
+        subject, html_body, text = notify.render_job_approval(
+            job_id="J & 1", confirmation_code="ABC123", step_count=1,
+            batches=[{"batch": 1, "steps": [{"step": 1, "line": "1. create Item <X>"}]}],
+            expires_at="2026-10-24T00:00:00Z", ttl_minutes=1440, requester="r@x.com", tag="t",
+            instance="https://e.x")
+        self.assertIn("[t] Approval needed", subject)
+        self.assertIn("J &amp; 1", html_body)
+        self.assertIn("1. create Item &lt;X&gt;", html_body)
+        self.assertIn("ABC123", html_body)
+        self.assertIn("ABC123", text)
 
 
 if __name__ == "__main__":

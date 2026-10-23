@@ -216,6 +216,17 @@ erp_execute_write(phase="render", op="notify.share_records",
                         "recipients": ["nikhil.sharma@qkeee.in", "sanjay.jain@qkeee.in"],
                         "note": "All Items on demo_erp."})
 
+# Kanban job approval email (agents ADR 0008): one email with the full
+# ordered plan for a kanban job instead of one chat confirmation per
+# batch. job_id must already have a stored, Pending plan (operations.
+# prepare_job(), which also computes job_id's token). Render re-fetches
+# that stored plan — pass nothing else, an agent's own batches/token are
+# never trusted. The email goes To the Requester, Cc the ERP admin
+# (audit-only). The Requester's reply later binds the job (ADR 0008's
+# two-factor proof: the code plus a matching sender), not this send.
+erp_execute_write(phase="render", op="notify.job_approval_request",
+                  args={"job_id": "<job_id from prepare_job()>"})
+
 # A bespoke gated operation
 erp_execute_write(phase="render", op="system_admin.disable_user",
                   args={"name": "<user email>", "reason": "<stated reason>"})

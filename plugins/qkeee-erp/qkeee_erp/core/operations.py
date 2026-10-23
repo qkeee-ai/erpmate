@@ -1259,8 +1259,7 @@ register_operation(Operation(
 
 
 def _check_job_still_pending(req: PreparedRequest, args: dict, ctx: WriteContext) -> None:
-    data = _c.get_resource(ctx.tag, req.doctype, req.name, requested_by=ctx.requested_by,
-                           internal=True, **ctx.audit_kwargs()).get("data") or {}
+    data = get_job_approval(req.name, ctx)
     if data.get("status") != "Pending":
         raise _c.PreconditionFailedError(
             f"job_approval.mark_approved: job '{req.name}' is not Pending (status="
@@ -1284,6 +1283,93 @@ register_operation(Operation(
     # is ever called (issue 05) — never a direct CLI/agent entry point.
     cli=False,
 ))
+
+
+def get_job_approval(job_id: str, ctx: WriteContext) -> dict:
+    """The stored "Qkeee Bot Job Approval" row for `job_id`, read through
+    the same connector-plumbing bypass as _check_job_still_pending above
+    (internal=True — a business Requester holds no direct permission on
+    this bookkeeping doctype, ADR 0009). The one place both issue 04's
+    email render and issue 05's reply-binding read the authoritative
+    plan/token from — never an agent's own freeform args, which could
+    claim a plan or token that was never actually rendered."""
+    return _c.get_resource(ctx.tag, _c.JOB_APPROVAL_DOCTYPE, job_id, requested_by=ctx.requested_by,
+                           internal=True, **ctx.audit_kwargs()).get("data") or {}
+
+
+def render_stored_job(job_id: str, ctx: WriteContext) -> dict:
+    """Rebuild prepare_job()'s human-readable `batches` (ADR 0008's full
+    itemized plan) from the STORED plan, not from caller-supplied args —
+    notify.job_approval_request's email must show exactly what job_token()
+    actually bound. Uses each step's op.prepare() only (render=False, no
+    I/O, same as _job_requests() itself) rather than re-rendering live
+    facts a second time: the confirmation_code below is derived from the
+    token stored at the original render, so the display must not drift
+    from it."""
+    data = get_job_approval(job_id, ctx)
+    prepared_batches = _job_requests(json.loads(data["plan"]), ctx, render=False) if data else []
+    issued_at = _c.coerce_issued_at(data.get("issued_at")) if data else 0
+    return {
+        "job_id": job_id, "status": data.get("status"), "requested_by": data.get("requested_by"),
+        "step_count": int(data.get("step_count") or 0), "issued_at": issued_at,
+        "expires_at": _c.expires_at(issued_at, JOB_TOKEN_TTL_SECONDS),
+        "ttl_minutes": JOB_TOKEN_TTL_SECONDS // 60,
+        "confirmation_code": _c.confirmation_code(data.get("token") or ""),
+        "batches": [
+            {"batch": bi + 1,
+             "steps": [{"step": i, "op": op.key, "policy": p, "line": _step_line(i, op, req, p)}
+                       for i, (op, _, req, p) in enumerate(batch, start=1)]}
+            for bi, batch in enumerate(prepared_batches)],
+    }
+
+
+def verify_job_reply(job_id: str, reply_text: str, ctx: WriteContext) -> dict:
+    """ADR 0008's two-factor proof that an inbound reply is the Requester's
+    own approval of job `job_id`: (1) `reply_text` — the literal text of
+    the reply, same discipline as user_confirmation_text — must contain the
+    job's confirmation code, and (2) this turn's resolved sender
+    (core/client.py session_identity(), the same gateway-authenticated
+    identity `erp_discover(action="whoami")` reports) must equal the
+    Requester the job was rendered for. Either alone is refused; both
+    failing says both. Binds against the STORED job (issue 03/ADR 0009),
+    never a token recomputed here, so a separate kanban-worker process
+    (issue 06) can later trust the same row.
+
+    Detection of WHICH job a given inbound turn replies to (matching this
+    `job_id`) is left to the caller — the job id is in the approval
+    email's subject (notify.job_approval_request), so no email-thread/
+    Message-ID plumbing is needed; the Job Approval doctype stores no
+    Message-ID (issue 03's schema), so thread-matching was not chosen."""
+    if not job_id or not isinstance(job_id, str):
+        raise _c.InvalidArgumentsError("verify_job_reply needs a non-empty job_id.")
+    data = get_job_approval(job_id, ctx)
+    if data.get("status") != "Pending":
+        raise _c.PreconditionFailedError(
+            f"verify_job_reply: job '{job_id}' is not Pending (status={data.get('status')!r}); "
+            f"refusing to approve twice or out of order.")
+    issued_at = _c.coerce_issued_at(data.get("issued_at"))
+    if not _c.is_fresh(issued_at, JOB_TOKEN_TTL_SECONDS):
+        raise _c.StaleConfirmationError(
+            f"verify_job_reply: job '{job_id}' approval window expired at "
+            f"{_c.expires_at(issued_at, JOB_TOKEN_TTL_SECONDS)} (ADR 0008's fixed 24h window from "
+            f"issuance) — re-render the job and send a fresh approval email; there is no silent "
+            f"extension.")
+    expected_code = _c.confirmation_code(data.get("token") or "")
+    code_ok = bool(reply_text) and expected_code in reply_text.upper()
+    sender = (_c.session_identity().get("resolved_sender_email") or "").strip()
+    sender_ok = bool(sender) and sender.lower() == (data.get("requested_by") or "").lower()
+    if not (code_ok and sender_ok):
+        failed = []
+        if not code_ok:
+            failed.append(f"the reply does not contain confirmation code {expected_code!r}")
+        if not sender_ok:
+            failed.append(
+                f"the reply's resolved sender ({sender or 'none'}) does not match the "
+                f"Requester this job was rendered for ({data.get('requested_by')!r})")
+        raise _c.UnconfirmedByUserError(
+            f"Refusing to approve job '{job_id}': " + " and ".join(failed) + ". ADR 0008 requires "
+            f"BOTH the code and a matching sender; neither alone is an approval.")
+    return run_operation("job_approval.mark_approved", {"job_id": job_id}, ctx)
 
 
 # ---------------------------------------------------------------------------

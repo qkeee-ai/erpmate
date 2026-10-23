@@ -1978,7 +1978,8 @@ class GateDecisionLoggingTests(unittest.TestCase):
         self.assertTrue(payload["gate_check"])
         self.assertFalse(payload["allowed"])
         mocked_submit.assert_called_once_with({"tag": "gatelog", "base_url": "https://example.com",
-                                                 "api_key": "key", "api_secret": "secret", "credential": "bot"},
+                                                 "api_key": "key", "api_secret": "secret", "credential": "bot",
+                                                 "admin_email": ""},
                                                 "AUDITLOG-GATE-1")
 
     @patch.object(ec, "_audit_submit", return_value=True)
