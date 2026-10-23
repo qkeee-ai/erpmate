@@ -183,5 +183,197 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(m["_do_mutate"].call_count, 5)
 
 
+# =============================================================== job_id / job_batch_index
+#
+# Issue 06/ADR 0008: a kanban child task consumes an already-Approved job
+# (issue 03's store, approved by operations.verify_job_reply()) instead of
+# running its own fresh render-then-chat-code round trip — there is no
+# live chat session inside a dispatched kanban worker to answer one.
+
+JOB_ID = "JOB-7"
+
+
+def _rendered_plan(batches):
+    """prepare_job()'s own `out["job"]` construction: each step's args as
+    render_defaults left them (e.g. a submit's `expected_modified` filled
+    from the live record) — the stored plan is never the bare, unrendered
+    MIXED steps."""
+    with connector():
+        prepared = [operations._batch_requests(copy.deepcopy(b), testsupport.ctx(), render=True)
+                   for b in batches]
+    return [[{"op": op.key, "args": args} for op, args, _, _ in batch] for batch in prepared]
+
+
+# batch 1: one step; batch 2: the other four — exercises a non-1 index too.
+JOB_PLAN = _rendered_plan([[MIXED[0]], MIXED[1:]])
+
+
+def _job_token_for(requested_by, issued_at):
+    """The real job_token() over JOB_PLAN — same recompute _verify_job_batch
+    itself does (render=False; JOB_PLAN's args are already render-enriched),
+    so `_job_row()`'s stored token is one a correct, unmodified batch
+    submission actually matches, not an arbitrary placeholder string."""
+    with connector():
+        prepared = operations._job_requests(copy.deepcopy(JOB_PLAN),
+                                            testsupport.ctx(requested_by=requested_by), render=False)
+    return operations.job_token(prepared, requested_by, JOB_ID, issued_at)
+
+
+def _job_row(**over):
+    requested_by = over.get("requested_by", testsupport.REQ)
+    issued_at = over.get("issued_at", int(time.time()))
+    row = dict(job_id=JOB_ID, requested_by=requested_by,
+              token=_job_token_for(requested_by, issued_at), step_count=5, status="Approved",
+              issued_at=issued_at, plan=json.dumps(JOB_PLAN))
+    row.update(over)
+    return row
+
+
+def _get_resource_side_effect(row):
+    """get_resource is one mock shared by every doctype in connector(): the
+    Job Approval lookup needs `row`, but a gated step's own live read
+    (e.g. a submit's expected_modified check) still needs the ordinary
+    LIVE record — never the Job Approval row."""
+    def _side_effect(tag, doctype, name, **kw):
+        if doctype == core_client.JOB_APPROVAL_DOCTYPE:
+            return {"data": dict(row)}
+        return {"data": copy.deepcopy(LIVE)}
+    return _side_effect
+
+
+class JobBatchTests(unittest.TestCase):
+
+    def _run(self, index=2, steps=None, row=None, **ctx_kw):
+        data = row if row is not None else _job_row()
+        steps = steps if steps is not None else copy.deepcopy(JOB_PLAN[index - 1])
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(data)
+            report = operations.run_batch(steps, testsupport.ctx(**ctx_kw), job_id=JOB_ID,
+                                          job_batch_index=index)
+        return report, m
+
+    def test_executes_the_matching_batch_with_no_confirmation_fields_in_ctx(self):
+        """ctx carries no confirmation_token/user_confirmation_text at all
+        — the job's email approval is the proof, not a chat round trip."""
+        ctx = testsupport.ctx()
+        self.assertIsNone(ctx.confirmation_token)
+        self.assertIsNone(ctx.user_confirmation_text)
+        report, m = self._run(index=2)
+        self.assertEqual(report["counts"], {"succeeded": 4, "failed": 0, "not_attempted": 0})
+        self.assertEqual(m["_do_mutate"].call_count, 4)
+
+    def test_match_check_uses_the_stored_requester_not_ctxs(self):
+        """The executing kanban worker's own ctx.requested_by (its service
+        identity) need not equal the Requester the job was approved for —
+        job_token() is recomputed with the STORED requested_by, so a
+        worker is never required to impersonate that Requester."""
+        report, m = self._run(index=2, requested_by="kanban-worker@example.com")
+        self.assertEqual(report["counts"]["succeeded"], 4)
+        self.assertFalse(report["stopped_at"])
+
+    def test_every_audit_row_names_the_job_and_batch_position(self):
+        _, m = self._run(index=2)
+        notes = [c.kwargs["approval_note"] for c in m["record_audit_log_start"].call_args_list]
+        self.assertEqual(len(notes), 4)
+        for i, note in enumerate(notes, start=1):
+            self.assertIn(f"job {JOB_ID} batch 2/2 step {i}/4", note)
+
+    def test_first_batch_of_the_job_is_also_addressable(self):
+        report, m = self._run(index=1)
+        self.assertEqual(report["counts"]["succeeded"], 1)
+        note = m["record_audit_log_start"].call_args.kwargs["approval_note"]
+        self.assertIn(f"job {JOB_ID} batch 1/2 step 1/1", note)
+
+    def test_job_not_approved_is_refused(self):
+        with self.assertRaises(core_client.PreconditionFailedError):
+            self._run(row=_job_row(status="Pending"))
+
+    def test_unknown_job_is_refused(self):
+        with self.assertRaises(core_client.PreconditionFailedError):
+            self._run(row={})
+
+    def test_expired_approval_window_is_refused(self):
+        stale = _job_row(issued_at=int(time.time()) - operations.JOB_TOKEN_TTL_SECONDS - 3600)
+        with self.assertRaises(core_client.StaleConfirmationError):
+            self._run(row=stale)
+
+    def test_out_of_range_index_is_refused(self):
+        with self.assertRaises(core_client.InvalidArgumentsError):
+            self._run(index=3, steps=copy.deepcopy(JOB_PLAN[1]))
+
+    def test_job_batch_index_must_be_a_positive_int(self):
+        for bad in (0, -1, "2", None, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(core_client.InvalidArgumentsError):
+                    self._run(index=bad, steps=copy.deepcopy(JOB_PLAN[1]))
+
+    def test_mismatched_batch_is_refused_before_any_write(self):
+        tampered = copy.deepcopy(JOB_PLAN[1])
+        tampered[3]["args"]["payload"]["customer_group"] = "Retail"  # the Customer update step
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            with self.assertRaises(core_client.TokenMismatchError):
+                operations.run_batch(tampered, testsupport.ctx(), job_id=JOB_ID, job_batch_index=2)
+            self.assertFalse(m["_do_mutate"].called)
+
+    def test_a_shorter_or_longer_batch_is_refused(self):
+        for steps in (JOB_PLAN[1][:-1], JOB_PLAN[1] + [MIXED[0]]):
+            with self.subTest(len=len(steps)), connector() as m:
+                m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+                with self.assertRaises(core_client.TokenMismatchError):
+                    operations.run_batch(copy.deepcopy(steps), testsupport.ctx(), job_id=JOB_ID,
+                                         job_batch_index=2)
+                self.assertFalse(m["_do_mutate"].called)
+
+    def test_a_reordered_batch_is_refused(self):
+        reordered = [JOB_PLAN[1][1], JOB_PLAN[1][0]] + JOB_PLAN[1][2:]
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            with self.assertRaises(core_client.TokenMismatchError):
+                operations.run_batch(copy.deepcopy(reordered), testsupport.ctx(), job_id=JOB_ID,
+                                     job_batch_index=2)
+            self.assertFalse(m["_do_mutate"].called)
+
+    def test_batch_token_and_job_id_are_mutually_exclusive(self):
+        with connector():
+            with self.assertRaises(core_client.InvalidArgumentsError):
+                operations.run_batch(copy.deepcopy(JOB_PLAN[1]), testsupport.ctx(), batch_token="x",
+                                     job_id=JOB_ID, job_batch_index=2)
+
+
+class JobBatchToolTests(unittest.TestCase):
+
+    def _tools(self):
+        return erp_tools.ErpTools(lambda: {"active_env": "test", "mode": "read-write"},
+                                  requester=lambda: testsupport.REQ, audit=lambda args: {})
+
+    def test_job_id_without_batch_is_refused(self):
+        handle = self._tools().handler("erp_execute_write")
+        with connector():
+            out = json.loads(handle({"phase": "execute", "op": "hr_payroll.generic",
+                                     "args": {"doctype": "Employee", "action": "create",
+                                              "payload": {}},
+                                     "job_id": JOB_ID, "job_batch_index": 1}))
+        self.assertFalse(out["ok"])
+        self.assertIn("job_id goes with batch", out["error"])
+
+    def test_job_id_and_batch_token_together_is_refused(self):
+        handle = self._tools().handler("erp_execute_write")
+        with connector():
+            out = json.loads(handle({"phase": "execute", "batch": copy.deepcopy(JOB_PLAN[1]),
+                                     "batch_token": "x", "job_id": JOB_ID, "job_batch_index": 2}))
+        self.assertFalse(out["ok"])
+        self.assertIn("mutually exclusive", out["error"])
+
+    def test_executes_through_the_tool_with_no_latest_prompt(self):
+        handle = self._tools().handler("erp_execute_write")
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            out = json.loads(handle({"phase": "execute", "batch": copy.deepcopy(JOB_PLAN[1]),
+                                     "job_id": JOB_ID, "job_batch_index": 2}))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(m["_do_mutate"].call_count, 4)
+
+
 if __name__ == "__main__":
     unittest.main()

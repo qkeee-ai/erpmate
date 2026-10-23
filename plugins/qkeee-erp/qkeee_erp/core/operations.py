@@ -108,7 +108,9 @@ class WriteContext:
     user_approved: bool = False
     approval_note: Optional[str] = None
     # Set only by run_batch() after it verified the one batch confirmation
-    # (HRMS run review issue 02): "batch <code> step i/n". Never a tool
+    # (HRMS run review issue 02): "batch <code> step i/n", or, for a
+    # kanban child task consuming a job-level approval instead (agents
+    # issue 06, ADR 0008): "job <job_id> batch i/n step j/m". Never a tool
     # argument; without_confirmation() clears it.
     batch_approval: Optional[str] = None
 
@@ -1030,7 +1032,8 @@ def _resolve_from_step(i: int, args: dict, req: PreparedRequest, written: dict) 
     return dict(args, expected_modified=modified)
 
 
-def run_batch(steps: list, ctx: WriteContext, batch_token: str = None) -> dict:
+def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: str = None,
+             job_batch_index: int = None) -> dict:
     """Run several operations in order and STOP AT THE FIRST FAILURE (issue
     07): a gate refusal, an ERPNext rejection or an unknown outcome. Returns
     {"steps": [...], "stopped_at": <1-based step> | None, "counts": {...}};
@@ -1043,9 +1046,29 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None) -> dict:
     checked against the render before step 1, the one code is verified
     once, and every step's Audit Log row names "batch <code> step i/n". A
     step's `expected_modified: {"from_step": k}` takes step k's result
-    `modified`. Without it, each step carries its own confirmation fields."""
-    code, prepared = (_verify_batch(steps, ctx, batch_token) if batch_token is not None
-                      else (None, None))
+    `modified`. Without it, each step carries its own confirmation fields.
+
+    With `job_id` + `job_batch_index` instead (ADR 0008, agents issue 06):
+    a kanban child task consumes an already-Approved job (issue 03's
+    store, approved by verify_job_reply()) rather than running its own
+    fresh render-then-chat-code round trip — there is no live chat session
+    to answer one. `steps` must be exactly batch `job_batch_index` of that
+    job's approved plan; every step's Audit Log row names
+    "job <job_id> batch i/n step j/m". Mutually exclusive with
+    `batch_token` — a batch is approved by a fresh chat code or a
+    job-level email approval, never both."""
+    if job_id is not None and batch_token is not None:
+        raise _c.InvalidArgumentsError(
+            "batch_token and job_id are mutually exclusive — a batch is approved by a fresh "
+            "chat code or a job-level email approval, never both.")
+    if job_id is not None:
+        total_batches, prepared = _verify_job_batch(job_id, job_batch_index, steps, ctx)
+        label_prefix = f"job {job_id} batch {job_batch_index}/{total_batches}"
+    elif batch_token is not None:
+        code, prepared = _verify_batch(steps, ctx, batch_token)
+        label_prefix = f"batch {code}"
+    else:
+        prepared, label_prefix = None, None
     written = {}
     rows, stopped_at = [], None
     for i, step in enumerate(steps, start=1):
@@ -1060,8 +1083,8 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None) -> dict:
             if unknown or not step.get("op"):
                 raise _c.InvalidArgumentsError(
                     f"batch step {i}: needs 'op' and 'args'; unknown key(s) {sorted(unknown)}")
-            if code is not None:
-                label = f"batch {code} step {i}/{len(steps)}"
+            if label_prefix is not None:
+                label = f"{label_prefix} step {i}/{len(steps)}"
                 args = _resolve_from_step(i, args, prepared[i - 1][2], written)
                 step_ctx = dataclasses.replace(ctx.without_confirmation(), batch_approval=label,
                                                approval_note=label)
@@ -1370,6 +1393,63 @@ def verify_job_reply(job_id: str, reply_text: str, ctx: WriteContext) -> dict:
             f"Refusing to approve job '{job_id}': " + " and ".join(failed) + ". ADR 0008 requires "
             f"BOTH the code and a matching sender; neither alone is an approval.")
     return run_operation("job_approval.mark_approved", {"job_id": job_id}, ctx)
+
+
+def _verify_job_batch(job_id: str, job_batch_index: int, steps: list, ctx: WriteContext) -> tuple:
+    """Execute side of a kanban child task's job-level binding (ADR 0008,
+    issue 06): instead of a fresh render-then-chat-code round trip, this
+    batch must be EXACTLY batch `job_batch_index` of job `job_id`'s stored,
+    Approved plan (issue 03's store, marked Approved by verify_job_reply()
+    above) — same steps, same order, unchanged; the job's 24h approval
+    window (ADR 0008) still fresh. Returns (total_batches, prepared
+    requests) — total_batches for the Audit Log label
+    ("job <job_id> batch i/n step j/m", run_batch()'s job-approved branch).
+
+    Verified the same way _verify_batch() verifies a chat-code batch: ONE
+    hash compared once, not a hand-rolled per-step comparison. The
+    submitted `steps` replace batch `job_batch_index` in a copy of the
+    stored plan; job_token() over that spliced plan must equal the stored
+    `token` exactly as it does at render (job_token()/prepare_job()).
+    Reusing job_token() — rather than comparing each step's
+    PreparedRequest pairwise — also binds `requested_by` and `job_id` into
+    the check for free, the same way the stored token already does;
+    recomputing it with the STORED `requested_by` (never ctx.requested_by,
+    which is the executing kanban worker, not necessarily the Requester
+    who was emailed) means this never demands a kanban worker impersonate
+    that Requester to pass."""
+    if not job_id or not isinstance(job_id, str):
+        raise _c.InvalidArgumentsError("job_id must be a non-empty string.")
+    if not isinstance(job_batch_index, int) or isinstance(job_batch_index, bool) or job_batch_index < 1:
+        raise _c.InvalidArgumentsError("job_batch_index must be a positive integer (1-based).")
+    data = get_job_approval(job_id, ctx)
+    if data.get("status") != "Approved":
+        raise _c.PreconditionFailedError(
+            f"Refusing: job '{job_id}' is not Approved (status={data.get('status')!r}) — a kanban "
+            f"child task may only consume an approved job's plan.")
+    issued_at = _c.coerce_issued_at(data.get("issued_at"))
+    if not _c.is_fresh(issued_at, JOB_TOKEN_TTL_SECONDS):
+        raise _c.StaleConfirmationError(
+            f"Refusing: job '{job_id}''s approval window expired at "
+            f"{_c.expires_at(issued_at, JOB_TOKEN_TTL_SECONDS)} (ADR 0008's fixed 24h window from "
+            f"issuance). Nothing was sent; a fresh approval email is needed — there is no silent "
+            f"extension.")
+    plan = json.loads(data.get("plan") or "[]")
+    if not 1 <= job_batch_index <= len(plan):
+        raise _c.InvalidArgumentsError(
+            f"job_batch_index {job_batch_index} is out of range for job '{job_id}' "
+            f"({len(plan)} batch(es)).")
+    _check_batch_shape(steps)
+    candidate_plan = list(plan)
+    candidate_plan[job_batch_index - 1] = steps
+    prepared_batches = _job_requests(candidate_plan, ctx, render=False)
+    recomputed = job_token(prepared_batches, data.get("requested_by"), job_id, issued_at)
+    if recomputed != data.get("token"):
+        raise _c.TokenMismatchError(
+            f"Refusing: this batch differs from batch {job_batch_index} of job '{job_id}''s "
+            f"approved plan (a step added, removed, moved or changed — anywhere in the job, not "
+            f"only this batch). Nothing was sent — the whole job needs a fresh approval email; "
+            f"there is no partial re-approval (ADR 0008).")
+    return len(plan), prepared_batches[job_batch_index - 1]
 
 
 # ---------------------------------------------------------------------------

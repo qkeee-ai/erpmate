@@ -246,6 +246,15 @@ erp_execute_write(phase="render",
 erp_execute_write(phase="execute", batch=<rendered batch>, batch_token="<rendered>",
                   issued_at=<rendered>, user_confirmation_text="<the user's actual reply>",
                   prompt_summary="<one line>", latest_prompt="<msg>")
+
+# Kanban child task consuming a job-level approval (agents ADR 0008, issue
+# 06): no render, no batch_token, no live chat session — job_id must
+# already be Approved (the Requester's email reply bound it via
+# verify_job_reply()). `batch` must be EXACTLY batch job_batch_index of
+# that job's stored plan, unchanged; any difference refuses before step 1
+# with no partial re-approval. Mutually exclusive with batch_token.
+erp_execute_write(phase="execute", batch=[{"op": "...", "args": {...}}],
+                  job_id="<job_id>", job_batch_index=2, prompt_summary="<one line>")
 ```
 
 Pass `prompt_summary` and `latest_prompt` on every write, even one that

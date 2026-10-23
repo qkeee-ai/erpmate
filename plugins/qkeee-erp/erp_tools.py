@@ -129,6 +129,14 @@ SCHEMAS = {
                                   'after an earlier step changed the same record takes '
                                   'args.expected_modified = {"from_step": k}.'},
          "batch_token": {"type": "string", "description": "execute: the batch render's batch_token."},
+         "job_id": {"type": "string",
+                    "description": "execute, with batch, instead of batch_token: a kanban job "
+                                   "already Approved by an email reply (agents ADR 0008) — skip "
+                                   "render; no confirmation_token/issued_at/user_confirmation_text. "
+                                   "Needs job_batch_index too. Mutually exclusive with batch_token."},
+         "job_batch_index": {"type": "integer",
+                             "description": "execute, with job_id: 1-based position of this batch "
+                                            "within that job's approved plan."},
          "confirmation_token": {"type": "string"}, "issued_at": {"type": "integer"},
          "user_confirmation_text": {"type": "string"},
          "user_approved": {"type": "boolean",
@@ -363,6 +371,14 @@ class ErpTools:
             self._need(args, "op")
         if args.get("batch_token") and batch is None:
             raise client.ConnectorError("batch_token goes with batch.")
+        if args.get("job_id") and batch is None:
+            raise client.ConnectorError("job_id goes with batch.")
+        if args.get("job_batch_index") is not None and not args.get("job_id"):
+            raise client.ConnectorError("job_batch_index goes with job_id.")
+        if args.get("job_id") and args.get("batch_token"):
+            raise client.ConnectorError(
+                "job_id and batch_token are mutually exclusive — a batch is approved by a fresh "
+                "chat code or a job-level email approval, never both.")
         requester = self._requester()
         ctx = self._context(args, requester)
         if phase == "render" and batch is not None:
@@ -391,13 +407,18 @@ class ErpTools:
         steps = batch if batch is not None else [{"op": args["op"], "args": args.get("args") or {}}]
         if not isinstance(steps, list) or not steps or not all(isinstance(s, dict) for s in steps):
             raise client.ConnectorError("batch must be a non-empty list of step objects.")
+        job_id = args.get("job_id")
         gated = any(operations.requires_confirmation(s.get("op") or "", s.get("args") or {})
                     for s in steps)
-        if gated and not args.get("latest_prompt"):
+        # A job-approved batch has no live chat session to cite latest_prompt
+        # from (the point of ADR 0008) — the job's own email-approval trail
+        # is the audit record instead, not a chat message.
+        if gated and not args.get("latest_prompt") and job_id is None:
             raise client.ConnectorError("this write needs a confirmation, so latest_prompt (the "
                                         "user's most recent message, verbatim) is mandatory.")
         if batch is not None:
-            report = operations.run_batch(batch, ctx, batch_token=args.get("batch_token"))
+            report = operations.run_batch(batch, ctx, batch_token=args.get("batch_token"),
+                                          job_id=job_id, job_batch_index=args.get("job_batch_index"))
             return json.dumps({"ok": report["stopped_at"] is None, "result": report}, default=str)
         result = operations.run_operation(args["op"], args.get("args") or {}, ctx)
         if (isinstance(result, dict) and isinstance(result.get("data"), dict)
