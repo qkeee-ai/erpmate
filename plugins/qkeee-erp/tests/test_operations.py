@@ -539,12 +539,24 @@ class OwnershipAndUnscopedTests(unittest.TestCase):
         return str(ctx.exception)
 
     def test_system_admin_generic_refuses_every_owned_pair(self):
+        """Every owned (doctype, action) is unreachable via system_admin.generic
+        — via the ownership message when the doctype is also in system_admin's
+        own allowlist (the historical case: User/Role/... owned by its own
+        dedicated ops), or via the earlier allowlist refusal when it's an
+        owned pair from a domain-less op outside system_admin's remit
+        entirely (e.g. job_approval.*, Qkeee Bot Job Approval) — either way,
+        nothing is sent."""
+        allowlist = core_client.DOMAIN_WRITE_ALLOWLISTS["system_admin"]
         for (doctype, action), owner in sorted(operations._OWNERS.items()):
             with self.subTest(doctype=doctype, action=action):
                 args = {"doctype": doctype, "action": action, "name": "N", "payload": {"x": 1}}
                 if action in operations.FINALIZING_ACTIONS:
                     args.pop("payload")
-                self.assertIn(owner, self._run("system_admin.generic", args))
+                msg = self._run("system_admin.generic", args)
+                if doctype in allowlist:
+                    self.assertIn(owner, msg)
+                else:
+                    self.assertIn("ALLOWED_WRITE_DOCTYPES", msg)
 
     def test_system_admin_generic_refuses_unsupported_pairs(self):
         self.assertIn("UI-level guidance", self._run(
@@ -566,6 +578,9 @@ class OwnershipAndUnscopedTests(unittest.TestCase):
     def test_unscoped_refuses_gated_operations_targets(self):
         self.assertIn("system_admin.create_user", self._run(
             "unscoped.generic", {"doctype": "User", "action": "create", "payload": {}}))
+        self.assertIn("job_approval.create", self._run(
+            "unscoped.generic", {"doctype": "Qkeee Bot Job Approval", "action": "create",
+                                 "payload": {}}))
 
     def test_delete_without_token_is_refused_in_every_writer_domain(self):
         for domain, doctype in (("accounts", "Journal Entry"), ("sales", "Sales Order"),

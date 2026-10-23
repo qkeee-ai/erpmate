@@ -128,6 +128,12 @@ SKILL_LABEL = "qkeee-erp-associate"
 # read/write.
 AUDIT_LOG_DOCTYPE = "Qkeee Bot Audit Log"
 
+# Job-level approval store (agents ADR 0008, ADR 0009): unlike Audit Log
+# above, writes to this doctype are NOT best-effort — they go through the
+# normal operations.py pipeline (core/operations.py job_approval.create /
+# job_approval.mark_approved) and raise like any other write.
+JOB_APPROVAL_DOCTYPE = "Qkeee Bot Job Approval"
+
 # Doctypes whose WRITES are never audited: only this connector's own
 # bookkeeping. The audit log itself, and Comment, because the attribution
 # Comment every write may post (record_comment(), below) is itself a write;
@@ -197,7 +203,11 @@ _LOG_READ_RECURSION_EXEMPT_DOCTYPES = {AUDIT_LOG_DOCTYPE, "Comment"}
 # get_versions RPC (ENVIRONMENT_METADATA_RPCS). Adding to it needs a new ADR.
 ENVIRONMENT_METADATA_DOCTYPES = frozenset({"DocType", "Module Def"})
 ENVIRONMENT_METADATA_RPCS = frozenset({"frappe.utils.change_log.get_versions"})
-PROD_GATE_EXEMPT_DOCTYPES = set(ENVIRONMENT_METADATA_DOCTYPES) | {AUDIT_LOG_DOCTYPE, "Comment"}
+# JOB_APPROVAL_DOCTYPE joins AUDIT_LOG_DOCTYPE/Comment here for the same
+# reason: this connector's own bookkeeping, never a doctype a business
+# Requester holds ERPNext permission on directly (ADR 0008/0009).
+PROD_GATE_EXEMPT_DOCTYPES = (set(ENVIRONMENT_METADATA_DOCTYPES)
+                            | {AUDIT_LOG_DOCTYPE, "Comment", JOB_APPROVAL_DOCTYPE})
 
 # Exempt from the READ gate only when the call is the connector's own
 # internal plumbing (internal=True) — never on a business-intent read.
@@ -212,8 +222,13 @@ INTERNAL_READ_GATE_EXEMPT_DOCTYPES = {"User", "Role"}
 # connector's own bookkeeping doctypes are exempt for writes; a User/Role/
 # DocType write needs a real requester holding that permission (in
 # practice System Manager - that includes init_bot.py's provisioning
-# requester).
-WRITE_GATE_EXEMPT_DOCTYPES = {AUDIT_LOG_DOCTYPE, "Comment"}
+# requester). JOB_APPROVAL_DOCTYPE is exempt for the same reason as
+# AUDIT_LOG_DOCTYPE/Comment: the Requester never holds — and is never
+# expected to hold — direct ERPNext permission on this connector's own
+# job-approval bookkeeping (ADR 0008/0009); job_approval.create/
+# mark_approved still require mode + a present requester + a normal audit
+# row (core/operations.py), just not this doctype-permission check.
+WRITE_GATE_EXEMPT_DOCTYPES = {AUDIT_LOG_DOCTYPE, "Comment", JOB_APPROVAL_DOCTYPE}
 
 # Shared closing line for every requester-permission-denial message
 # below. A user-supplied "run this as someone else instead" is not the

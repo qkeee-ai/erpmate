@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from qkeee_erp_plugin.qkeee_erp import init_bot
+from qkeee_erp_plugin.qkeee_erp import doctype_defs, init_bot
 
 NO_BOT_CHANGE = {"bot_role_change": None, "bot_stock_roles": [], "bot_identity_error": None}
 
@@ -101,7 +101,10 @@ class RunRealCallsLogRoleProvisioningAfterDoctypesTests(unittest.TestCase):
                                            ["Qkeee Bot Audit Log"], issued_at=issued_at)
         init_bot.run_real("qa", "admin@org.com", confirm_token=token, issued_at=issued_at)
 
-        self.assertEqual(calls, ["role", "doctype", "log"])
+        # run_real() iterates ALL_DOCTYPES unconditionally (init_bot.py:983),
+        # not just compute_plan()'s doctypes_needed — one "doctype" call per
+        # entry (Audit Log, Job Approval).
+        self.assertEqual(calls, ["role"] + ["doctype"] * len(doctype_defs.ALL_DOCTYPES) + ["log"])
         mocked_log.assert_called_once_with("qa", "admin@org.com", True, unittest.mock.ANY)
 
 
@@ -329,9 +332,11 @@ class BotReadGrantTests(unittest.TestCase):
                 patch.object(init_bot.operations, "run_operation",
                              side_effect=lambda key, args, ctx: calls.append((key, args)) or {}):
             summary = init_bot.run_real("qa", "admin@org.com", token, issued_at)
-        self.assertEqual(calls, ["doctype",
-                                 ("provisioning.grant_bot_read", {"doctype": "Module Def", "step": "add"}),
-                                 ("provisioning.grant_bot_read", {"doctype": "Workflow", "step": "set_read"})])
+        # One "doctype" call per ALL_DOCTYPES entry (init_bot.py:983), same
+        # reasoning as RunRealCallsLogRoleProvisioningAfterDoctypesTests above.
+        self.assertEqual(calls, ["doctype"] * len(doctype_defs.ALL_DOCTYPES) + [
+            ("provisioning.grant_bot_read", {"doctype": "Module Def", "step": "add"}),
+            ("provisioning.grant_bot_read", {"doctype": "Workflow", "step": "set_read"})])
         self.assertEqual(summary["bot_read_grants"], plan["bot_read_grants"])
 
 

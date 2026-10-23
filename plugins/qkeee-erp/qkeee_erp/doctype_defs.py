@@ -117,10 +117,43 @@ AUDIT_LOG = {
     ],
 }
 
-# Audit Log is the only doctype here, so there is no create-order question
-# to document — kept as a single-element list for init_bot.py's existing
-# iteration shape.
-ALL_DOCTYPES = [AUDIT_LOG]
+JOB_APPROVAL = {
+    "doctype": "DocType",
+    "name": "Qkeee Bot Job Approval",
+    "module": "Custom",
+    "custom": 1,
+    "naming_rule": "By fieldname",
+    "autoname": "field:job_id",
+    "track_changes": 0,
+    "fields": [
+        {"fieldname": "job_id", "label": "Job ID", "fieldtype": "Data", "reqd": 1,
+         "unique": 1, "in_list_view": 1,
+         "description": "Raw kanban job id, as supplied by the orchestrating session — a "
+                         "plain correlator, not a Link, same posture as Qkeee Bot Audit Log's "
+                         "'session' field."},
+        {"fieldname": "requested_by", "label": "Requested By", "fieldtype": "Link",
+         "options": "User", "reqd": 1, "in_list_view": 1},
+        {"fieldname": "token", "label": "Job Token", "fieldtype": "Data", "reqd": 1,
+         "description": "job_token() over every batch's every step, in order (agents ADR 0008)."},
+        {"fieldname": "issued_at", "label": "Issued At (epoch)", "fieldtype": "Int", "reqd": 1},
+        {"fieldname": "step_count", "label": "Step Count", "fieldtype": "Int", "reqd": 1},
+        {"fieldname": "status", "label": "Status", "fieldtype": "Select",
+         "options": "Pending\nApproved", "reqd": 1, "default": "Pending", "in_list_view": 1,
+         "description": "Pending until the Requester's email reply binds the token (ADR 0008, "
+                         "issue 05). Freshness (the 24h window) is checked against issued_at at "
+                         "lookup time, not written back here as a third state."},
+        {"fieldname": "plan", "label": "Plan (JSON)", "fieldtype": "Long Text", "reqd": 1,
+         "description": "Every batch's {op, args} list, in order — the exact plan job_token() "
+                         "was computed over, for a later process to recompute against (issue "
+                         "06)."},
+    ],
+    "permissions": [
+        _perm(ROLE_NAME, read=1, write=1, create=1),
+        _perm("System Manager", read=1),
+    ],
+}
+
+ALL_DOCTYPES = [AUDIT_LOG, JOB_APPROVAL]
 
 
 # Doctypes on which the ROLE_NAME role gets one permlevel-0 row with read

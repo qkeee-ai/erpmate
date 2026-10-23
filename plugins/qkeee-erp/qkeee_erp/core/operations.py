@@ -49,6 +49,11 @@ fill live facts such as `expected_modified`), the cheap gates and step 9 as
 a dry run (no gate row), and returns the prepared
 request, the full args to pass back unchanged, and the token +
 confirmation code. erp_execute_write phase `render` runs it.
+
+One stated exception: prepare_job()'s render DOES write (job_approval.create,
+through the normal pipeline) — a job's approval is confirmed later, in its
+own turn/process, so the render has nowhere else to durably put the plan
+and token for that later process to read (ADR 0008/0009).
 """
 
 import dataclasses
@@ -363,7 +368,7 @@ UNSCOPED_DENY = frozenset({
     # stored credentials / identity providers
     "OAuth Client", "Social Login Key", "Connected App", "LDAP Settings",
     # audit / history
-    "Version", "Deleted Document", "Comment", _c.AUDIT_LOG_DOCTYPE,
+    "Version", "Deleted Document", "Comment", _c.AUDIT_LOG_DOCTYPE, _c.JOB_APPROVAL_DOCTYPE,
     # manufacturing has no write path yet (references/domains/manufacturing.md)
     "BOM", "Work Order", "Job Card", "Production Plan", "Routing", "Workstation", "Operation",
 })
@@ -1127,6 +1132,158 @@ def requires_confirmation(op_key: str, args: dict) -> bool:
     action = (args or {}).get("action")
     probe = PreparedRequest(transport="resource", doctype="?", action=action or "submit")
     return op.policy_for(probe) != POLICY_NONE
+
+
+# ---------------------------------------------------------------------------
+# One approval for a whole kanban job (agents ADR 0008/0009; issue 03 of
+# .scratch/qkeee-erp-kanban-execution-steering)
+#
+# batch_token()/WriteContext.batch_approval above work because render and
+# execute happen in the same turn, same process, same WriteContext. A job's
+# confirmation does not: it is rendered once, approved later by an email
+# reply that arrives as its own turn (possibly its own process, ADR 0008
+# issue 05), and consumed by separate kanban child-task workers (issue 06),
+# each a different process with its own fresh WriteContext. So the plan,
+# token and approval status are durably stored in the "Qkeee Bot Job
+# Approval" doctype (_c.JOB_APPROVAL_DOCTYPE), through the normal pipeline
+# (job_approval.create / job_approval.mark_approved below) rather than only
+# handed back to the caller to round-trip the way a batch's `batch` key is.
+# ---------------------------------------------------------------------------
+
+# ADR 0008: a fixed 24h window, sized for a multi-child-task kanban job
+# rather than one chat round trip — token_ttl_seconds(tag)'s 15/60 minute
+# batch/op lifetime is deliberately NOT reused here; it's too short.
+JOB_TOKEN_TTL_SECONDS = 24 * 60 * 60
+
+
+def _job_requests(batches: list, ctx: WriteContext, *, render: bool) -> list:
+    """Each batch's steps prepared as _batch_requests() does, one list per
+    batch, same per-batch shape check (MAX_BATCH_STEPS) prepare_batch()
+    already applies — a job is an ordered list of batches, not one flat
+    list of steps."""
+    if not isinstance(batches, list) or not batches:
+        raise _c.InvalidArgumentsError("a job needs a non-empty list of batches.")
+    prepared_batches = []
+    for steps in batches:
+        _check_batch_shape(steps)
+        prepared_batches.append(_batch_requests(steps, ctx, render=render))
+    return prepared_batches
+
+
+def _job_policy(prepared_batches: list) -> str:
+    """Unlike _batch_policy() (one already-flat list of steps), takes the
+    job's list-of-batches shape and flattens it before the same
+    none/token/token+user_code aggregation."""
+    return _batch_policy([step for batch in prepared_batches for step in batch])
+
+
+def job_token(prepared_batches: list, requested_by: str, job_id: str, issued_at) -> str:
+    """The one job token: binds, in order, every batch's every step's
+    operation and full prepared request, plus the requester, the job id,
+    the total step count and the render time (ADR 0008)."""
+    steps = [dict(batch=bi + 1, step=si + 1, op=op.key, **req.token_material())
+             for bi, batch in enumerate(prepared_batches)
+             for si, (op, _, req, _) in enumerate(batch)]
+    return _c.compute_token(
+        kind="job", requested_by=requested_by or "", job_id=job_id or "",
+        issued_at=_c.coerce_issued_at(issued_at), length=len(steps), steps=steps)
+
+
+def prepare_job(batches: list, ctx: WriteContext, job_id: str, issued_at: int = None) -> dict:
+    """Render a whole kanban job: every batch's every step prepared as
+    prepare_batch() does, then ONE token over the full ordered plan across
+    every batch. When at least one step needs confirmation, durably stores
+    the plan (job_approval.create) before returning, so the email this
+    feeds (issue 04) is backed by a row a later, unrelated process can
+    verify against — never only in-memory here.
+
+    `job` holds each batch's {op, args} list to pass back unchanged, the
+    same role prepare_batch()'s `batch` key plays for a single batch."""
+    if not job_id or not isinstance(job_id, str):
+        raise _c.InvalidArgumentsError("prepare_job needs a non-empty job_id.")
+    prepared_batches = _job_requests(batches, ctx, render=True)
+    policy = _job_policy(prepared_batches)
+    out = {
+        "policy": policy,
+        "job": [[{"op": op.key, "args": args} for op, args, _, _ in batch]
+                for batch in prepared_batches],
+        "batches": [
+            {"batch": bi + 1,
+             "steps": [{"step": i, "op": op.key, "policy": p, "line": _step_line(i, op, req, p),
+                        "request": req.summary(), "notes": list(req.notes)}
+                       for i, (op, _, req, p) in enumerate(batch, start=1)]}
+            for bi, batch in enumerate(prepared_batches)
+        ],
+    }
+    if policy == POLICY_NONE:
+        return out
+    issued = int(time.time()) if issued_at is None else _c.coerce_issued_at(issued_at)
+    token = job_token(prepared_batches, ctx.requested_by, job_id, issued)
+    step_count = sum(len(batch) for batch in prepared_batches)
+    out.update(
+        job_id=job_id, job_token=token, step_count=step_count, issued_at=issued,
+        expires_at=_c.expires_at(issued, JOB_TOKEN_TTL_SECONDS),
+        ttl_minutes=JOB_TOKEN_TTL_SECONDS // 60,
+        # ADR 0008's two-factor proof (code in the reply + sender match)
+        # always applies to a gated job, whatever an individual step's own
+        # token_policy is — it's the job-level approval the email + reply
+        # mechanism authenticates, not any one step.
+        confirmation_code=_c.confirmation_code(token))
+    run_operation("job_approval.create", {
+        "job_id": job_id, "token": token, "issued_at": issued, "step_count": step_count,
+        "plan": json.dumps(out["job"])}, ctx)
+    return out
+
+
+def _job_approval_create_prepare(args: dict, ctx: WriteContext) -> PreparedRequest:
+    required = {"job_id", "token", "issued_at", "step_count", "plan"}
+    if set(args) != required:
+        raise _c.InvalidArgumentsError(
+            f"job_approval.create needs exactly {sorted(required)}, got {sorted(args)}.")
+    return PreparedRequest(
+        transport="resource", doctype=_c.JOB_APPROVAL_DOCTYPE, action="create",
+        body={"job_id": args["job_id"], "requested_by": ctx.requested_by, "token": args["token"],
+              "issued_at": args["issued_at"], "step_count": args["step_count"],
+              "status": "Pending", "plan": args["plan"]})
+
+
+register_operation(Operation(
+    key="job_approval.create", domain=None, summary="store a rendered job-level approval plan",
+    prepare=_job_approval_create_prepare, token_policy=POLICY_NONE, allowlist_domain=None,
+    owns=frozenset({(_c.JOB_APPROVAL_DOCTYPE, "create")}),
+    # Internal plumbing prepare_job() calls right after computing the token
+    # from the real render — never a direct CLI/agent entry point (that
+    # would let a caller store an unrendered, fabricated plan + token).
+    cli=False,
+))
+
+
+def _check_job_still_pending(req: PreparedRequest, args: dict, ctx: WriteContext) -> None:
+    data = _c.get_resource(ctx.tag, req.doctype, req.name, requested_by=ctx.requested_by,
+                           internal=True, **ctx.audit_kwargs()).get("data") or {}
+    if data.get("status") != "Pending":
+        raise _c.PreconditionFailedError(
+            f"job_approval.mark_approved: job '{req.name}' is not Pending (status="
+            f"{data.get('status')!r}); refusing to approve twice or out of order.")
+
+
+def _job_approval_mark_approved_prepare(args: dict, ctx: WriteContext) -> PreparedRequest:
+    if set(args) != {"job_id"}:
+        raise _c.InvalidArgumentsError("job_approval.mark_approved needs exactly {'job_id'}.")
+    return PreparedRequest(transport="resource", doctype=_c.JOB_APPROVAL_DOCTYPE, action="update",
+                           name=args["job_id"], body={"status": "Approved"})
+
+
+register_operation(Operation(
+    key="job_approval.mark_approved", domain=None,
+    summary="mark a job-level approval plan Approved",
+    prepare=_job_approval_mark_approved_prepare, token_policy=POLICY_NONE, allowlist_domain=None,
+    owns=frozenset({(_c.JOB_APPROVAL_DOCTYPE, "update")}),
+    preconditions=(_check_job_still_pending,),
+    # The two-factor proof (code + sender match, ADR 0008) runs before this
+    # is ever called (issue 05) — never a direct CLI/agent entry point.
+    cli=False,
+))
 
 
 # ---------------------------------------------------------------------------
