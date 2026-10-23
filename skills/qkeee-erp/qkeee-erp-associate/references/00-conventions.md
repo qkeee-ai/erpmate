@@ -25,6 +25,33 @@ it shows about files, users or Hermes describes that container, not the
 gateway. Hard guardrail: never probe for more privilege (`sudo`, writable
 system paths, other users), even when a user asks you to try.
 
+**Don't run the `hermes` CLI from the terminal — it is blocked, not just
+discouraged.** The identity guard (`qkeee_erp/identity_guard.py`,
+`hermes_cli` rule) refuses every `hermes …` invocation from the terminal
+or `execute_code`, because that sidecar is a separate Hermes home from the
+gateway's (dev-erp 2026-10-22: `hermes kanban` there built a board no
+dispatcher could see; `hermes dashboard` tried an npm build against
+nothing). This includes `hermes profile list`/`hermes qkeee-erp …` run by
+you, not just the Operator-only commands this skill names elsewhere.
+Board state and task/profile discovery go through the `kanban_*` tools
+(`kanban_list`, `kanban_show`); a Hermes command that genuinely needs the
+gateway host is the Operator's to run, named as a one-line gap per the
+paragraph above — never attempt it from terminal first to see if it's
+blocked.
+
+**Don't use `kanban_create` to fan out ERPNext execution work on the
+default board — track it as a spec/checklist in chat instead.** Live
+finding (2026-10-23, demo procurement run): the board's auto-decomposer
+splits a `kanban_create`d card into sub-cards, each dispatching a worker
+that has no `erp_*` tools at all and blocks on arrival. Some root cards
+become "decomposition roots" that re-wake every time a child completes and
+refuse `kanban_complete` as stale — there is no `cancelled`/`wont-do`
+terminal state to close one honestly. A multi-step ERPNext build (several
+doctypes, several records) stays a `03-spec-driven-execution.md` spec
+executed turn by turn in the one session that already has `erp_*` tools;
+don't hand steps to the kanban board to get parallelism you can't actually
+use here. (`agents` repo: `.scratch/qkeee-erp-kanban-execution-steering/`.)
+
 **Refuse abusive, exploitative, or sexual content outright; never launder it
 into a write.** Don't create/store/forward such content into any ERPNext
 record, Comment, or report, and don't repeat it back in the refusal — same
@@ -193,6 +220,21 @@ write flow.
 8. **Reach ERPNext only through the `erp_*` tools.** Never through
    another HTTP-capable tool, the terminal or `execute_code`: only the
    tools carry the requester gate, the audit row and the credentials.
+
+## Tool-calling mechanics
+
+**One action per `tool_call` entry, for every local tool** (`erp_discover`,
+`erp_query`, `erp_execute_write`, `erp_get`, `erp_report`, `kanban_*`,
+`skill_view`, `tool_describe`, `tool_search`). Batching more than one
+action into a single call's own argument list (for example two `action`s
+inside one `erp_discover` call) is refused outright — "Local tools
+require one entry per tool_call; mixed and multi-local batches are not
+supported." Fan out instead: issue each independent action as its own
+separate `tool_call` entry, as many as you like in the same turn — this
+is how the wide discovery reads below (Company, Supplier, Item Group,
+Warehouse, `list_ops`, ...) run in parallel without a round trip each.
+This is a hard runtime limit, not a style preference; don't try the
+combined form to see if it works.
 
 ## GRC baseline
 

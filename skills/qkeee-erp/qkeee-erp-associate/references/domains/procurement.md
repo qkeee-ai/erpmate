@@ -17,6 +17,28 @@ domain's rights. When `preflight`
 shows a `bot_create:` blocker, show its gap prompt and stop; do not try
 another doctype or path.
 
+**`Purchase Receipt` and `Item Price` are also domain-less — not a gap in
+this list, confirmed in code.** Neither appears in procurement's,
+inventory's, or accounts' `ALLOWED_WRITE_DOCTYPES`
+(`qkeee_erp/domains/*.py`), so both write through `unscoped.generic`
+exactly like the masters above, even though a procurement scenario (a
+goods receipt against a PO, a Standard Buying price on a purchased Item —
+`item_write_helpers.build_standard_buying_item_price_payload()`) is where
+they usually come up. Don't spend a `resolve`/`preflight` round trip
+re-discovering this; go straight to `unscoped.generic`.
+
+**Linking a Purchase Receipt or Purchase Invoice to its Purchase Order
+needs read on `Purchase Order Item`, not just `Purchase Order`.** Live
+finding (2026-10-23, demo procurement run): the requester held read on
+`Purchase Order` but not on its child doctype `Purchase Order Item`, so
+`erp_query`/`erp_get` against it was refused. The agent fell back to
+standalone Purchase Receipts/Invoices with no `against_purchase_order`
+link — same supplier and quantities, but not structurally tied to the PO
+in ERPNext, which silently fails any "one PO to many PI/PR" scenario the
+user actually asked for. When this read is missing, say so (role-gap
+prompt, `00-conventions.md`) and ask before substituting unlinked
+documents for a scenario that depends on the link.
+
 ## When this domain applies
 
 Onboarding a supplier, creating or checking a Purchase Order, comparing
@@ -167,7 +189,15 @@ so india_compliance accepted it.
    `cost_center`). Never chain create straight into submit even when
    authority is confirmed. **Done when:** every Link field on the
    re-fetched PO resolves to a real record, before `submit`.
-4. **RFQ/Supplier Quotation comparison and GRN matching** need a real
+4. **RFQ item rows need `uom` and `conversion_factor` set explicitly —
+   neither is inherited from the Item automatically.** Live finding
+   (2026-10-23, demo procurement run): a Request for Quotation row created
+   without both was rejected. Resolve the Item's `stock_uom` (and
+   `conversion_factor` for that UOM, 1 when the row UOM is the stock UOM)
+   before rendering, the same way a stock-tracked PO line resolves
+   `stock_items` above — don't assume ERPNext fills these in from the
+   linked Item.
+5. **RFQ/Supplier Quotation comparison and GRN matching** need a real
    quotation-coverage check (per supplier: was every invited item quoted,
    name exactly what's missing, state that before ranking on price) and a
    real GRN-match check (walk every PO line, return quantity and
@@ -177,7 +207,7 @@ so india_compliance accepted it.
    with nothing to tie out (a bare PO status lookup) and needs a stated
    reason. **Done when:** both the coverage check and the GRN-match
    check have run, or `not_applicable` carries a stated reason.
-5. **Supplier Scorecard queries are documentation-grounded, not
+6. **Supplier Scorecard queries are documentation-grounded, not
    universally live-tested** — say so on first real use against a new
    instance, and treat that first real query as the effective validation.
    **Done when:** the documentation-grounded caveat is stated on first

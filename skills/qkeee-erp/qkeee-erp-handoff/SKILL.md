@@ -1,6 +1,6 @@
 ---
 name: qkeee-erp-handoff
-description: "Emit a fixed ERPNext continuity block before a hand-off or context compaction — env tag, requester rule, session_id reset, active spec path."
+description: "Emit a fixed ERPNext continuity block ONLY at the end of a turn that is itself a hand-off or context compaction — env tag, requester rule, session_id reset, active spec path. Do not load this at task start or during normal activation (SKILL.md/qkeee-erp-associate owns that); there is nothing here for a task kickoff to use."
 metadata:
   hermes:
     tags: [ERPNext, Handoff, Continuity, Session]
@@ -8,6 +8,11 @@ metadata:
 ---
 
 # qkeee-erp-handoff
+
+**Not part of activation.** A new task, turn, or chat opening does not
+trigger this skill, even when it's an ERPNext task — that's
+`qkeee-erp-associate`'s activation sequence. Load this skill only when
+the turn in progress is the hand-off/compaction itself.
 
 A context hand-off or compaction is a **new logical session** for this
 connector's purposes (`00-conventions.md`'s GRC baseline on
