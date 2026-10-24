@@ -22,6 +22,7 @@ hook can target them by name.
 
 import json
 import os
+import uuid
 
 from .qkeee_erp import discover
 from .qkeee_erp import execute_write  # imports every domain module: registers allowlists + operations
@@ -110,9 +111,14 @@ SCHEMAS = {
         "their reply. execute: run the operation with the rendered args unchanged, plus "
         "confirmation_token, issued_at and the user's own reply, verbatim, as user_confirmation_text "
         "(never write that text yourself); pass latest_prompt. batch: several steps, stops at the "
-        "first failure. On write_failure, ask the user for the named fields; never fill a value they "
-        "did not give.",
-        {"phase": {"type": "string", "enum": ["list_ops", "render", "execute"]},
+        "first failure. render with batches (plural, agents ADR 0008) instead of batch starts a "
+        "kanban job: several batches get ONE email approval instead of one chat code per batch — "
+        "never show the returned code/token in chat, send it with op=notify.job_approval_request "
+        "instead. confirm_job: after the Requester's email reply arrives as its own turn, bind it "
+        "with job_id (from the reply's subject, \"...job <job_id>...\") and reply_text (the reply's "
+        "literal text, verbatim). On write_failure, ask the user for the named fields; never fill a "
+        "value they did not give.",
+        {"phase": {"type": "string", "enum": ["list_ops", "render", "execute", "confirm_job"]},
          "op": {"type": "string", "description": "Operation key from list_ops, e.g. sales.generic, or "
                                                  "\"auto\" for a plain doctype write: render resolves "
                                                  "it from args.doctype and shows resolved_op. "
@@ -128,15 +134,32 @@ SCHEMAS = {
                                   "batch_token, issued_at and the user's reply. A submit/cancel "
                                   'after an earlier step changed the same record takes '
                                   'args.expected_modified = {"from_step": k}.'},
+         "batches": {"type": "array", "items": {"type": "array", "items": {"type": "object"}},
+                     "description": "render only: a list of batches (each a list of {op, args}) to "
+                                    "start a kanban job (agents ADR 0008) instead of a single "
+                                    "chat-confirmed batch. Returns job_id, job_token and "
+                                    "confirmation_code — never show these to the user; send "
+                                    "op=notify.job_approval_request args={job_id} instead, which "
+                                    "emails the Requester (cc the ERP admin) and logs it. There is "
+                                    "no execute step for `batches` itself: the plan is stored "
+                                    "immediately on render. Mutually exclusive with batch/op/args."},
          "batch_token": {"type": "string", "description": "execute: the batch render's batch_token."},
          "job_id": {"type": "string",
                     "description": "execute, with batch, instead of batch_token: a kanban job "
                                    "already Approved by an email reply (agents ADR 0008) — skip "
                                    "render; no confirmation_token/issued_at/user_confirmation_text. "
-                                   "Needs job_batch_index too. Mutually exclusive with batch_token."},
+                                   "Needs job_batch_index too. Mutually exclusive with batch_token. "
+                                   "confirm_job: the job id to bind the reply to, read from the "
+                                   "approval email's subject."},
          "job_batch_index": {"type": "integer",
                              "description": "execute, with job_id: 1-based position of this batch "
                                             "within that job's approved plan."},
+         "reply_text": {"type": "string",
+                        "description": "confirm_job only: the Requester's email reply, literal and "
+                                       "verbatim — never paraphrased or constructed by the agent. "
+                                       "Must contain the job's confirmation code; the reply turn's "
+                                       "own resolved sender must match the Requester (agents ADR "
+                                       "0008's two-factor proof, checked by verify_job_reply())."},
          "confirmation_token": {"type": "string"}, "issued_at": {"type": "integer"},
          "user_confirmation_text": {"type": "string"},
          "user_approved": {"type": "boolean",
@@ -362,12 +385,25 @@ class ErpTools:
         phase = args.get("phase")
         if phase == "list_ops":
             return _ok(execute_write.list_ops(op=args.get("op"), domain=args.get("domain")))
+        if phase == "confirm_job":
+            self._need(args, "job_id", "reply_text")
+            requester = self._requester()
+            ctx = self._context(args, requester)
+            return _ok(operations.verify_job_reply(args["job_id"], args["reply_text"], ctx))
         if phase not in ("render", "execute"):
             raise client.ConnectorError(f"unknown erp_execute_write phase {phase!r}")
         batch = args.get("batch")
+        batches = args.get("batches")
+        if batches is not None and (batch is not None or args.get("op") or args.get("args")):
+            raise client.ConnectorError("batches replaces batch/op/args; pass one or the other.")
+        if batches is not None and phase != "render":
+            raise client.ConnectorError(
+                "batches (starting a kanban job) only supports phase=render — prepare_job() stores "
+                "the plan immediately, there is no separate execute step for it. Execute each batch "
+                "afterwards with phase=execute, batch=<that batch>, job_id and job_batch_index.")
         if batch is not None and (args.get("op") or args.get("args")):
             raise client.ConnectorError("batch replaces op/args; pass one or the other.")
-        if batch is None:
+        if batch is None and batches is None:
             self._need(args, "op")
         if args.get("batch_token") and batch is None:
             raise client.ConnectorError("batch_token goes with batch.")
@@ -381,6 +417,24 @@ class ErpTools:
                 "chat code or a job-level email approval, never both.")
         requester = self._requester()
         ctx = self._context(args, requester)
+        if phase == "render" and batches is not None:
+            job_id = f"JOB-{uuid.uuid4().hex[:10].upper()}"
+            out = operations.prepare_job(batches, ctx, job_id)
+            if out.get("policy") == operations.POLICY_NONE:
+                out["_note"] = ("No step in this job needs a confirmation. Execute each batch "
+                                "directly with phase=execute, batch=<that batch>; job_id/"
+                                "job_batch_index are not needed.")
+            else:
+                out["_note"] = (
+                    f"Do NOT show confirmation_code or job_token to the user in chat — this is a "
+                    f"job-level approval (agents ADR 0008), approved by email only, never a chat "
+                    f"code. Next: erp_execute_write phase=render then phase=execute with "
+                    f"op=\"notify.job_approval_request\", args={{\"job_id\": \"{job_id}\"}} to send "
+                    f"the approval email to the Requester (cc the ERP admin). Once the Requester "
+                    f"replies, bind it with phase=confirm_job (job_id, reply_text), then execute "
+                    f"each batch with phase=execute, batch=<that batch>, job_id=\"{job_id}\", "
+                    f"job_batch_index=<1-based position>.")
+            return _ok(out)
         if phase == "render" and batch is not None:
             out = operations.prepare_batch(batch, ctx)
             if out.get("policy") == operations.POLICY_NONE:

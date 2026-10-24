@@ -9,15 +9,29 @@ doing the actual work.
 
 A spec file suits a single-session, single-actor task. When the work
 instead **crosses agent boundaries, needs to survive a restart, needs
-human input mid-task, or needs to stay discoverable later** — a
-multi-day payroll run with checkpoints, a bulk data migration, an
-onboarding checklist spanning HR + system-admin — propose Hermes' Kanban
-feature (the `kanban_*` tools: `kanban_create`, `kanban_show`,
+human input mid-task, or needs to stay discoverable later** — an
+onboarding checklist spanning HR + system-admin, work that genuinely has
+no ERPNext writes of its own on the critical path — propose Hermes'
+Kanban feature (the `kanban_*` tools: `kanban_create`, `kanban_show`,
 `kanban_list`) instead of, or alongside, a flat spec file. A spec file has no board view and
 nothing else can discover or pick it up later; Kanban is durable,
 human-visible, and built for that shape of work. Write the spec below
 when the work fits one sitting with one actor — don't reach for Kanban by
 default.
+
+**Not for ERPNext execution work itself (`00-conventions.md`).** A
+multi-day payroll run with checkpoints or a bulk data migration — the
+exact shape this section used to point at `kanban_create` for — is
+ERPNext execution work: the board's auto-decomposer splits it into
+sub-cards no worker can run (`.scratch/qkeee-erp-kanban-execution-steering/issues/01-*`),
+a live finding, not a hypothetical. For that shape, stay in one spec/one
+session and use the job-level email approval path instead (agents ADR
+0008, `tool-cookbook.md`'s "Starting a kanban job" example): one email
+covers every batch in the plan, so a multi-batch job no longer needs
+either per-batch chat codes or a kanban card to stay coherent across a
+restart. Kanban remains the right tool only for work that is genuinely
+not an ERPNext write sequence (routing a checklist to the right humans,
+tracking non-ERPNext steps).
 
 **Cards go through the tools.** Create, read and route cards only with
 the `kanban_*` tools; they run in the gateway, which records each card's

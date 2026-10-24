@@ -214,5 +214,78 @@ class ExecuteWriteToolTests(ToolTestCase):
         self.assertTrue(all(o["op"].startswith("sales.") for o in out["result"]))
 
 
+class JobToolTests(ToolTestCase):
+    """agents ADR 0008 issues 07/09: the entry points that actually start a
+    job and bind the Requester's reply — erp_tools.py is the only thing
+    that was missing; operations.prepare_job()/verify_job_reply() are
+    already covered by tests/test_job_approval.py."""
+
+    @patch.object(operations, "prepare_job")
+    def test_render_batches_starts_a_job_with_a_generated_id(self, mocked):
+        mocked.return_value = {"policy": operations.POLICY_TOKEN_USER_CODE, "job": [],
+                               "batches": [], "job_id": "placeholder", "job_token": "t",
+                               "confirmation_code": "AB12CD", "expires_at": "2026-10-25T00:00:00Z"}
+        out = self.call(self.tools(SENDER), "erp_execute_write",
+                        {"phase": "render", "batches": [[{"op": "sales.generic", "args": {}}]]})
+        self.assertTrue(out["ok"])
+        args, kw = mocked.call_args
+        self.assertEqual(args[0], [[{"op": "sales.generic", "args": {}}]])
+        self.assertEqual(args[1].requested_by, "nikhil@org.com")
+        job_id = args[2]
+        self.assertTrue(job_id.startswith("JOB-"))
+        self.assertNotIn("AB12CD", out["result"]["_note"])
+        self.assertIn("Do NOT show", out["result"]["_note"])
+        self.assertIn("notify.job_approval_request", out["result"]["_note"])
+        self.assertIn(job_id, out["result"]["_note"])
+
+    @patch.object(operations, "prepare_job", return_value={"policy": operations.POLICY_NONE,
+                                                            "job": [], "batches": []})
+    def test_render_batches_no_confirmation_needed_skips_the_email_note(self, _):
+        out = self.call(self.tools(SENDER), "erp_execute_write",
+                        {"phase": "render", "batches": [[{"op": "mis.generic", "args": {}}]]})
+        self.assertIn("No step in this job needs a confirmation", out["result"]["_note"])
+        self.assertNotIn("notify.job_approval_request", out["result"]["_note"])
+
+    def test_batches_rejects_execute_phase(self):
+        out = self.call(self.tools(SENDER), "erp_execute_write",
+                        {"phase": "execute", "batches": [[{"op": "sales.generic", "args": {}}]]})
+        self.assertFalse(out["ok"])
+        self.assertIn("only supports phase=render", out["error"])
+
+    def test_batches_mutually_exclusive_with_batch_and_op(self):
+        for extra in ({"batch": []}, {"op": "sales.generic"}):
+            with self.subTest(extra=extra):
+                out = self.call(self.tools(SENDER), "erp_execute_write",
+                                {"phase": "render", "batches": [[{"op": "a", "args": {}}]], **extra})
+                self.assertFalse(out["ok"])
+                self.assertIn("batches replaces batch/op/args", out["error"])
+
+    @patch.object(operations, "verify_job_reply", return_value={"name": "JOB-1", "status": "Approved"})
+    def test_confirm_job_binds_the_session_sender(self, mocked):
+        out = self.call(self.tools(SENDER), "erp_execute_write",
+                        {"phase": "confirm_job", "job_id": "JOB-1", "reply_text": "yes AB12CD"})
+        self.assertTrue(out["ok"])
+        args = mocked.call_args.args
+        self.assertEqual(args[0], "JOB-1")
+        self.assertEqual(args[1], "yes AB12CD")
+        self.assertEqual(args[2].requested_by, "nikhil@org.com")
+
+    def test_confirm_job_needs_job_id_and_reply_text(self):
+        with patch.object(operations, "verify_job_reply") as mocked:
+            out = self.call(self.tools(SENDER), "erp_execute_write",
+                            {"phase": "confirm_job", "job_id": "JOB-1"})
+        self.assertFalse(out["ok"])
+        self.assertIn("reply_text", out["error"])
+        mocked.assert_not_called()
+
+    def test_confirm_job_needs_no_live_chat_session_signal(self):
+        # The point of ADR 0008: a kanban worker has none of these, but
+        # confirm_job must still work from a plain gateway email turn.
+        with patch.object(operations, "verify_job_reply", return_value={"status": "Approved"}):
+            out = self.call(self.tools(SENDER), "erp_execute_write",
+                            {"phase": "confirm_job", "job_id": "JOB-1", "reply_text": "AB12CD"})
+        self.assertTrue(out["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

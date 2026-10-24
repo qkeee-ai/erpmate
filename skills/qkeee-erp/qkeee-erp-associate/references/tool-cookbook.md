@@ -216,16 +216,41 @@ erp_execute_write(phase="render", op="notify.share_records",
                         "recipients": ["nikhil.sharma@qkeee.in", "sanjay.jain@qkeee.in"],
                         "note": "All Items on demo_erp."})
 
+# Starting a kanban job (agents ADR 0008, issue 07): `batches` (plural —
+# a list of batches, each a list of {op, args}), not `batch`. One shot,
+# no execute step of its own: the plan is stored (job_approval.create)
+# during this same render. Returns job_id, job_token, confirmation_code.
+# NEVER show confirmation_code/job_token to the user in chat — a job is
+# approved by email only (that's the entire point of ADR 0008). The
+# `_note` on the response names the exact next call; follow it rather
+# than improvising.
+erp_execute_write(phase="render",
+                  batches=[[{"op": "sales.generic",
+                             "args": {"doctype": "Customer", "action": "create",
+                                      "payload": {...}}}],
+                           [{"op": "auto", "args": {"doctype": "Sales Order",
+                                                    "action": "create", "payload": {...}}},
+                            {"op": "auto", "args": {"doctype": "Sales Order", "action": "submit",
+                                                    "name": "<name>",
+                                                    "expected_modified": {"from_step": 1}}}]],
+                  prompt_summary="<one line>", latest_prompt="<msg>")
+# -> {"job_id": "JOB-...", "job_token": "...", "confirmation_code": "...", ...}
+
 # Kanban job approval email (agents ADR 0008): one email with the full
 # ordered plan for a kanban job instead of one chat confirmation per
-# batch. job_id must already have a stored, Pending plan (operations.
-# prepare_job(), which also computes job_id's token). Render re-fetches
-# that stored plan — pass nothing else, an agent's own batches/token are
-# never trusted. The email goes To the Requester, Cc the ERP admin
-# (audit-only). The Requester's reply later binds the job (ADR 0008's
-# two-factor proof: the code plus a matching sender), not this send.
+# batch. job_id must already have a stored, Pending plan (the render
+# above, operations.prepare_job(), which also computes job_id's token).
+# Render re-fetches that stored plan — pass nothing else, an agent's own
+# batches/token are never trusted. The email goes To the Requester, Cc
+# the ERP admin (audit-only). The Requester's reply later binds the job
+# (ADR 0008's two-factor proof: the code plus a matching sender), not
+# this send.
 erp_execute_write(phase="render", op="notify.job_approval_request",
-                  args={"job_id": "<job_id from prepare_job()>"})
+                  args={"job_id": "<job_id from the render above>"})
+# then phase="execute" with the same op/args, confirmation_token and
+# issued_at as rendered — sending the email itself needs no user code,
+# only the token (token_policy=POLICY_TOKEN); the Requester's approval of
+# the JOB happens later, over email, via confirm_job below.
 
 # A bespoke gated operation
 erp_execute_write(phase="render", op="system_admin.disable_user",
@@ -255,6 +280,20 @@ erp_execute_write(phase="execute", batch=<rendered batch>, batch_token="<rendere
 # with no partial re-approval. Mutually exclusive with batch_token.
 erp_execute_write(phase="execute", batch=[{"op": "...", "args": {...}}],
                   job_id="<job_id>", job_batch_index=2, prompt_summary="<one line>")
+
+# Binding the Requester's reply to a job (agents ADR 0008, issue 09): the
+# approval email's subject is "[<tag>] Approval needed: job <job_id> (...
+# step(s))" — a reply normally keeps it (with a client-added "Re:"), so
+# pull job_id from the reply turn's subject. Pass reply_text verbatim,
+# never paraphrased; it must contain the job's confirmation code, and the
+# reply turn's own resolved sender must be the Requester the job was
+# rendered for (both checked by operations.verify_job_reply(), neither
+# alone is an approval). No render step, no latest_prompt — this is the
+# approval itself, not a chat-confirmed write.
+erp_execute_write(phase="confirm_job", job_id="<job_id from the reply's subject>",
+                  reply_text="<the reply's literal text>")
+# -> {"status": "Approved", ...}. Now execute each batch per the
+# "Kanban child task" example above, job_batch_index 1, 2, ... in order.
 ```
 
 Pass `prompt_summary` and `latest_prompt` on every write, even one that
