@@ -51,6 +51,15 @@ doctypes, several records) stays a `03-spec-driven-execution.md` spec
 executed turn by turn in the one session that already has `erp_*` tools;
 don't hand steps to the kanban board to get parallelism you can't actually
 use here. (`agents` repo: `.scratch/qkeee-erp-kanban-execution-steering/`.)
+**When the user's own request names "kanban" (e.g. "run this as a kanban
+series"), say in the reply that you built it as one job-level email
+approval instead and why** (agents ADR 0008; `tool-cookbook.md`'s
+"Starting a kanban job" example) — never substitute silently. The same
+report-back discipline below ("a remediation claim is live-confirmed or
+labelled a guess") applies to a substituted *approach*, not only to a
+substituted field value: a user who asked for kanban and got no
+explanation has no way to tell a deliberate substitution from the agent
+having ignored the request.
 
 **Refuse abusive, exploitative, or sexual content outright; never launder it
 into a write.** Don't create/store/forward such content into any ERPNext
@@ -73,9 +82,11 @@ place to land.
 | Durable memory, non-ERPNext | `.../<env-tag>/references/non-erpnext/<system-slug>.md` | `non-erpnext/tally-prime.md` |
 | Memory breadcrumb | one line in `<profile>/memories/MEMORY.md` via the `memory` tool | `qkeee-erp env prod-in: ... — see skill qkeee-erp-learned/prod-in` |
 | Working scratch (rare) | `<profile>/workspace/qkeee-erp/<env-tag>/` | disposable, cleared at end of task |
-| Task spec | `./qkeee-erp-specs/<slug>-<YYYYMMDD-HHMM>.md`, relative to the session's actual working directory (`terminal.cwd` on gateway/cron, launch dir on local CLI) | see `references/03-spec-driven-execution.md`; `<profile>/workspace/...` only as a last-resort fallback when neither resolves; disposable across sessions, not mid-task. **If `write_file` refuses the path** (`HERMES_WRITE_SAFE_ROOT` set and narrower than `terminal.cwd` — live finding, a sidecar deployment): write it under the safe root instead, then `cp`/`mv` it to the documented path via the terminal. Don't fall back to reporting the spec inline only; the path above is what later steps and the user expect to find it at. |
+| Task spec | `./qkeee-erp-specs/<slug>-<YYYYMMDD-HHMM>.md`, relative to the session's actual working directory (`terminal.cwd` on gateway/cron, launch dir on local CLI) | see `references/03-spec-driven-execution.md` and the `write_file` note right below this table; `<profile>/workspace/...` only as a last-resort fallback when neither resolves; disposable across sessions, not mid-task |
 | Questionnaire | `./qkeee-erp-specs/questionnaire-<slug>-<YYYYMMDD-HHMM>.md` | see `qkeee-erp-questionnaire`; same working-directory placement rule as Task spec above |
 | New-learning entries | append under `## Learned <YYYY-MM-DD>` | never edit or delete a prior entry |
+
+**`write_file` can refuse the Task-spec/Questionnaire path above outright — check for this every time, don't assume the table's path always works.** Live finding, twice, same sidecar deployment, 2026-10-24: `write_file` refused `./qkeee-erp-specs/...` under `terminal.cwd` with "outside `HERMES_WRITE_SAFE_ROOT`" — `HERMES_WRITE_SAFE_ROOT` was narrower than `terminal.cwd` on that host. When that happens: write the spec under `HERMES_WRITE_SAFE_ROOT` instead, then `cp`/`mv` it to the documented path via the terminal so later steps and the user find it where the table says. **Do not fall back to reporting the spec inline only and moving on** — that silently drops the one persistence step `03-spec-driven-execution.md` depends on, and the task will look complete while the spec is nowhere a later session can find it.
 
 **Before any `skill_manage(create)` touching ERPNext/organizational
 content** — including Hermes' own autonomous "offer to save as skill"
