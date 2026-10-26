@@ -31,9 +31,38 @@ Enabled at boot by docker/cont-init.d/018-qkeee-erp-plugin.
 from __future__ import annotations
 
 import logging
+import os
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _trace(hermes_home, msg: str) -> None:
+    """Append one line to `<hermes_home>/plugin-data/qkeee-erp/register_trace.log`,
+    bypassing Python `logging` entirely.
+
+    Live finding, 2026-10-26 (agents repo, qkeee-erp-kanban-execution-steering
+    issue 11): every refusal branch in register() already logs its own reason
+    via `logger.warning`/`logger.error`, but a kanban-dispatched worker spawns
+    as `hermes ... chat -q` (quiet mode) and nothing from those calls ever
+    showed up in the worker's own captured log, even with `--tail 999999` on a
+    freshly-restarted daemon. Writing straight to a file sidesteps whatever
+    quiet mode or logging-handler configuration swallows them, so the next
+    live run shows the real reason instead of leaving us to guess at it from
+    outside. Never raises: register() must never raise (this module's own
+    docstring) and a tracing failure is not a reason to break registration."""
+    try:
+        if not hermes_home:
+            return  # no known home: never guess by writing relative to cwd
+        path = Path(hermes_home) / "plugin-data" / "qkeee-erp" / "register_trace.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        pid, task = os.getpid(), os.environ.get("HERMES_KANBAN_TASK") or ""
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"{stamp} pid={pid} kanban_task={task or '-'} {msg}\n")
+    except Exception:
+        pass
 
 
 def _profile_config() -> dict:
@@ -61,6 +90,10 @@ def register(ctx) -> None:
     # inside functions.
     from . import identity_guard
 
+    # Best-effort home for tracing, refined below once get_hermes_home loads;
+    # register() must still trace a library-load failure, so this can't wait.
+    home_for_trace = os.environ.get("HERMES_HOME") or ""
+
     # The guard protects; it grants nothing, so it registers first and always.
     ctx.register_hook("pre_tool_call", identity_guard.pre_tool_call)
     # The Operator CLI registers before the library loads: `setup` must be
@@ -85,8 +118,14 @@ def register(ctx) -> None:
         from . import erp_tools, kanban_hooks
         from .qkeee_erp.core import client, kanban_origin
     except Exception as e:
+        _trace(home_for_trace, f"ERP library not loaded, no erp_* tools: {e!r}")
         logger.error("qkeee-erp plugin: ERP library not loaded, no erp_* tools: %s", e)
         return
+
+    try:
+        home_for_trace = str(get_hermes_home())
+    except Exception:
+        pass  # keep the os.environ fallback above
 
     client.set_session_env_reader(get_session_env)
     client.set_hermes_home_reader(lambda: str(get_hermes_home()))
@@ -111,9 +150,11 @@ def register(ctx) -> None:
     try:
         unmet = _setup_unmet()
     except Exception as e:
+        _trace(home_for_trace, f"setup state not readable, no erp_* tools: {e!r}")
         logger.error("qkeee-erp plugin: setup state not readable, no erp_* tools: %s", e)
         return
     if unmet:
+        _trace(home_for_trace, f"REFUSED (unmet setup): {'; '.join(unmet)}")
         logger.warning("qkeee-erp plugin: no erp_* tools until setup is complete; see "
                        "`hermes qkeee-erp setup status`: %s", "; ".join(unmet))
         return
@@ -123,4 +164,8 @@ def register(ctx) -> None:
             ctx.register_tool(name=name, toolset=erp_tools.TOOLSET, schema=schema,
                               handler=tools.handler(name), emoji="📒")
     except Exception as e:
+        _trace(home_for_trace, f"erp_* tools not (fully) registered: {e!r}")
         logger.error("qkeee-erp plugin: erp_* tools not (fully) registered: %s", e)
+    else:
+        _trace(home_for_trace, f"OK: {len(erp_tools.SCHEMAS)} erp_* tools registered "
+                                f"toolset={erp_tools.TOOLSET!r}")

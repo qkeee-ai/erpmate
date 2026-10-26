@@ -6,8 +6,10 @@ issue 03). So register() must never raise; the identity guard must be
 registered even when the ERP library cannot load."""
 
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import qkeee_erp_plugin
@@ -122,6 +124,40 @@ class RegisterTests(unittest.TestCase):
                 self.assertLogs("qkeee_erp_plugin", level="ERROR"):
             qkeee_erp_plugin.register(ctx)
         self.assertEqual(ctx.tools, [])
+
+    def test_trace_file_records_the_unmet_reasons(self):
+        # Live finding, 2026-10-26 (agents repo, issue 11): register()'s own
+        # logger.warning/error never showed up in a kanban worker's captured
+        # log (quiet-mode spawn). _trace() writes straight to a file instead,
+        # so the real reason is visible without depending on hermes-agent's
+        # own logging configuration for a worker process.
+        reasons = ["P2 terminal backend: terminal.backend is 'local'"]
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(sys.modules["hermes_constants"].__dict__,
+                             {"get_hermes_home": lambda: home}), \
+                    patch.object(qkeee_erp_plugin, "_setup_unmet", return_value=reasons), \
+                    self.assertLogs("qkeee_erp_plugin", level="WARNING"):
+                qkeee_erp_plugin.register(FakeCtx())
+            trace = (Path(home) / "plugin-data" / "qkeee-erp" / "register_trace.log").read_text()
+        self.assertIn("REFUSED (unmet setup)", trace)
+        self.assertIn("terminal.backend", trace)
+
+    def test_trace_file_records_success(self):
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(sys.modules["hermes_constants"].__dict__, {"get_hermes_home": lambda: home}):
+                qkeee_erp_plugin.register(FakeCtx())
+            trace = (Path(home) / "plugin-data" / "qkeee-erp" / "register_trace.log").read_text()
+        self.assertIn(f"OK: {len(erp_tools.SCHEMAS)} erp_* tools registered", trace)
+
+    def test_trace_skips_silently_on_no_known_home(self):
+        # Empty-string home must not fall back to Path("") (= cwd) and write
+        # into wherever the process happens to be running — caught live: an
+        # earlier draft of this guard did exactly that during this test run,
+        # writing a stray plugin-data/ dir into the repo's own source tree.
+        cwd_before = sorted(Path(".").iterdir())
+        qkeee_erp_plugin._trace("", "should not raise")
+        qkeee_erp_plugin._trace(None, "should not raise either")
+        self.assertEqual(sorted(Path(".").iterdir()), cwd_before)
 
     def test_library_failure_keeps_the_guard_and_does_not_raise(self):
         ctx = FakeCtx()
