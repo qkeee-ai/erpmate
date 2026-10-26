@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -167,5 +168,11 @@ def register(ctx) -> None:
         _trace(home_for_trace, f"erp_* tools not (fully) registered: {e!r}")
         logger.error("qkeee-erp plugin: erp_* tools not (fully) registered: %s", e)
     else:
+        # Live finding, 2026-10-26: registration itself succeeds inside a
+        # kanban worker, yet tool_search never shows the tools — the gap is
+        # downstream, in whether this process's effective toolset list
+        # actually includes erp_tools.TOOLSET. argv carries the dispatcher's
+        # literal `--toolsets` value (kanban_db_dispatch._resolve_worker_cli_
+        # toolsets), so log it here rather than guess at the resolution.
         _trace(home_for_trace, f"OK: {len(erp_tools.SCHEMAS)} erp_* tools registered "
-                                f"toolset={erp_tools.TOOLSET!r}")
+                                f"toolset={erp_tools.TOOLSET!r} argv={sys.argv!r}")
