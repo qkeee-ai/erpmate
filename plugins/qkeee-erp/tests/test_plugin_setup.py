@@ -69,6 +69,29 @@ terminal:
   backend: local
 """
 
+CLI_MISSING_TOOLSET = """\
+# Live dev-erp state, 2026-10-26 (qkeee-erp-kanban-execution-steering issue 11):
+# known_plugin_toolsets.cli already lists qkeee_erp (an earlier --apply-profile-fixes
+# run), so _get_platform_tools() no longer auto-includes it there; it was never added
+# to platform_toolsets.cli itself, so every Kanban worker and `chat -q` CLI invocation
+# silently lost erp_* tools even with google_chat fully set up.
+toolsets: [hermes-cli, kanban]
+platform_toolsets:
+  cli: [clarify, code_execution, terminal, kanban]
+  google_chat: [clarify, file, qkeee_erp, terminal, kanban]
+known_plugin_toolsets:
+  cli: [qkeee_erp, spotify]
+  discord: [qkeee_erp, spotify]
+  google_chat: [qkeee_erp]
+terminal:
+  backend: ssh
+  cwd: /opt/cwd
+  ssh_host: terminal
+  ssh_user: hermes
+  ssh_port: 22
+  ssh_key: {key}
+"""
+
 COMMENT_HEAVY = """\
 # Heavily commented config: nothing here needs a change,
 # so setup must not rewrite the file.
@@ -282,6 +305,38 @@ class HalfDoneTests(SetupTestCase):
         report = setup.run(self.env(), apply_profile_fixes=True)
         self.assertEqual(set(self.statuses(report).values()), {setup.DONE})
         self.assertTrue(all(c.startswith(("P2", "S3", "I1")) for c in report["changes"]), report["changes"])
+
+
+class CliToolsetMissingTests(SetupTestCase):
+    """Regression for the live dev-erp finding, 2026-10-26: P1 wrote
+    known_plugin_toolsets.cli but never platform_toolsets.cli itself, so
+    every Kanban worker and `chat -q` CLI invocation silently lost erp_*
+    tools (hermes_cli.tools_config._get_platform_tools only auto-includes a
+    plugin toolset a platform has never heard of)."""
+
+    def setUp(self):
+        super().setUp()
+        self.config(CLI_MISSING_TOOLSET)
+        self.credentials()
+        self.make_key()
+
+    def test_check_flags_the_gap(self):
+        report = setup.run(self.env(), dry_run=True)
+        reasons = {i["key"]: i["reason"] for i in report["items"]}
+        self.assertIn("platform_toolsets.cli lacks qkeee_erp", reasons["P1"])
+
+    def test_apply_adds_it_without_disturbing_the_rest_of_the_list(self):
+        report = setup.run(self.env(), apply_profile_fixes=True)
+        self.assertEqual(set(self.statuses(report).values()), {setup.DONE})
+        cli = self.read()["platform_toolsets"]["cli"]
+        self.assertEqual(cli, ["clarify", "code_execution", "terminal", "kanban", "qkeee_erp"])
+
+    def test_second_run_changes_nothing(self):
+        setup.run(self.env(), apply_profile_fixes=True)
+        before = self.raw()
+        report = setup.run(self.env(), apply_profile_fixes=True)
+        self.assertEqual(report["changes"], [])
+        self.assertEqual(self.raw(), before)
 
 
 class KanbanTests(SetupTestCase):

@@ -9,7 +9,7 @@ is already present; only a missing result is applied.
 |---|---|---|
 | S1 credentials | step | `plugin-data/qkeee-erp/qkeee-erp.env` exists and no legacy `<profile>/qkeee-erp.env` remains (a lone legacy file is moved, mode 600) |
 | S2 config | step | no legacy `skills.config.qkeee_erp` section and no `scripts_dir` setting (settings.migrate_legacy_config) |
-| P1 toolsets | prerequisite | google_chat has `qkeee_erp`; no ERP chat platform (google_chat, or any but cli listing `qkeee_erp`) has `code_execution`; `known_plugin_toolsets` lists `qkeee_erp` for cli, discord and google_chat |
+| P1 toolsets | prerequisite | google_chat has `qkeee_erp`; cli has `qkeee_erp` too, when its `platform_toolsets` list is already explicit (the Kanban dispatcher's `--toolsets` pin is computed from that saved list, not the plugin registry); no ERP chat platform (google_chat, or any but cli listing `qkeee_erp`) has `code_execution`; `known_plugin_toolsets` lists `qkeee_erp` for cli, discord and google_chat |
 | P3 kanban | prerequisite | the top-level `toolsets` lists `kanban`, and so do the saved `platform_toolsets` lists of google_chat and cli (chat and Kanban workers get the kanban tools, not the `hermes kanban` CLI in the terminal); `kanban.orchestrator_profile` and `kanban.default_assignee` name this Profile ("" or "default" for the root Profile) |
 | P2 terminal | prerequisite | `terminal.backend` is `ssh` with host, user and key set; on a host install, none of host, user, key or cwd still holds the Docker sidecar value that the shipped config.yaml carries |
 | S3 terminal key | step | the `terminal.ssh_key` file exists (created if missing) |
@@ -261,6 +261,17 @@ class _Toolsets(_Item):
                             f"includes code_execution)")
         elif TOOLSET not in chat:
             problems.append(f"platform_toolsets.{CHAT_PLATFORM} lacks {TOOLSET}")
+        # Live finding, 2026-10-26 (agents repo, qkeee-erp-kanban-execution-steering
+        # issue 11): _get_platform_tools() only auto-includes a plugin toolset for a
+        # platform that has never heard of it; once known_plugin_toolsets marks TOOLSET
+        # known for OPERATOR_PLATFORM (below, unconditionally), it is offered there only
+        # if explicitly present in that platform's own saved list. Nothing used to add it
+        # there, so every Kanban-dispatched worker and `chat -q` CLI invocation silently
+        # lost erp_* tools even though register() succeeded and google_chat worked fine.
+        cli = toolsets.get(OPERATOR_PLATFORM)
+        if isinstance(cli, list) and TOOLSET not in cli:
+            problems.append(f"platform_toolsets.{OPERATOR_PLATFORM} lacks {TOOLSET} (known_plugin_toolsets "
+                            f"already marks it known there, so Kanban workers never get it offered)")
         for platform in _erp_chat_platforms(toolsets):
             problems.append(f"platform_toolsets.{platform} has code_execution next to {TOOLSET}")
         known = _mapping(cfg.get("known_plugin_toolsets"))
@@ -279,6 +290,9 @@ class _Toolsets(_Item):
         elif TOOLSET not in toolsets[CHAT_PLATFORM]:
             toolsets[CHAT_PLATFORM].append(TOOLSET)
             changes.append(f"platform_toolsets.{CHAT_PLATFORM} += {TOOLSET}")
+        if isinstance(toolsets.get(OPERATOR_PLATFORM), list) and TOOLSET not in toolsets[OPERATOR_PLATFORM]:
+            toolsets[OPERATOR_PLATFORM].append(TOOLSET)
+            changes.append(f"platform_toolsets.{OPERATOR_PLATFORM} += {TOOLSET}")
         for platform in _erp_chat_platforms(toolsets):
             toolsets[platform].remove("code_execution")
             changes.append(f"platform_toolsets.{platform} -= code_execution")
