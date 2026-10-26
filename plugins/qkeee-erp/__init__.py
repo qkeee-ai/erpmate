@@ -173,6 +173,17 @@ def register(ctx) -> None:
         # downstream, in whether this process's effective toolset list
         # actually includes erp_tools.TOOLSET. argv carries the dispatcher's
         # literal `--toolsets` value (kanban_db_dispatch._resolve_worker_cli_
-        # toolsets), so log it here rather than guess at the resolution.
+        # toolsets); confirmed it never includes 'qkeee_erp' there. Also call
+        # hermes_cli.plugins.get_plugin_toolset_keys_nowait() right here, in
+        # the SAME process we just registered in: if 'qkeee_erp' is present
+        # here but absent from the dispatcher's own --toolsets computation,
+        # the gap is specifically in set_hermes_home_override's manager
+        # scoping, not a general registry issue.
+        try:
+            from hermes_cli.plugins import get_plugin_toolset_keys_nowait
+            keys = sorted(get_plugin_toolset_keys_nowait())
+        except Exception as e:
+            keys = f"<unavailable: {e!r}>"
         _trace(home_for_trace, f"OK: {len(erp_tools.SCHEMAS)} erp_* tools registered "
-                                f"toolset={erp_tools.TOOLSET!r} argv={sys.argv!r}")
+                                f"toolset={erp_tools.TOOLSET!r} plugin_toolset_keys={keys!r} "
+                                f"argv={sys.argv!r}")
