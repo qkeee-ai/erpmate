@@ -38,6 +38,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_dispatch_trace_installed = False
+
 
 def _trace(hermes_home, msg: str) -> None:
     """Append one line to `<hermes_home>/plugin-data/qkeee-erp/register_trace.log`,
@@ -64,6 +66,64 @@ def _trace(hermes_home, msg: str) -> None:
             f.write(f"{stamp} pid={pid} kanban_task={task or '-'} {msg}\n")
     except Exception:
         pass
+
+
+def _patch_dispatch_trace(home_for_trace: str) -> None:
+    """One-time instrument for hermes-agent issue 11's still-open half.
+
+    register()'s own `_trace()` calls above only cover the WORKER side
+    (confirmed: always "OK, 5 tools" there). The dispatcher's own
+    `--toolsets` pin — computed by `kanban_db_dispatch._resolve_worker_cli_
+    toolsets()` → `plugins.get_plugin_toolset_keys_nowait()` →
+    `_nowait_plugin_set()` — has never been traced directly; its argv
+    output just shows `qkeee_erp` missing, with no visibility into WHY
+    (`agents` repo, qkeee-erp-kanban-execution-steering issue 11,
+    2026-10-26 cross-validation). Wrapping the dispatch-side function here
+    (rather than patching hermes-agent's own source, which we don't own)
+    logs the PluginManager state that call sees — whether a manager already
+    existed for that resolved home key, its `_discovered` flag, and whether
+    a background discovery thread was in flight — so the next live kanban
+    dispatch shows which branch fires instead of leaving it a guess. Only
+    possible because this gateway process is multi-tenant (chat/cron/kanban
+    dispatch share one process via `set_hermes_home_override`, not separate
+    processes), so `register()` running here at all means this module is
+    already imported in the same process the dispatcher runs in. Never
+    raises: a failed patch install is not a reason to break registration.
+    """
+    global _dispatch_trace_installed
+    if _dispatch_trace_installed:
+        return
+    try:
+        import hermes_cli.kanban_db_dispatch as _dispatch_mod
+        import hermes_cli.plugins as _plugins_mod
+
+        original = _dispatch_mod._resolve_worker_cli_toolsets
+
+        def _traced(hermes_home, _original=original):
+            key = None
+            pre_mgr = None
+            pre_discovered = None
+            try:
+                if hermes_home:
+                    key = Path(hermes_home).expanduser().resolve()
+                    pre_mgr = _plugins_mod._plugin_managers_by_home.get(key)
+                    pre_discovered = getattr(pre_mgr, "_discovered", None)
+            except Exception:
+                pass
+            thread = _plugins_mod._background_discovery_thread
+            in_flight = thread is not None and thread.is_alive()
+            result = _original(hermes_home)
+            _trace(home_for_trace,
+                   f"DISPATCH_TRACE hermes_home={hermes_home!r} resolved_key={key!r} "
+                   f"pre_existing_manager={pre_mgr is not None!r} pre_discovered={pre_discovered!r} "
+                   f"in_flight={in_flight!r} result={result!r} "
+                   f"qkeee_erp_in_result={('qkeee_erp' in (result or []))!r}")
+            return result
+
+        _dispatch_mod._resolve_worker_cli_toolsets = _traced
+        _dispatch_trace_installed = True
+    except Exception as e:
+        _trace(home_for_trace, f"DISPATCH_TRACE install failed: {e!r}")
 
 
 def _profile_config() -> dict:
@@ -127,6 +187,8 @@ def register(ctx) -> None:
         home_for_trace = str(get_hermes_home())
     except Exception:
         pass  # keep the os.environ fallback above
+
+    _patch_dispatch_trace(home_for_trace)
 
     client.set_session_env_reader(get_session_env)
     client.set_hermes_home_reader(lambda: str(get_hermes_home()))
