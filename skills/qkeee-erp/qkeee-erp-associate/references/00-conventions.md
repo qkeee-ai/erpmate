@@ -39,18 +39,36 @@ gateway host is the Operator's to run, named as a one-line gap per the
 paragraph above — never attempt it from terminal first to see if it's
 blocked.
 
-**Don't use `kanban_create` to fan out ERPNext execution work on the
-default board — track it as a spec/checklist in chat instead.** Live
-finding (2026-10-23, demo procurement run): the board's auto-decomposer
-splits a `kanban_create`d card into sub-cards, each dispatching a worker
-that has no `erp_*` tools at all and blocks on arrival. Some root cards
-become "decomposition roots" that re-wake every time a child completes and
-refuse `kanban_complete` as stale — there is no `cancelled`/`wont-do`
-terminal state to close one honestly. A multi-step ERPNext build (several
-doctypes, several records) stays a `03-spec-driven-execution.md` spec
-executed turn by turn in the one session that already has `erp_*` tools;
-don't hand steps to the kanban board to get parallelism you can't actually
-use here. (`agents` repo: `.scratch/qkeee-erp-kanban-execution-steering/`.)
+**A single, manually-dispatched kanban task now reaches `erp_*` tools
+correctly (fixed 2026-10-27, `erpnext-hermes@4db8a55`) — but `kanban_create`
+fan-out on the default board still is not safe; don't use it for ERPNext
+execution.** Two separate things were true here, and only one is fixed:
+
+- *Fixed:* a kanban worker's own `--toolsets` pin used to silently exclude
+  `qkeee_erp` regardless of registration succeeding (a `setup_steps.py` P1
+  gap — `platform_toolsets.cli` never got `qkeee_erp` added, only
+  `known_plugin_toolsets.cli`). A profile that re-ran
+  `hermes qkeee-erp setup --apply-profile-fixes` after this fix landed now
+  gets `erp_*` tools in a dispatched worker like any other `cli`-platform
+  session. If a worker you dispatched still shows zero `erp_*` tools, the
+  first thing to check (and name to the Operator, per the paragraph above)
+  is whether this profile has re-run setup since 2026-10-27 — `hermes
+  qkeee-erp setup status` names `platform_toolsets.cli lacks qkeee_erp`
+  explicitly if not.
+- *Still open:* the board's auto-decomposer splits a `kanban_create`d card
+  into sub-cards, each dispatching a worker that gets the SAME card,
+  decomposed — not the toolset problem above, a separate board-architecture
+  issue (`agents` repo `.scratch/qkeee-erp-kanban-execution-steering/issues/
+  01-*`). Some root cards become "decomposition roots" that re-wake every
+  time a child completes and refuse `kanban_complete` as stale — there is no
+  `cancelled`/`wont-do` terminal state to close one honestly.
+
+So: a single, already-`specify`d (never decomposed) kanban task assigned to
+this profile is fine. **Don't use `kanban_create` to fan a multi-step
+ERPNext build out into several cards** — track it as a
+`03-spec-driven-execution.md` spec executed turn by turn in the one session
+that already has `erp_*` tools instead; don't hand steps to the kanban
+board to get parallelism the auto-decomposer breaks here.
 **When the user's own request names "kanban" (e.g. "run this as a kanban
 series"), say in the reply that you built it as one job-level email
 approval instead and why** (agents ADR 0008; `tool-cookbook.md`'s

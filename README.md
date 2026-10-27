@@ -67,6 +67,44 @@ ERPNext instance credentials (`QKEEE_ERP_*`) belong to the `qkeee-erp` plugin, n
 |---|---|---|
 | `Qkeee Bot Audit Log` | **Always**, every read and write | One row per ERPNext record read/written by the bot — action, reference doc, before/after payload, field diff, `domain_code` (which `references/domains/*.md` procedure made the call), `user_approved` (Approved/Not Confirmed/Not Required — detection, not a write gate), submittable/locked once resolved |
 
+## Kanban boards and ERPNext execution
+
+The `qkeee-erp` plugin's Kanban hooks exist so a kanban-dispatched worker can
+make attributed ERPNext calls — each dispatched task's requester origin is
+recorded (`plugins/qkeee-erp/qkeee_erp/core/kanban_origin.py`) and carried
+through to the write pipeline, same as a live chat session.
+
+**When to use it:** a single, atomic ERPNext task you dispatch to this
+profile's board (`kanban specify`, not auto-decomposed) — the worker gets
+`erp_*` tools like any other `cli`-platform session.
+
+**When not to:** don't call `kanban_create` to fan a multi-step ERPNext
+build (several doctypes, several records) out into multiple sub-cards. The
+board's auto-decomposer splits it into sub-cards and some root cards become
+"decomposition roots" that re-wake forever with no `cancelled`/`wont-do`
+terminal state to close them honestly — a board-architecture issue, open
+upstream (`agents` repo `.scratch/qkeee-erp-kanban-execution-steering/
+issues/01-*`). The skill's own guidance (`00-conventions.md`) runs this kind
+of work as a spec executed turn by turn in the live session instead, or — if
+the user explicitly asked for "kanban" — as ADR 0008's one job-level email
+approval (`docs/adr/0008-email-approval-for-kanban-jobs.md`).
+
+**Setting to check after any setup/update:** `hermes -p <profile> qkeee-erp
+setup status`'s **P1** item. It must cover `platform_toolsets.cli`, not just
+`known_plugin_toolsets.cli` — a profile set up before 2026-10-27
+(`erpnext-hermes@4db8a55`) wrote the latter but never the former, which
+silently excluded `qkeee_erp` from every kanban worker's and every `chat -q`
+CLI invocation's effective toolset list even though the plugin itself
+registered fine. If a dispatched worker shows zero `erp_*` tools, run
+`hermes -p <profile> qkeee-erp setup --apply-profile-fixes` once — `setup
+status` names the gap explicitly (`platform_toolsets.cli lacks qkeee_erp`)
+if it's still unmet.
+
+**P3** (same `setup status` output) is the other kanban-relevant item:
+`kanban.orchestrator_profile`/`kanban.default_assignee` must name this
+profile, and the top-level `toolsets` list must include `kanban`, or chat
+and kanban workers get no kanban tools at all.
+
 ## Example prompts / tasks this profile handles
 
 **HR & Payroll**
