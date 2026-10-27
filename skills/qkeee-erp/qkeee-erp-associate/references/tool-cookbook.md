@@ -235,6 +235,27 @@ erp_execute_write(phase="render",
                                                     "expected_modified": {"from_step": 1}}}]],
                   prompt_summary="<one line>", latest_prompt="<msg>")
 # -> {"job_id": "JOB-...", "job_token": "...", "confirmation_code": "...", ...}
+#
+# Before rendering a multi-batch job, verify every step can actually
+# succeed, because the render stores the plan verbatim and resolves
+# nothing: (a) run `erp_discover preflight` for EVERY doctype in the
+# plan with its draft payload — preflight names the mandatory fields a
+# hand-written payload misses (naming_series, currency,
+# conversion_rate, selling_price_list, price_list_currency,
+# plc_conversion_rate, and for Payment Entry the currency/rate fields)
+# and surfaces bot role gaps before they 403 mid-job; (b) check stock
+# with `erp_query` on Bin for every Item a Delivery Note will ship —
+# with allow_negative_stock off, a DN submit with zero on-hand fails
+# and stops the whole job, so a Material Receipt batch must precede
+# the deliveries. Within one batch, reference a prior step's record
+# with name="<FROM_STEP_N>" plus expected_modified={"from_step": N}.
+# A cross-batch payload placeholder <FROM_BATCH_N_STEP_M> is accepted
+# and stored literally by the render but its execute-time resolution
+# is unverified — probe it with a minimal 2-batch job and confirm at
+# execute before building a whole chain on it. Child-table row names
+# (so_detail, dn_detail) are auto-generated and cannot be pre-rendered;
+# link parents by document-level fields (against_sales_order,
+# delivery_note) plus item_code instead and accept the linkage limits.
 
 # Kanban job approval email (agents ADR 0008): one email with the full
 # ordered plan for a kanban job instead of one chat confirmation per
@@ -247,10 +268,16 @@ erp_execute_write(phase="render",
 # this send.
 erp_execute_write(phase="render", op="notify.job_approval_request",
                   args={"job_id": "<job_id from the render above>"})
-# then phase="execute" with the same op/args, confirmation_token and
-# issued_at as rendered — sending the email itself needs no user code,
-# only the token (token_policy=POLICY_TOKEN); the Requester's approval of
-# the JOB happens later, over email, via confirm_job below.
+# then phase="execute" with the FULL rendered `args` object back
+# unchanged — the execute step re-validates every field it shows
+# (job_id, status, requested_by, step_count, issued_at, expires_at,
+# ttl_minutes, confirmation_code, batches, admin_email, instance), so
+# passing only {"job_id"} is refused as invalid_arguments. Also pass
+# confirmation_token and issued_at as rendered, and latest_prompt (the
+# user's literal message) — a POLICY_TOKEN send still refuses without
+# latest_prompt. Sending the email itself needs no user code; the
+# Requester's approval of the JOB happens later, over email, via
+# confirm_job below.
 
 # A bespoke gated operation
 erp_execute_write(phase="render", op="system_admin.disable_user",
