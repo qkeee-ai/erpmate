@@ -325,7 +325,11 @@ class JobBatchTests(unittest.TestCase):
                            if c.args[1] == core_client.JOB_APPROVAL_DOCTYPE)
         logged = json.loads(append_call.args[3]["execution_log"])
         self.assertEqual(logged, [{"batch_index": 1, "step_index": 1, "name": None,
-                                   "modified": None, "outcome": "parked", "checked": checked}])
+                                   "modified": None, "outcome": "parked", "error": "boom",
+                                   "checked": checked,
+                                   "write_failure": {"error_class": "ValidationError",
+                                                     "missing_fields": [], "invalid_links": [],
+                                                     "message": "boom"}}])
 
     def test_discover_check_uses_preflight_for_create_and_meta_otherwise(self):
         # Issue 19 bullet 1 vs. bullet 2's "existing record" framing maps

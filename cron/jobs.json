@@ -1,4 +1,12 @@
 {
   "jobs": [
+    {
+      "id": "qkeee-erp-job-status-poller",
+      "name": "qkeee-erp job status poller",
+      "no_agent": true,
+      "script": "qkeee_erp_job_status_poller.py",
+      "schedule": "every 5m",
+      "deliver": "local"
+    }
   ]
 }

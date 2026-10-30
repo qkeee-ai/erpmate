@@ -114,6 +114,14 @@ class PrepareJobTests(unittest.TestCase):
         # time, is the job's monitor of record (agents ADR 0010 point 4).
         self.assertEqual(body["monitor_platform"], "google_chat")
         self.assertEqual(body["monitor_channel_id"], "spaces/A")
+        # Issue 23: no Kanban worker env in this test process, so "".
+        self.assertEqual(body["kanban_card_id"], "")
+
+    def test_a_kanban_worker_stores_its_own_task_as_the_card_id(self):
+        with connector() as m, patch.object(core_client, "kanban_card_id", return_value="t_abc123"):
+            _render(BATCHES)
+        body = m["_do_mutate"].call_args.args[3]
+        self.assertEqual(body["kanban_card_id"], "t_abc123")
 
     def test_no_job_id_refused(self):
         with connector():
@@ -153,6 +161,7 @@ class PrepareJobTests(unittest.TestCase):
         self.assertIsNone(body["monitor_platform"])
         self.assertIsNone(body["monitor_channel_id"])
         self.assertEqual(body["requested_by"], testsupport.REQ)
+        self.assertEqual(body["kanban_card_id"], "")
 
 
 class JobResumeTests(unittest.TestCase):
@@ -302,6 +311,53 @@ class JobApprovalAppendLogOpTests(unittest.TestCase):
             operations.append_execution_log("JOB-1", [], testsupport.ctx())
         self.assertFalse(m["get_resource"].called)
         self.assertFalse(m["_do_mutate"].called)
+
+
+class JobApprovalMarkNotifiedOpTests(unittest.TestCase):
+    """Issue 23's watermark: job_approval.mark_notified records
+    len(execution_log) as of the scheduled poller's last report, so the
+    next poll can tell "nothing new" from "something happened" without a
+    separate per-event flag."""
+
+    def test_not_a_cli_operation(self):
+        self.assertIn("job_approval.mark_notified", operations.REGISTRY)
+        self.assertNotIn("job_approval.mark_notified", {op.key for op in operations.list_operations()})
+
+    def test_does_not_claim_ownership_already_held_by_mark_approved(self):
+        self.assertEqual(operations.owned_by("Qkeee Bot Job Approval", "update"),
+                         "job_approval.mark_approved")
+
+    def test_wrong_args_refused(self):
+        with connector():
+            with self.assertRaises(core_client.InvalidArgumentsError):
+                operations.run_operation("job_approval.mark_notified", {"job_id": "J-1"},
+                                         testsupport.ctx())
+
+    def test_negative_or_non_int_index_refused(self):
+        with connector():
+            for bad in (-1, "3", 1.5, True):
+                with self.subTest(bad=bad), self.assertRaises(core_client.InvalidArgumentsError):
+                    operations.run_operation(
+                        "job_approval.mark_notified",
+                        {"job_id": "J-1", "last_notified_log_index": bad,
+                         "last_notified_card_status": ""}, testsupport.ctx())
+
+    def test_non_string_card_status_refused(self):
+        with connector():
+            with self.assertRaises(core_client.InvalidArgumentsError):
+                operations.run_operation(
+                    "job_approval.mark_notified",
+                    {"job_id": "J-1", "last_notified_log_index": 1, "last_notified_card_status": None},
+                    testsupport.ctx())
+
+    def test_mark_job_notified_saves_the_index_and_card_status(self):
+        with connector() as m:
+            operations.mark_job_notified("JOB-1", 4, "blocked", testsupport.ctx())
+        self.assertEqual(m["_do_mutate"].call_args.args[1], "Qkeee Bot Job Approval")
+        self.assertEqual(m["_do_mutate"].call_args.args[2], "update")
+        self.assertEqual(m["_do_mutate"].call_args.args[4], "JOB-1")
+        self.assertEqual(m["_do_mutate"].call_args.args[3],
+                         {"last_notified_log_index": 4, "last_notified_card_status": "blocked"})
 
 
 class GateExemptionTests(unittest.TestCase):

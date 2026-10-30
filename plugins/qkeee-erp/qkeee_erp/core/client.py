@@ -594,6 +594,17 @@ def monitor_channel() -> dict:
     origin = _kanban_origin() or {}
     return {"platform": platform or origin.get("platform") or None,
             "channel_id": channel_id or origin.get("chat_id") or None}
+
+
+def kanban_card_id() -> str:
+    """This process's own Kanban task id (agents ADR 0010/issue 23), or
+    "" when this is not a Kanban worker (a plain chat turn renders a job
+    too — ADR 0008 does not require Kanban). `HERMES_KANBAN_TASK` IS the
+    task/card id (hermes_cli/kanban_db_dispatch.py sets it per worker
+    process, `_kanban_origin()` only resolves ADDITIONAL metadata FROM
+    it) — read directly, no resolve_origin() round trip needed for the
+    id itself."""
+    return (os.environ.get(_KANBAN_TASK_ENV) or "").strip()
 # Set by Hermes only inside the execute_code sandbox child
 # (tools/code_execution_env.py), which also strips HERMES_SESSION_*.
 _EXECUTE_CODE_SANDBOX_ENV = "HERMES_RPC_SOCKET"

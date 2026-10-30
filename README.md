@@ -24,7 +24,7 @@ An ERPNext specialist that acts like a functional consultant, not a click-execut
 | `mcp.json` | MCP server connections (currently no servers configured; ERPNext access goes through the `qkeee-erp` plugin's `erp_*` tools) |
 | `skills/qkeee-erp/` | The `qkeee-erp-associate` skill: ERP domain know-how only, no code — mounts read-only into the live profile via `skills.external_dirs`, edited here only |
 | `plugins/qkeee-erp/` | The `qkeee-erp` gateway plugin: all ERP code, the `erp_*` tools, the identity guard, Kanban hooks, the `qkeee-erp:usage` skill and the Operator CLI (`hermes -p <profile> qkeee-erp …`). Its settings: `plugins.entries.qkeee-erp.settings` (`active_env`, `mode`) |
-| `cron/` | Scheduled jobs (e.g. recurring MIS reports); currently empty |
+| `cron/` | Scheduled jobs. Ships `qkeee-erp-job-status-poller` (agents ADR 0010, issue 23), a `no_agent` script every 5 minutes reporting open kanban-job parks/blocks — paused on install until `QKEEE_ERP_<TAG>_ADMIN_EMAIL` is set and an Operator resumes it |
 | `adminops/` | Operator maintenance tools, baked into the image at `/opt/adminops/` (not run at boot). See [adminops/README.md](adminops/README.md) |
 | `profile.md` | Purpose / Owns / Should-Not-Own / safety policy / operating protocol for this agent — user-owned, not replaced on `profile update` |
 

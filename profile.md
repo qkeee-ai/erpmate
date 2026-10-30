@@ -54,7 +54,7 @@ Defined in `SOUL.md` — direct, precise, schema-over-memory, explains the "why"
 
 - Model / provider: `openrouter/auto-beta` via OpenRouter (`config.yaml` → `model`).
 - MCP servers: none configured (`mcp.json` → `mcpServers` is empty). ERPNext access goes through the `qkeee-erp` plugin's `erp_*` tools (a REST connector in the gateway), not MCP.
-- Cron/scheduled jobs: none configured (`cron/jobs.json` → `jobs` is empty).
+- Cron/scheduled jobs: `qkeee-erp-job-status-poller` (agents ADR 0010, issue 23) — a `no_agent` script, every 5 minutes, reporting open kanban-job parks/blocks by email + Google Chat (`notify.job_status_update`). Ships paused; an Operator reviews `QKEEE_ERP_<TAG>_ADMIN_EMAIL` is set, then `hermes cron resume qkeee-erp-job-status-poller`.
 
 ## Escalation
 

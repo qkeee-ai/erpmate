@@ -1254,10 +1254,17 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
                 # a step chained off THIS one (_resolve_from_step/
                 # _resolve_from_batch) must see no usable record either
                 # way, which is what makes the cascade below automatic.
+                # `error` (and `write_failure` when ERPNext named one) is
+                # durable here too, not only on this call's own in-memory
+                # `rows` — the scheduled poller (issue 23) reads a park's
+                # reason from THIS row, in a process that never saw this
+                # run_batch() call return.
                 log_entries.append({"batch_index": job_batch_index, "step_index": i,
                                     "name": None, "modified": None,
-                                    "outcome": "parked" if park else "failed",
-                                    **({"checked": checked} if checked is not None else {})})
+                                    "outcome": "parked" if park else "failed", "error": str(e),
+                                    **({"checked": checked} if checked is not None else {}),
+                                    **({"write_failure": e.failure}
+                                       if isinstance(e, _c.WriteRejectedError) else {})})
             if not park:
                 stopped_at = i
             rows.append(row)
@@ -1481,18 +1488,20 @@ def prepare_job(batches: list, ctx: WriteContext, job_id: str, issued_at: int = 
     # The monitor of record (agents ADR 0010 point 4): whichever session
     # renders this job is the one that stores its own channel identity —
     # read once, here, not re-resolved later from whatever session happens
-    # to be active when a proactive update eventually fires.
+    # to be active when a proactive update eventually fires. Same posture
+    # for kanban_card_id (issue 23): "" when this render didn't happen
+    # inside a Kanban worker (a plain chat turn can render a job too).
     monitor = _c.monitor_channel()
     run_operation("job_approval.create", {
         "job_id": job_id, "token": token, "issued_at": issued, "step_count": step_count,
         "plan": json.dumps(out["job"]), "monitor_platform": monitor["platform"],
-        "monitor_channel_id": monitor["channel_id"]}, ctx)
+        "monitor_channel_id": monitor["channel_id"], "kanban_card_id": _c.kanban_card_id()}, ctx)
     return out
 
 
 def _job_approval_create_prepare(args: dict, ctx: WriteContext) -> PreparedRequest:
     required = {"job_id", "token", "issued_at", "step_count", "plan", "monitor_platform",
-                "monitor_channel_id"}
+                "monitor_channel_id", "kanban_card_id"}
     if set(args) != required:
         raise _c.InvalidArgumentsError(
             f"job_approval.create needs exactly {sorted(required)}, got {sorted(args)}.")
@@ -1501,7 +1510,8 @@ def _job_approval_create_prepare(args: dict, ctx: WriteContext) -> PreparedReque
         body={"job_id": args["job_id"], "requested_by": ctx.requested_by, "token": args["token"],
               "issued_at": args["issued_at"], "step_count": args["step_count"],
               "status": "Pending", "plan": args["plan"], "monitor_platform": args["monitor_platform"],
-              "monitor_channel_id": args["monitor_channel_id"]})
+              "monitor_channel_id": args["monitor_channel_id"],
+              "kanban_card_id": args["kanban_card_id"]})
 
 
 register_operation(Operation(
@@ -1561,6 +1571,53 @@ register_operation(Operation(
     # need to claim it too.
     cli=False,
 ))
+
+
+def _job_approval_mark_notified_prepare(args: dict, ctx: WriteContext) -> PreparedRequest:
+    required = {"job_id", "last_notified_log_index", "last_notified_card_status"}
+    if set(args) != required:
+        raise _c.InvalidArgumentsError(
+            f"job_approval.mark_notified needs exactly {sorted(required)}, got {sorted(args)}.")
+    if not isinstance(args["last_notified_log_index"], int) or isinstance(
+            args["last_notified_log_index"], bool) or args["last_notified_log_index"] < 0:
+        raise _c.InvalidArgumentsError("job_approval.mark_notified: last_notified_log_index "
+                                       "must be a non-negative integer.")
+    if not isinstance(args["last_notified_card_status"], str):
+        raise _c.InvalidArgumentsError(
+            "job_approval.mark_notified: last_notified_card_status must be a string (\"\" when "
+            "the job has no kanban_card_id).")
+    return PreparedRequest(transport="resource", doctype=_c.JOB_APPROVAL_DOCTYPE, action="update",
+                           name=args["job_id"],
+                           body={"last_notified_log_index": args["last_notified_log_index"],
+                                 "last_notified_card_status": args["last_notified_card_status"]})
+
+
+register_operation(Operation(
+    key="job_approval.mark_notified", domain=None,
+    summary="record the execution_log length and card status as of the scheduled poller's last report",
+    prepare=_job_approval_mark_notified_prepare, token_policy=POLICY_NONE, allowlist_domain=None,
+    # Not `owns`: same reasoning as job_approval.append_log above.
+    # Internal plumbing the poller script (agents issue 23) calls directly
+    # after notify.job_status_update actually sends — never a CLI/agent
+    # entry point (that would let a caller silently mark a report "sent"
+    # that never went out).
+    cli=False,
+))
+
+
+def mark_job_notified(job_id: str, last_notified_log_index: int, last_notified_card_status: str,
+                      ctx: WriteContext) -> None:
+    """Record the watermark (agents ADR 0010/issue 23) after the poller's
+    report for `job_id` actually sent — called only once a send succeeded,
+    so a failed send is retried on the next poll rather than silently
+    marked done. Two independent signals, both watermarked the same way:
+    the execution_log can grow without the card's own board status
+    changing, and (ADR 0010 point 4: "polls active ... rows and their
+    cards' kanban state") the card can be blocked or finish without a
+    new execution_log entry of its own."""
+    run_operation("job_approval.mark_notified",
+                  {"job_id": job_id, "last_notified_log_index": last_notified_log_index,
+                   "last_notified_card_status": last_notified_card_status}, ctx)
 
 
 def append_execution_log(job_id: str, entries: list, ctx: WriteContext) -> None:

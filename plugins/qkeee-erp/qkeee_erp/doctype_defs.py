@@ -162,6 +162,29 @@ JOB_APPROVAL = {
         {"fieldname": "monitor_channel_id", "label": "Monitor Channel ID", "fieldtype": "Data",
          "description": "That dispatching session's chat_id/thread or equivalent channel "
                          "identity, paired with monitor_platform."},
+        {"fieldname": "kanban_card_id", "label": "Kanban Card ID", "fieldtype": "Data",
+         "description": "The Kanban task/card id of whichever session dispatched this job, "
+                         "captured at render time (prepare_job()) the same way "
+                         "monitor_platform/monitor_channel_id are — empty when the job was "
+                         "rendered from a plain chat turn, not a Kanban worker (agents ADR "
+                         "0008 does not require Kanban). Recorded for audit/traceability; the "
+                         "scheduled poller (issue 23) watches this row's own durable state "
+                         "(execution_log/status), never a live kanban query."},
+        {"fieldname": "last_notified_log_index", "label": "Last Notified Log Index",
+         "fieldtype": "Int", "default": "0",
+         "description": "len(execution_log) as of the scheduled poller's (issue 23) last "
+                         "consolidated notify.job_status_update report for this job — the "
+                         "watermark that tells the next poll pass whether anything new "
+                         "happened since (a step completed, parked, or failed) without a "
+                         "separate per-event flag. Updated only after a report actually sends."},
+        {"fieldname": "last_notified_card_status", "label": "Last Notified Card Status",
+         "fieldtype": "Data", "default": "",
+         "description": "The linked kanban_card_id's board status (e.g. blocked, done) as of "
+                         "the poller's last report — the SAME watermark idea as "
+                         "last_notified_log_index, for the case ADR 0010 point 4 also names "
+                         "(the card's own kanban state): a card can be blocked or finish "
+                         "without a new execution_log entry of its own. Empty when "
+                         "kanban_card_id is empty (nothing to watch)."},
     ],
     "permissions": [
         _perm(ROLE_NAME, read=1, write=1, create=1),

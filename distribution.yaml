@@ -49,3 +49,10 @@ distribution_owned:
   - config.yaml
   - mcp.json
   - plugins/qkeee-erp   # gateway ERPNext tools + Kanban origin; enabled by cont-init 018-qkeee-erp-plugin
+  # cron/jobs.json's own "qkeee-erp-job-status-poller" entry (agents ADR
+  # 0010/issue 23) names this script; a no_agent cron script must resolve
+  # inside $HERMES_HOME/scripts/, never under cron/ itself (hermes-agent
+  # hermes_cli/profile_distribution.py's _is_installer_owned_path()
+  # refuses every cron/ path except cron/jobs.json — scripts/ is a
+  # sibling top-level dir, not under cron/, so it is not blocked).
+  - scripts/qkeee_erp_job_status_poller.py
