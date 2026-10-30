@@ -236,6 +236,16 @@ erp_execute_write(phase="render",
                   prompt_summary="<one line>", latest_prompt="<msg>")
 # -> {"job_id": "JOB-...", "job_token": "...", "confirmation_code": "...", ...}
 #
+# Safe to call again on a worker respawn: the render re-checks for an
+# existing Pending/Approved job (same requester) whose stored plan
+# exactly matches the batches just rendered and, if found, returns THAT
+# job's job_id/token/confirmation_code unchanged instead of minting a new
+# one (agents issue 17) — expect "this job already exists" as a normal
+# outcome, never an error, and keep using the returned job_id, not any
+# id you generated yourself. A second approval email is sent only when
+# the resumed job is still Pending (a harmless resend to someone who
+# hasn't answered yet); an already-Approved resume sends none.
+#
 # Before rendering a multi-batch job, verify every step can actually
 # succeed, because the render stores the plan verbatim and resolves
 # nothing: (a) run `erp_discover preflight` for EVERY doctype in the
@@ -250,12 +260,33 @@ erp_execute_write(phase="render",
 # the deliveries. Within one batch, reference a prior step's record
 # with name="<FROM_STEP_N>" plus expected_modified={"from_step": N}.
 # A cross-batch payload placeholder <FROM_BATCH_N_STEP_M> is accepted
-# and stored literally by the render but its execute-time resolution
-# is unverified — probe it with a minimal 2-batch job and confirm at
-# execute before building a whole chain on it. Child-table row names
-# (so_detail, dn_detail) are auto-generated and cannot be pre-rendered;
-# link parents by document-level fields (against_sales_order,
-# delivery_note) plus item_code instead and accept the linkage limits.
+# and stored literally by the render; resolution happens at EXECUTE time,
+# reading the job's durable execution_log (issue 16) — confirmed working
+# across two fully separate execute calls, even in a brand-new process/
+# worker dispatch (agents issue 18, regression-tested as two separate
+# connector() contexts). Worked example: batch 1 step 1 creates a
+# Customer, batch 2 step 1's payload references it. Each call is a
+# "Kanban child task" execute (below) — `batch` must still be exactly
+# the job's stored batch N, unchanged.
+erp_execute_write(phase="execute",
+                  batch=[{"op": "sales.generic", "args": {"doctype": "Customer",
+                                                          "action": "create", "payload": {...}}}],
+                  job_id="<job_id>", job_batch_index=1, prompt_summary="<one line>")
+# -> batch 1 runs; its step 1's record name is written to execution_log.
+erp_execute_write(phase="execute",
+                  batch=[{"op": "auto", "args": {"doctype": "Sales Order", "action": "create",
+                                                 "payload": {"customer": "<FROM_BATCH_1_STEP_1>",
+                                                             ...}}}],
+                  job_id="<job_id>", job_batch_index=2, prompt_summary="<one line>")
+# -> <FROM_BATCH_1_STEP_1> resolves from the stored log even though this
+# may be a different worker dispatch than batch 1's. An unresolved
+# reference (that batch hasn't run yet, parked, failed, or wasn't a
+# create) refuses clearly, naming which batch/step — never sends ERPNext
+# a literal placeholder string. Still resolves only to the record's own
+# `name`, never a child-table row name: so_detail/dn_detail rows are
+# auto-generated and cannot be pre-rendered; link parents by
+# document-level fields (against_sales_order, delivery_note) plus
+# item_code instead and accept the linkage limits.
 
 # Kanban job approval email (agents ADR 0008): one email with the full
 # ordered plan for a kanban job instead of one chat confirmation per
@@ -350,6 +381,19 @@ erp_execute_write(phase="execute", batch=[{"op": "...", "args": {...}}],
 # parked step's `error` (`write_failure` when ERPNext rejected it
 # outright) and `checked` in the close-out (`03-spec-driven-execution.md`
 # step 7) with the specific decision needed — never silently drop it.
+#
+# What a parked step's own row in `result.steps[]` looks like (agents
+# issue 19 — step 2 here rejected a missing mandatory field; step 1 and
+# 3 are unaffected and already ran): {"step": 2, "op": "auto",
+# "doctype": "Sales Invoice", "action": "submit", "status": "parked",
+# "error": "...missing field 'cost_center'...", "refused": false,
+# "outcome_unknown": false, "write_failure": {"error_class": "...",
+# "missing_fields": ["cost_center"], ...}, "checked": "erp_discover
+# meta(Sales Invoice): cost_center is mandatory, no default"}.
+# `result.counts` -> {"succeeded": 2, "failed": 0, "parked": 1,
+# "not_attempted": 0}. Tell the user plainly: "Step 2 (submit Sales
+# Invoice <name>) is parked — ERPNext needs a cost_center and none is
+# set; the rest of the job kept running."
 
 # Binding the Requester's reply to a job (agents ADR 0008, issue 09): the
 # approval email's subject is "[<tag>] Approval needed: job <job_id> (...
