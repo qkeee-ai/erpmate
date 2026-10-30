@@ -90,7 +90,9 @@ class JobTokenTests(unittest.TestCase):
 class PrepareJobTests(unittest.TestCase):
 
     def test_renders_every_batch_and_stores_the_plan(self):
-        with connector() as m:
+        with connector() as m, patch.object(
+                core_client, "monitor_channel",
+                return_value={"platform": "google_chat", "channel_id": "spaces/A"}):
             out = _render(BATCHES)
         self.assertEqual([b["batch"] for b in out["batches"]], [1, 2])
         self.assertEqual(len(out["batches"][0]["steps"]), 1)
@@ -108,6 +110,10 @@ class PrepareJobTests(unittest.TestCase):
         self.assertEqual(body["status"], "Pending")
         self.assertEqual(body["requested_by"], testsupport.REQ)
         self.assertEqual(json.loads(body["plan"]), out["job"])
+        # Issue 16: the dispatching session's channel, captured at render
+        # time, is the job's monitor of record (agents ADR 0010 point 4).
+        self.assertEqual(body["monitor_platform"], "google_chat")
+        self.assertEqual(body["monitor_channel_id"], "spaces/A")
 
     def test_no_job_id_refused(self):
         with connector():
@@ -180,6 +186,63 @@ class JobApprovalMarkApprovedOpTests(unittest.TestCase):
             with self.assertRaises(core_client.PreconditionFailedError):
                 operations.run_operation("job_approval.mark_approved", {"job_id": "JOB-1"},
                                          testsupport.ctx())
+        self.assertFalse(m["_do_mutate"].called)
+
+
+class JobApprovalAppendLogOpTests(unittest.TestCase):
+    """Issue 16's per-step execution ledger (agents ADR 0010 point 1):
+    append_execution_log() is the one place that reads-modifies-writes
+    the stored row's execution_log; job_approval.append_log is its
+    dedicated (cli=False, internal-only) write operation."""
+
+    def test_not_a_cli_operation(self):
+        self.assertIn("job_approval.append_log", operations.REGISTRY)
+        self.assertNotIn("job_approval.append_log", {op.key for op in operations.list_operations()})
+
+    def test_does_not_claim_ownership_already_held_by_mark_approved(self):
+        # register_operation() raises at import if two DIFFERENT operations
+        # claim the same (doctype, action) pair — append_log must not try.
+        self.assertEqual(operations.owned_by("Qkeee Bot Job Approval", "update"),
+                         "job_approval.mark_approved")
+
+    def test_wrong_args_refused(self):
+        with connector():
+            with self.assertRaises(core_client.InvalidArgumentsError):
+                operations.run_operation("job_approval.append_log", {"job_id": "J-1"},
+                                         testsupport.ctx())
+
+    def test_extends_the_stored_log_and_saves_it(self):
+        with connector() as m:
+            m["get_resource"].return_value = {
+                "data": {"job_id": "JOB-1",
+                        "execution_log": json.dumps([{"batch_index": 1, "step_index": 1,
+                                                      "name": "SO-1", "modified": "2026-01-01",
+                                                      "outcome": "succeeded"}])}}
+            operations.append_execution_log(
+                "JOB-1", [{"batch_index": 2, "step_index": 1, "name": "SO-2",
+                          "modified": "2026-01-02", "outcome": "succeeded"}], testsupport.ctx())
+        self.assertEqual(m["_do_mutate"].call_args.args[1], "Qkeee Bot Job Approval")
+        self.assertEqual(m["_do_mutate"].call_args.args[2], "update")
+        self.assertEqual(m["_do_mutate"].call_args.args[4], "JOB-1")
+        saved = json.loads(m["_do_mutate"].call_args.args[3]["execution_log"])
+        self.assertEqual(saved, [{"batch_index": 1, "step_index": 1, "name": "SO-1",
+                                  "modified": "2026-01-01", "outcome": "succeeded"},
+                                 {"batch_index": 2, "step_index": 1, "name": "SO-2",
+                                  "modified": "2026-01-02", "outcome": "succeeded"}])
+
+    def test_starts_the_log_fresh_when_the_stored_row_has_none_yet(self):
+        with connector() as m:
+            m["get_resource"].return_value = {"data": {"job_id": "JOB-1"}}
+            operations.append_execution_log(
+                "JOB-1", [{"batch_index": 1, "step_index": 1, "name": "SO-1",
+                          "modified": "2026-01-01", "outcome": "succeeded"}], testsupport.ctx())
+        saved = json.loads(m["_do_mutate"].call_args.args[3]["execution_log"])
+        self.assertEqual(len(saved), 1)
+
+    def test_no_entries_writes_nothing(self):
+        with connector() as m:
+            operations.append_execution_log("JOB-1", [], testsupport.ctx())
+        self.assertFalse(m["get_resource"].called)
         self.assertFalse(m["_do_mutate"].called)
 
 

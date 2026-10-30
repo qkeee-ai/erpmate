@@ -575,6 +575,25 @@ def _session_sender_email() -> str:
 # rather than accept a requester typed by the agent or the user.
 _EMAIL_SENDER_PLATFORMS = frozenset({"google_chat", "email"})
 _SESSION_PLATFORM_ENV = "HERMES_SESSION_PLATFORM"
+_SESSION_CHAT_ID_ENV = "HERMES_SESSION_CHAT_ID"
+_SESSION_THREAD_ID_ENV = "HERMES_SESSION_THREAD_ID"
+
+
+def monitor_channel() -> dict:
+    """{"platform", "channel_id"} for whichever session renders a kanban
+    job (prepare_job(), agents ADR 0010 point 4) — the durable channel a
+    later proactive update (issues 21-23) addresses itself back to. A
+    plain gateway turn has its own platform + chat_id/thread_id directly;
+    a Kanban worker has neither (every HERMES_SESSION_* var is cleared for
+    it) — the same gap _session_sender_email() already falls back on, so
+    this reuses that SAME recorded task origin (core/kanban_origin.py),
+    never a second store."""
+    platform = session_env(_SESSION_PLATFORM_ENV).strip()
+    channel_id = (session_env(_SESSION_CHAT_ID_ENV).strip()
+                 or session_env(_SESSION_THREAD_ID_ENV).strip())
+    origin = _kanban_origin() or {}
+    return {"platform": platform or origin.get("platform") or None,
+            "channel_id": channel_id or origin.get("chat_id") or None}
 # Set by Hermes only inside the execute_code sandbox child
 # (tools/code_execution_env.py), which also strips HERMES_SESSION_*.
 _EXECUTE_CODE_SANDBOX_ENV = "HERMES_RPC_SOCKET"

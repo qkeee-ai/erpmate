@@ -260,7 +260,8 @@ class JobBatchTests(unittest.TestCase):
         self.assertIsNone(ctx.user_confirmation_text)
         report, m = self._run(index=2)
         self.assertEqual(report["counts"], {"succeeded": 4, "failed": 0, "not_attempted": 0})
-        self.assertEqual(m["_do_mutate"].call_count, 4)
+        # 4 step writes + one durable execution-log append (issue 16).
+        self.assertEqual(m["_do_mutate"].call_count, 5)
 
     def test_match_check_uses_the_stored_requester_not_ctxs(self):
         """The executing kanban worker's own ctx.requested_by (its service
@@ -272,8 +273,12 @@ class JobBatchTests(unittest.TestCase):
         self.assertFalse(report["stopped_at"])
 
     def test_every_audit_row_names_the_job_and_batch_position(self):
+        # Excludes the one extra audit row from the batch's own durable
+        # execution-log append (issue 16), which names the Job Approval
+        # doctype, not a step's own doctype.
         _, m = self._run(index=2)
-        notes = [c.kwargs["approval_note"] for c in m["record_audit_log_start"].call_args_list]
+        notes = [c.kwargs["approval_note"] for c in m["record_audit_log_start"].call_args_list
+                if c.kwargs["doctype"] != core_client.JOB_APPROVAL_DOCTYPE]
         self.assertEqual(len(notes), 4)
         for i, note in enumerate(notes, start=1):
             self.assertIn(f"job {JOB_ID} batch 2/2 step {i}/4", note)
@@ -281,8 +286,44 @@ class JobBatchTests(unittest.TestCase):
     def test_first_batch_of_the_job_is_also_addressable(self):
         report, m = self._run(index=1)
         self.assertEqual(report["counts"]["succeeded"], 1)
-        note = m["record_audit_log_start"].call_args.kwargs["approval_note"]
-        self.assertIn(f"job {JOB_ID} batch 1/2 step 1/1", note)
+        # The batch's own step audit row, not the trailing execution-log
+        # append's (issue 16) — filter by doctype rather than "most recent".
+        step_calls = [c for c in m["record_audit_log_start"].call_args_list
+                     if c.kwargs["doctype"] != core_client.JOB_APPROVAL_DOCTYPE]
+        self.assertIn(f"job {JOB_ID} batch 1/2 step 1/1", step_calls[-1].kwargs["approval_note"])
+
+    def test_a_failed_step_is_logged_as_failed_not_silently_dropped(self):
+        # Issue 16's ledger must distinguish "this step failed" from "it
+        # never ran" — not just record successes.
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            m["_do_mutate"].side_effect = [
+                core_client.WriteRejectedError(
+                    "boom", {"error_class": "ValidationError", "missing_fields": [],
+                            "invalid_links": [], "message": "boom"}),
+                {"data": {"name": "JOB-7"}},
+            ]
+            report = operations.run_batch(copy.deepcopy(JOB_PLAN[0]), testsupport.ctx(),
+                                          job_id=JOB_ID, job_batch_index=1)
+        self.assertEqual(report["counts"], {"succeeded": 0, "failed": 1, "not_attempted": 0})
+        append_call = next(c for c in m["_do_mutate"].call_args_list
+                           if c.args[1] == core_client.JOB_APPROVAL_DOCTYPE)
+        logged = json.loads(append_call.args[3]["execution_log"])
+        self.assertEqual(logged, [{"batch_index": 1, "step_index": 1, "name": None,
+                                   "modified": None, "outcome": "failed"}])
+
+    def test_execution_log_append_failure_does_not_discard_the_batchs_real_outcomes(self):
+        # The batch's own writes already happened for real; a transient
+        # failure saving the ledger entry must be reported, not raised
+        # past run_batch() where it would hide those real outcomes.
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            m["_do_mutate"].side_effect = (
+                [{"data": {"name": "I-1"}}] * 4 + [core_client.ConnectorError("network blip")])
+            report = operations.run_batch(copy.deepcopy(JOB_PLAN[1]), testsupport.ctx(),
+                                          job_id=JOB_ID, job_batch_index=2)
+        self.assertEqual(report["counts"], {"succeeded": 4, "failed": 0, "not_attempted": 0})
+        self.assertIn("network blip", report["execution_log_error"])
 
     def test_job_not_approved_is_refused(self):
         with self.assertRaises(core_client.PreconditionFailedError):
@@ -372,7 +413,8 @@ class JobBatchToolTests(unittest.TestCase):
             out = json.loads(handle({"phase": "execute", "batch": copy.deepcopy(JOB_PLAN[1]),
                                      "job_id": JOB_ID, "job_batch_index": 2}))
         self.assertTrue(out["ok"], out)
-        self.assertEqual(m["_do_mutate"].call_count, 4)
+        # 4 step writes + one durable execution-log append (issue 16).
+        self.assertEqual(m["_do_mutate"].call_count, 5)
 
 
 if __name__ == "__main__":

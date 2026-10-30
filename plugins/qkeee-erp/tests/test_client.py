@@ -955,6 +955,52 @@ class KanbanWorkerRequesterTests(unittest.TestCase):
         self.assertEqual(snap["resolved_sender_email"], "nikhil@org.com")
 
 
+class MonitorChannelTests(unittest.TestCase):
+    """Issue 16/ADR 0010 point 4: the channel a kanban job's monitor
+    (issues 21-23) addresses a later proactive update back to — a plain
+    gateway turn's own platform/chat_id directly, else (Kanban worker,
+    HERMES_SESSION_* cleared) the same recorded task origin
+    _session_sender_email() already falls back on. Fixture mirrors
+    KanbanWorkerRequesterTests above (same store, same env-clearing
+    shape) rather than reinventing it per test."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+
+    def _worker(self, task_id, **env):
+        base = {"HERMES_HOME": self.home, "HERMES_KANBAN_TASK": task_id,
+               "HERMES_SESSION_SOURCE": "kanban", "HERMES_SESSION_PLATFORM": "",
+               "HERMES_SESSION_CHAT_ID": "", "HERMES_SESSION_THREAD_ID": ""}
+        return patch.dict("os.environ", {**base, **env})
+
+    def test_gateway_session_uses_its_own_platform_and_chat_id(self):
+        env = {"HERMES_SESSION_PLATFORM": "google_chat", "HERMES_SESSION_CHAT_ID": "spaces/A",
+              "HERMES_SESSION_THREAD_ID": "threads/T"}
+        with patch.dict("os.environ", env):
+            self.assertEqual(ec.monitor_channel(), {"platform": "google_chat", "channel_id": "spaces/A"})
+
+    def test_gateway_session_falls_back_to_thread_id_when_chat_id_is_absent(self):
+        with patch.dict("os.environ", {"HERMES_SESSION_PLATFORM": "email",
+                                        "HERMES_SESSION_THREAD_ID": "<msg-1@bot>"}):
+            self.assertEqual(ec.monitor_channel(), {"platform": "email", "channel_id": "<msg-1@bot>"})
+
+    def test_kanban_worker_falls_back_to_its_tasks_recorded_origin(self):
+        from qkeee_erp_plugin.qkeee_erp.core import kanban_origin
+        kanban_origin.record_origin(kanban_origin.default_store_path(self.home), "t_job",
+                                    {"platform": "google_chat", "user_id": "nikhil@org.com",
+                                     "chat_id": "spaces/ORIGIN"})
+        with self._worker("t_job"):
+            self.assertEqual(ec.monitor_channel(),
+                             {"platform": "google_chat", "channel_id": "spaces/ORIGIN"})
+
+    def test_kanban_worker_without_origin_has_no_channel(self):
+        with self._worker("t_orphan"):
+            self.assertEqual(ec.monitor_channel(), {"platform": None, "channel_id": None})
+
+
 class SessionEnvReaderTests(unittest.TestCase):
     """Issue 04: inside the gateway process the session sender lives in
     per-turn ContextVars, not os.environ. The plugin installs a reader."""

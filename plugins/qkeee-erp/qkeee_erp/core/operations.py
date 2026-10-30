@@ -1070,6 +1070,7 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
     else:
         prepared, label_prefix = None, None
     written = {}
+    log_entries = []
     rows, stopped_at = [], None
     for i, step in enumerate(steps, start=1):
         args = step.get("args") or {}
@@ -1107,12 +1108,23 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
                 row["write_failure"] = e.failure
             if isinstance(e, _c.StateNotConfirmedError):
                 row.update(outcome="not_applied", state_confirmed=False, read_back=e.read_back)
+            if job_id is not None:
+                # A later batch/the resume poller (issues 17/18) must see
+                # that this step failed, not just silence where its entry
+                # would be — an all-success ledger can't distinguish
+                # "nothing ran yet" from "this one broke".
+                log_entries.append({"batch_index": job_batch_index, "step_index": i,
+                                    "name": None, "modified": None, "outcome": "failed"})
             rows.append(row)
             continue
         record = _written_record(result)
         if prepared:
             req = prepared[i - 1][2]
             written[i] = (req.doctype, record.get("name") or req.name, record.get("modified"))
+            if job_id is not None:
+                log_entries.append({"batch_index": job_batch_index, "step_index": i,
+                                    "name": written[i][1], "modified": written[i][2],
+                                    "outcome": "succeeded"})
         data = result.get("data") if isinstance(result, dict) else None
         row.update(status="succeeded",
                    name=(data or {}).get("name") if isinstance(data, dict) else args.get("name"),
@@ -1124,7 +1136,17 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
         rows.append(row)
     counts = {s: sum(r["status"] == s for r in rows)
               for s in ("succeeded", "failed", "not_attempted")}
-    return {"steps": rows, "stopped_at": stopped_at, "counts": counts}
+    report = {"steps": rows, "stopped_at": stopped_at, "counts": counts}
+    if job_id is not None:
+        try:
+            append_execution_log(job_id, log_entries, ctx)
+        except _c.ConnectorError as e:
+            # This batch's steps already ran for real (rows/counts above
+            # already reflect it) — losing the durable record of THAT
+            # must never also discard the outcomes themselves by raising
+            # past here.
+            report["execution_log_error"] = str(e)
+    return report
 
 
 _COMPACT_KEYS = ("name", "doctype", "docstatus", "modified")
@@ -1252,14 +1274,21 @@ def prepare_job(batches: list, ctx: WriteContext, job_id: str, issued_at: int = 
         # token_policy is — it's the job-level approval the email + reply
         # mechanism authenticates, not any one step.
         confirmation_code=_c.confirmation_code(token))
+    # The monitor of record (agents ADR 0010 point 4): whichever session
+    # renders this job is the one that stores its own channel identity —
+    # read once, here, not re-resolved later from whatever session happens
+    # to be active when a proactive update eventually fires.
+    monitor = _c.monitor_channel()
     run_operation("job_approval.create", {
         "job_id": job_id, "token": token, "issued_at": issued, "step_count": step_count,
-        "plan": json.dumps(out["job"])}, ctx)
+        "plan": json.dumps(out["job"]), "monitor_platform": monitor["platform"],
+        "monitor_channel_id": monitor["channel_id"]}, ctx)
     return out
 
 
 def _job_approval_create_prepare(args: dict, ctx: WriteContext) -> PreparedRequest:
-    required = {"job_id", "token", "issued_at", "step_count", "plan"}
+    required = {"job_id", "token", "issued_at", "step_count", "plan", "monitor_platform",
+                "monitor_channel_id"}
     if set(args) != required:
         raise _c.InvalidArgumentsError(
             f"job_approval.create needs exactly {sorted(required)}, got {sorted(args)}.")
@@ -1267,7 +1296,8 @@ def _job_approval_create_prepare(args: dict, ctx: WriteContext) -> PreparedReque
         transport="resource", doctype=_c.JOB_APPROVAL_DOCTYPE, action="create",
         body={"job_id": args["job_id"], "requested_by": ctx.requested_by, "token": args["token"],
               "issued_at": args["issued_at"], "step_count": args["step_count"],
-              "status": "Pending", "plan": args["plan"]})
+              "status": "Pending", "plan": args["plan"], "monitor_platform": args["monitor_platform"],
+              "monitor_channel_id": args["monitor_channel_id"]})
 
 
 register_operation(Operation(
@@ -1306,6 +1336,47 @@ register_operation(Operation(
     # is ever called (issue 05) — never a direct CLI/agent entry point.
     cli=False,
 ))
+
+
+def _job_approval_append_log_prepare(args: dict, ctx: WriteContext) -> PreparedRequest:
+    required = {"job_id", "execution_log"}
+    if set(args) != required:
+        raise _c.InvalidArgumentsError(
+            f"job_approval.append_log needs exactly {sorted(required)}, got {sorted(args)}.")
+    return PreparedRequest(transport="resource", doctype=_c.JOB_APPROVAL_DOCTYPE, action="update",
+                           name=args["job_id"], body={"execution_log": args["execution_log"]})
+
+
+register_operation(Operation(
+    key="job_approval.append_log", domain=None,
+    summary="record this batch's step outcomes in a job's durable execution log",
+    prepare=_job_approval_append_log_prepare, token_policy=POLICY_NONE, allowlist_domain=None,
+    # Not `owns`: job_approval.mark_approved already owns ("...", "update")
+    # for the generic-op-exclusion check (one operation per (doctype,
+    # action) pair, register_operation()'s own rule) — this op doesn't
+    # need to claim it too.
+    cli=False,
+))
+
+
+def append_execution_log(job_id: str, entries: list, ctx: WriteContext) -> None:
+    """Durably append `entries` (each {batch_index, step_index, name,
+    modified, outcome}) to job `job_id`'s stored execution_log (agents ADR
+    0010, issue 16) — what lets a later batch resolve
+    <FROM_BATCH_N_STEP_M> from this row instead of the rendering
+    process's own memory, across a kanban child-task worker respawn (the
+    confirmed-broken case, 29-Oct run). One read-modify-write per
+    run_batch() call, not per step: the durability boundary that matters
+    is between batches, each its own dispatched worker process: steps
+    inside the SAME batch already resolve from_step via run_batch()'s own
+    `written` dict."""
+    if not entries:
+        return
+    data = get_job_approval(job_id, ctx)
+    log = json.loads(data.get("execution_log") or "[]")
+    log.extend(entries)
+    run_operation("job_approval.append_log",
+                  {"job_id": job_id, "execution_log": json.dumps(log)}, ctx)
 
 
 def get_job_approval(job_id: str, ctx: WriteContext) -> dict:

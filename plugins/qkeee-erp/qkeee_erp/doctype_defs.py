@@ -146,6 +146,22 @@ JOB_APPROVAL = {
          "description": "Every batch's {op, args} list, in order — the exact plan job_token() "
                          "was computed over, for a later process to recompute against (issue "
                          "06)."},
+        {"fieldname": "execution_log", "label": "Execution Log (JSON)", "fieldtype": "Long Text",
+         "default": "[]",
+         "description": "Append-only list of {batch_index, step_index, name, modified, outcome} "
+                         "entries, one per step that actually completed — durable across a kanban "
+                         "child-task worker respawn (agents ADR 0010), so a later batch can resolve "
+                         "<FROM_BATCH_N_STEP_M> from this row instead of needing it in the "
+                         "rendering process's own memory (issue 16)."},
+        {"fieldname": "monitor_platform", "label": "Monitor Platform", "fieldtype": "Data",
+         "description": "The platform (e.g. google_chat, email) of whichever session first "
+                         "dispatched this job — captured at render time (prepare_job()), so a "
+                         "later proactive update (issues 21-23) has a durable channel to address "
+                         "itself to, never guessed from whichever session happens to be active "
+                         "when the update fires (agents ADR 0010)."},
+        {"fieldname": "monitor_channel_id", "label": "Monitor Channel ID", "fieldtype": "Data",
+         "description": "That dispatching session's chat_id/thread or equivalent channel "
+                         "identity, paired with monitor_platform."},
     ],
     "permissions": [
         _perm(ROLE_NAME, read=1, write=1, create=1),
