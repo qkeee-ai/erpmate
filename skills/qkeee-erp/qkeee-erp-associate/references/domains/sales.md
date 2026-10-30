@@ -14,6 +14,20 @@ Composing drafts and reports below is prompt discipline.
 Customer onboarding, drafting a quotation, checking where a Sales Order
 or Delivery Note stands, a lightweight sales pipeline view.
 
+## Side effects to name up front
+
+- **Sales Order creation can silently auto-create `Item Price` rows.**
+  Live finding (29-Oct run): creating Sales Orders auto-created `Item
+  Price` records outside the planned write set, with nothing in the
+  spec or preflight naming it (likely trigger: a price list with no
+  existing rate for the item/UOM on that line, which ERPNext then backs
+  into an `Item Price` row rather than failing). A spec that creates
+  Sales Orders and may need a rollback must name this in its Rollback
+  section up front — query `Item Price` created in the same window
+  (creation timestamp against the batch's run time, same approach as
+  Sales Order/Customer rollback) rather than discovering the extra
+  records after the fact via a reconstruction.
+
 ## Non-negotiables specific to this domain
 
 - **A Quotation is drafted, never auto-submitted as a formal customer

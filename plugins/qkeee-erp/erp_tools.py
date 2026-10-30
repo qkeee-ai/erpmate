@@ -309,6 +309,14 @@ class ErpTools:
         if missing:
             raise client.ConnectorError(f"missing required argument(s): {', '.join(missing)}")
 
+    @staticmethod
+    def _write_steps(args, batch):
+        return batch if batch is not None else [{"op": args["op"], "args": args.get("args") or {}}]
+
+    @staticmethod
+    def _gated(steps):
+        return any(operations.requires_confirmation(s.get("op") or "", s.get("args") or {}) for s in steps)
+
     # -- reads ---------------------------------------------------------------
 
     def _query(self, args):
@@ -415,6 +423,16 @@ class ErpTools:
             raise client.ConnectorError(
                 "job_id and batch_token are mutually exclusive — a batch is approved by a fresh "
                 "chat code or a job-level email approval, never both.")
+        if (batches is None and not args.get("job_id")
+                and client.session_env("HERMES_SESSION_SOURCE") == "kanban"
+                and self._gated(self._write_steps(args, batch))):
+            raise Refused(
+                    "Refusing: a kanban-dispatched (headless) worker has no live chat session to "
+                    "receive a confirmation code, so a plain batch/op render or execute for a "
+                    "confirmation-gated step cannot be approved here. Nothing was sent. Use "
+                    "erp_execute_write phase=render with `batches` instead (agents ADR 0008's "
+                    "job-level email approval), then execute each batch with job_id and "
+                    "job_batch_index.")
         requester = self._requester()
         ctx = self._context(args, requester)
         if phase == "render" and batches is not None:
@@ -458,12 +476,11 @@ class ErpTools:
                                 "confirmation_token and issued_at as given, and the user's own reply "
                                 "as user_confirmation_text.")
             return _ok(out)
-        steps = batch if batch is not None else [{"op": args["op"], "args": args.get("args") or {}}]
+        steps = self._write_steps(args, batch)
         if not isinstance(steps, list) or not steps or not all(isinstance(s, dict) for s in steps):
             raise client.ConnectorError("batch must be a non-empty list of step objects.")
         job_id = args.get("job_id")
-        gated = any(operations.requires_confirmation(s.get("op") or "", s.get("args") or {})
-                    for s in steps)
+        gated = self._gated(steps)
         # A job-approved batch has no live chat session to cite latest_prompt
         # from (the point of ADR 0008) — the job's own email-approval trail
         # is the audit record instead, not a chat message.

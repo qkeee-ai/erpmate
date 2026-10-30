@@ -55,6 +55,22 @@ where the detail actually lives (a spec file, a domain doctype, a
 comment thread) — a decision or a finding lives in exactly one place,
 never restated across the card and its detail going out of sync.
 
+**One anchor spec per objective, one per-card spec per card.** For a
+multi-card objective, write one **anchor spec** at the usual path
+(`./qkeee-erp-specs/<slug>-<YYYYMMDD-HHMM>.md`): the objective, the
+global Deviations log, and the planned batch/card count. Then write one
+**per-card spec** per kanban card
+(`./qkeee-erp-specs/<slug>-card-<NN>-<YYYYMMDD-HHMM>.md`): that card's
+own scope, its actual batch boundary, and its confirmation/token state.
+Each card's `kanban_comment` links to its own per-card spec path rather
+than restating that detail inline — the card stays an index, per the
+rule above. This is a parallel, human-readable record alongside the
+doctype-backed per-step ledger (issue 16), not a replacement for it: a
+human can read what a card is doing without querying ERPNext. It also
+makes a divergence between the anchor's planned count and a card's
+actual batch boundary a diffable fact instead of something only a human
+re-reading the chat transcript would catch.
+
 ## When a spec is required
 
 **Required:** any write (create/update/submit/cancel/delete), any
@@ -154,6 +170,21 @@ unreviewed multi-step write costs a lot.
    seen the digest and given an explicit go-ahead or edits, or
    (autonomous mode) the header carries the `Approval: autonomous (…)`
    mark.
+
+   **Carve-out: the job-level email approval path is its own
+   approval-seeking action.** When execution follows the ADR 0008/0010
+   job-level path (`erp_execute_write` render with `batches`, then
+   `op=notify.job_approval_request`), rendering and sending that email
+   **is** this step's approval-seeking action — it is the artifact that
+   asks the Requester to approve, same as ADR 0008 intends. Don't also
+   wait for a separate chat "yes" in front of it: once the user has asked
+   for the job plan to be rendered and sent, proceed straight from
+   draft/persist to rendering and sending the job-approval email in the
+   same turn, then wait for the Requester's email reply (steps 5/6) as
+   the actual approval. This carve-out is scoped to the job-email path
+   only; every other execution path (a plain spec run turn-by-turn in one
+   session, a single confirmation-token write) keeps the chat-digest-then-
+   wait-for-"yes" gate above.
 5. **Update on feedback.** Fold every user edit into the persisted file
    itself (not just into conversation) before proceeding — the file on
    disk is the record of what was actually approved, so it must match

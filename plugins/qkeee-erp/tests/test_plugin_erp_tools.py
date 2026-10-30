@@ -201,6 +201,46 @@ class ExecuteWriteToolTests(ToolTestCase):
                              "args": {"doctype": "Sales Order", "action": "create", "payload": {}}})
         self.assertEqual(out["write_failure"]["missing_fields"], ["customer"])
 
+    def test_kanban_session_refuses_a_plain_gated_batch_instead_of_a_job(self):
+        # issue 20: a kanban-dispatched worker has no live chat session to
+        # receive a batch/op confirmation code — it must be told to use
+        # `batches` (the job-level email approval) instead.
+        kanban_sender = {**SENDER, "HERMES_SESSION_SOURCE": "kanban"}
+        with patch.object(operations, "prepare_batch") as mocked:
+            out = self.call(self.tools(kanban_sender), "erp_execute_write",
+                            {"phase": "render",
+                             "batch": [{"op": "system_admin.disable_user",
+                                        "args": {"name": "a@b.c", "reason": "left"}}]})
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["refused"])
+        self.assertIn("batches", out["error"])
+        mocked.assert_not_called()
+
+    def test_kanban_session_allows_a_job_approved_batch_execute(self):
+        # A batch bound to an already-approved job_id (ADR 0008) is exactly
+        # the alternative the refusal above points to — it must not also
+        # be refused by the same guard.
+        kanban_sender = {**SENDER, "HERMES_SESSION_SOURCE": "kanban"}
+        with patch.object(operations, "run_batch",
+                         return_value={"stopped_at": None}) as mocked:
+            out = self.call(self.tools(kanban_sender), "erp_execute_write",
+                            {"phase": "execute",
+                             "batch": [{"op": "system_admin.disable_user",
+                                        "args": {"name": "a@b.c", "reason": "left"}}],
+                             "job_id": "JOB-1", "job_batch_index": 1})
+        self.assertTrue(out["ok"])
+        mocked.assert_called_once()
+
+    def test_kanban_session_allows_a_plain_batch_needing_no_confirmation(self):
+        kanban_sender = {**SENDER, "HERMES_SESSION_SOURCE": "kanban"}
+        with patch.object(operations, "prepare_batch", return_value={"policy": operations.POLICY_NONE}):
+            out = self.call(self.tools(kanban_sender), "erp_execute_write",
+                            {"phase": "render", "batch": [{"op": "sales.generic",
+                                                            "args": {"doctype": "Sales Order",
+                                                                     "action": "create",
+                                                                     "payload": {}}}]})
+        self.assertTrue(out["ok"])
+
     def test_list_ops_needs_no_requester(self):
         out = self.call(self.tools({}), "erp_execute_write", {"phase": "list_ops"})
         self.assertTrue(any(o["op"] == "sales.generic" for o in out["result"]))
