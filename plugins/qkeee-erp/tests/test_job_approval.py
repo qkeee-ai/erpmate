@@ -141,6 +141,64 @@ class PrepareJobTests(unittest.TestCase):
         self.assertNotEqual(out["policy"], operations.POLICY_NONE)
         self.assertEqual(len(out["confirmation_code"]), 6)
 
+    def test_no_resolvable_monitor_channel_still_stores_the_job(self):
+        # Issue 22's fallback: a dispatching session with no channel
+        # context (e.g. CLI) stores None/None rather than failing — the
+        # job still goes out, addressed to requested_by by email only,
+        # same as notify.job_approval_request's existing default.
+        with connector() as m, patch.object(
+                core_client, "monitor_channel", return_value={"platform": None, "channel_id": None}):
+            _render(BATCHES)
+        body = m["_do_mutate"].call_args.args[3]
+        self.assertIsNone(body["monitor_platform"])
+        self.assertIsNone(body["monitor_channel_id"])
+        self.assertEqual(body["requested_by"], testsupport.REQ)
+
+
+class JobResumeTests(unittest.TestCase):
+    """Issue 17: a kanban worker respawns as a fresh process on every
+    dispatch; re-rendering the identical batches must return the FIRST
+    render's job_id/token/code unchanged, never mint a fresh one and
+    orphan a code the Requester may have already replied to (the
+    confirmed-recurring 28/29-Oct staleness)."""
+
+    def test_rendering_the_same_batches_twice_resumes_the_first_job(self):
+        with connector() as m1:
+            first = _render(BATCHES, job_id="JOB-FIRST")
+        stored_body = m1["_do_mutate"].call_args.args[3]
+
+        with connector() as m2, patch.object(
+                core_client, "query_resource",
+                return_value={"data": [stored_body]}) as mocked_query:
+            second = _render(BATCHES, job_id="JOB-SECOND")
+
+        self.assertEqual(second["job_id"], first["job_id"])
+        self.assertEqual(second["job_token"], first["job_token"])
+        self.assertEqual(second["confirmation_code"], first["confirmation_code"])
+        self.assertEqual(second["step_count"], first["step_count"])
+        self.assertTrue(second["resumed"])
+        self.assertEqual(second["status"], "Pending")
+        mocked_query.assert_called_once()
+        self.assertEqual(mocked_query.call_args.kwargs["filters"],
+                         [["requested_by", "=", testsupport.REQ],
+                          ["status", "in", ["Pending", "Approved"]]])
+        self.assertTrue(mocked_query.call_args.kwargs["internal"])
+        # No second job_approval.create — the existing row is reused as is.
+        m2["_do_mutate"].assert_not_called()
+
+    def test_a_genuinely_different_plan_mints_a_fresh_job(self):
+        with connector() as m1:
+            first = _render(BATCHES, job_id="JOB-FIRST")
+        stored_body = m1["_do_mutate"].call_args.args[3]
+
+        with connector() as m2, patch.object(
+                core_client, "query_resource", return_value={"data": [stored_body]}):
+            second = _render([[GATED_STEP]], job_id="JOB-SECOND")  # a different plan
+
+        self.assertNotEqual(second["job_id"], first["job_id"])
+        self.assertNotIn("resumed", second)
+        m2["_do_mutate"].assert_called_once()  # a genuinely new job_approval.create
+
 
 class JobApprovalCreateOpTests(unittest.TestCase):
 

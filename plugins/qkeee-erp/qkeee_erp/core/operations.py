@@ -1032,6 +1032,52 @@ def _resolve_from_step(i: int, args: dict, req: PreparedRequest, written: dict) 
     return dict(args, expected_modified=modified)
 
 
+_FROM_BATCH_RE = re.compile(r"<FROM_BATCH_(\d+)_STEP_(\d+)>")
+
+
+def _batch_log_lookup(job_id: str, ctx: WriteContext) -> dict:
+    """{(batch_index, step_index): name} from job `job_id`'s stored,
+    durable execution_log (issue 16) — the only source `_resolve_from_batch`
+    below ever reads from, never this process's own memory, since the
+    batch a placeholder refers to may have run in an earlier, separate
+    kanban worker dispatch (agents issue 18)."""
+    entries = json.loads(get_job_approval(job_id, ctx).get("execution_log") or "[]")
+    return {(e.get("batch_index"), e.get("step_index")): e.get("name") for e in entries}
+
+
+def _resolve_from_batch(i: int, args: dict, log_lookup: dict) -> dict:
+    """Substitute every `<FROM_BATCH_N_STEP_M>` placeholder anywhere in
+    `args` (recursively — it may sit inside a nested payload field, not
+    only a top-level one) with the record name batch N's step M actually
+    produced, per `log_lookup` (`_batch_log_lookup()` above). Render
+    stores this placeholder literally, resolving nothing (tool-cookbook.md);
+    this is the execute-time resolution live testing found missing
+    (29-Oct run, agents issue 18). Refuses clearly, naming which batch/
+    step, rather than sending ERPNext a literal unresolved placeholder
+    string."""
+    def resolve(match):
+        batch_n, step_m = int(match.group(1)), int(match.group(2))
+        name = log_lookup.get((batch_n, step_m))
+        if not name:
+            raise _c.PreconditionFailedError(
+                f"batch step {i}: <FROM_BATCH_{batch_n}_STEP_{step_m}> does not resolve — batch "
+                f"{batch_n} step {step_m} has no recorded record name in this job's execution "
+                f"log (it may not have run yet, it failed, or it wasn't a create). Nothing was "
+                f"sent for this step.")
+        return name
+
+    def walk(value):
+        if isinstance(value, str):
+            return _FROM_BATCH_RE.sub(resolve, value) if "<FROM_BATCH_" in value else value
+        if isinstance(value, dict):
+            return {k: walk(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        return value
+
+    return walk(args)
+
+
 def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: str = None,
              job_batch_index: int = None) -> dict:
     """Run several operations in order and STOP AT THE FIRST FAILURE (issue
@@ -1071,6 +1117,11 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
         prepared, label_prefix = None, None
     written = {}
     log_entries = []
+    # Read once, before this batch starts: a step within THIS batch
+    # resolves same-batch references via `written` above; a placeholder
+    # naming an EARLIER batch can only come from durable, already-stored
+    # state (issue 18) — no in-process memory of that batch exists here.
+    batch_log_lookup = _batch_log_lookup(job_id, ctx) if job_id is not None else {}
     rows, stopped_at = [], None
     for i, step in enumerate(steps, start=1):
         args = step.get("args") or {}
@@ -1086,6 +1137,8 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
                     f"batch step {i}: needs 'op' and 'args'; unknown key(s) {sorted(unknown)}")
             if label_prefix is not None:
                 label = f"{label_prefix} step {i}/{len(steps)}"
+                if job_id is not None:
+                    args = _resolve_from_batch(i, args, batch_log_lookup)
                 args = _resolve_from_step(i, args, prepared[i - 1][2], written)
                 step_ctx = dataclasses.replace(ctx.without_confirmation(), batch_approval=label,
                                                approval_note=label)
@@ -1234,6 +1287,50 @@ def job_token(prepared_batches: list, requested_by: str, job_id: str, issued_at)
         issued_at=_c.coerce_issued_at(issued_at), length=len(steps), steps=steps)
 
 
+# Candidate rows a resumed job could possibly match (issue 17): generous
+# relative to the default query_resource() limit of 20 because every
+# Pending/Approved row for this requester is a candidate, not a
+# page of results the caller picks from — missing a genuine match here
+# falls through to minting a duplicate job, the exact bug this issue
+# exists to fix.
+_RESUME_CANDIDATE_LIMIT = 50
+
+
+def _find_resumable_job(job: list, requested_by: str, ctx: WriteContext) -> dict:
+    """An existing Pending or Approved "Qkeee Bot Job Approval" row whose
+    stored plan deep-equals `job` (same batch count, same ops in order —
+    agents issue 17), scoped to the same requester, or {} when none
+    matches. A kanban child-task worker respawns as a fresh process on
+    every dispatch; without this, re-rendering the identical batches
+    mints a brand-new job_id/token every time, orphaning any code the
+    Requester already replied to — confirmed recurring across two live
+    runs (28-Oct: 3x re-block, same card, same cause; 29-Oct: "3 prior
+    blocks on stale confirmation codes"). `internal=True`: this doctype
+    is this connector's own bookkeeping (ADR 0009) — a business Requester
+    holds no direct ERPNext permission on it, same posture as
+    get_job_approval()'s single-row read."""
+    result = _c.query_resource(
+        ctx.tag, _c.JOB_APPROVAL_DOCTYPE,
+        filters=[["requested_by", "=", requested_by], ["status", "in", ["Pending", "Approved"]]],
+        fields=["job_id", "token", "issued_at", "step_count", "plan", "status"],
+        limit=_RESUME_CANDIDATE_LIMIT, requested_by=requested_by, internal=True,
+        **ctx.audit_kwargs())
+    plan_json = json.dumps(job)
+    for row in result.get("data") or []:
+        if row.get("plan") == plan_json:
+            return row
+    return {}
+
+
+def _job_token_fields(token: str, issued_at: int) -> dict:
+    """The three fields derived purely from (token, issued_at) — shared
+    by prepare_job()'s fresh-mint and resumed branches below, which agree
+    on everything except where the token itself came from."""
+    return {"expires_at": _c.expires_at(issued_at, JOB_TOKEN_TTL_SECONDS),
+            "ttl_minutes": JOB_TOKEN_TTL_SECONDS // 60,
+            "confirmation_code": _c.confirmation_code(token)}
+
+
 def prepare_job(batches: list, ctx: WriteContext, job_id: str, issued_at: int = None) -> dict:
     """Render a whole kanban job: every batch's every step prepared as
     prepare_batch() does, then ONE token over the full ordered plan across
@@ -1241,6 +1338,13 @@ def prepare_job(batches: list, ctx: WriteContext, job_id: str, issued_at: int = 
     the plan (job_approval.create) before returning, so the email this
     feeds (issue 04) is backed by a row a later, unrelated process can
     verify against — never only in-memory here.
+
+    Idempotent across a respawn (agents issue 17): before minting
+    anything, checks for an existing Pending/Approved row over this exact
+    plan (_find_resumable_job()) and returns ITS identity unchanged —
+    `job_id` here is then never used; the caller's freshly generated one
+    is simply discarded. Only when no matching row exists does this mint
+    fresh and store a new one, same as before this issue.
 
     `job` holds each batch's {op, args} list to pass back unchanged, the
     same role prepare_batch()'s `batch` key plays for a single batch."""
@@ -1262,18 +1366,26 @@ def prepare_job(batches: list, ctx: WriteContext, job_id: str, issued_at: int = 
     }
     if policy == POLICY_NONE:
         return out
+    existing = _find_resumable_job(out["job"], ctx.requested_by, ctx)
+    if existing:
+        existing_issued_at = _c.coerce_issued_at(existing["issued_at"])
+        out.update(
+            job_id=existing["job_id"], job_token=existing["token"],
+            step_count=int(existing["step_count"]), issued_at=existing_issued_at,
+            **_job_token_fields(existing["token"], existing_issued_at),
+            resumed=True, status=existing["status"])
+        return out
     issued = int(time.time()) if issued_at is None else _c.coerce_issued_at(issued_at)
     token = job_token(prepared_batches, ctx.requested_by, job_id, issued)
     step_count = sum(len(batch) for batch in prepared_batches)
+    # ADR 0008's two-factor proof (code in the reply + sender match)
+    # always applies to a gated job, whatever an individual step's own
+    # token_policy is — it's the job-level approval the email + reply
+    # mechanism authenticates, not any one step. (_job_token_fields()
+    # below supplies confirmation_code from this same token.)
     out.update(
         job_id=job_id, job_token=token, step_count=step_count, issued_at=issued,
-        expires_at=_c.expires_at(issued, JOB_TOKEN_TTL_SECONDS),
-        ttl_minutes=JOB_TOKEN_TTL_SECONDS // 60,
-        # ADR 0008's two-factor proof (code in the reply + sender match)
-        # always applies to a gated job, whatever an individual step's own
-        # token_policy is — it's the job-level approval the email + reply
-        # mechanism authenticates, not any one step.
-        confirmation_code=_c.confirmation_code(token))
+        **_job_token_fields(token, issued))
     # The monitor of record (agents ADR 0010 point 4): whichever session
     # renders this job is the one that stores its own channel identity —
     # read once, here, not re-resolved later from whatever session happens

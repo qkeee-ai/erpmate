@@ -417,5 +417,91 @@ class JobBatchToolTests(unittest.TestCase):
         self.assertEqual(m["_do_mutate"].call_count, 5)
 
 
+# =============================================================== cross-batch placeholders
+#
+# Issue 18/ADR 0010: <FROM_BATCH_N_STEP_M> is accepted and stored literally
+# by render; this is its execute-time resolution, read from the job's
+# durable execution_log — never from any variable shared between batches,
+# since each batch may run in its own, separate kanban worker dispatch.
+
+PLACEHOLDER_JOB = "JOB-PH"
+PLACEHOLDER_PLAN = _rendered_plan([
+    [{"op": "hr_payroll.generic", "args": {"doctype": "Employee", "action": "create",
+                                           "payload": {"first_name": "Arjun"}}}],
+    [{"op": "unscoped.generic", "args": {"doctype": "Interview Type", "action": "create",
+                                         "payload": {"name": "<FROM_BATCH_1_STEP_1>"}}}],
+])
+
+
+def _placeholder_row(execution_log=None, **over):
+    requested_by = over.get("requested_by", testsupport.REQ)
+    issued_at = over.get("issued_at", int(time.time()))
+    with connector():
+        prepared = operations._job_requests(copy.deepcopy(PLACEHOLDER_PLAN),
+                                            testsupport.ctx(requested_by=requested_by), render=False)
+    token = operations.job_token(prepared, requested_by, PLACEHOLDER_JOB, issued_at)
+    row = dict(job_id=PLACEHOLDER_JOB, requested_by=requested_by, token=token, step_count=2,
+              status="Approved", issued_at=issued_at, plan=json.dumps(PLACEHOLDER_PLAN),
+              execution_log=json.dumps(execution_log or []))
+    row.update(over)
+    return row
+
+
+class CrossBatchPlaceholderTests(unittest.TestCase):
+
+    def test_batch_2_resolves_batch_1s_name_from_the_stored_log_alone(self):
+        # First dispatch: batch 1 runs and durably logs its own result.
+        with connector() as m1:
+            m1["get_resource"].side_effect = _get_resource_side_effect(_placeholder_row())
+            m1["_do_mutate"].return_value = {"data": {"name": "EMP-1"}}
+            operations.run_batch(copy.deepcopy(PLACEHOLDER_PLAN[0]), testsupport.ctx(),
+                                 job_id=PLACEHOLDER_JOB, job_batch_index=1)
+            stored_log = json.loads(m1["_do_mutate"].call_args.args[3]["execution_log"])
+        self.assertEqual(stored_log, [{"batch_index": 1, "step_index": 1, "name": "EMP-1",
+                                       "modified": None, "outcome": "succeeded"}])
+
+        # Second dispatch: a brand new connector() — nothing from above is
+        # shared — batch 2's placeholder must resolve purely from the row's
+        # stored execution_log passed in here.
+        with connector() as m2:
+            m2["get_resource"].side_effect = _get_resource_side_effect(
+                _placeholder_row(execution_log=stored_log))
+            report = operations.run_batch(copy.deepcopy(PLACEHOLDER_PLAN[1]), testsupport.ctx(),
+                                          job_id=PLACEHOLDER_JOB, job_batch_index=2)
+        self.assertEqual(report["counts"], {"succeeded": 1, "failed": 0, "not_attempted": 0})
+        sent_payload = m2["_do_mutate"].call_args_list[0].args[3]
+        self.assertEqual(sent_payload["name"], "EMP-1")
+
+    def test_unresolved_placeholder_refuses_clearly_as_a_failed_step(self):
+        # Same convention as _resolve_from_step's own refusal
+        # (test_from_step_refuses_a_different_record above): a batch
+        # stops at the first failure, reported in `steps`, never a raise
+        # out of run_batch() itself.
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(
+                _placeholder_row(execution_log=[]))  # batch 1 never ran
+            report = operations.run_batch(copy.deepcopy(PLACEHOLDER_PLAN[1]), testsupport.ctx(),
+                                          job_id=PLACEHOLDER_JOB, job_batch_index=2)
+        self.assertEqual(report["steps"][0]["status"], "failed")
+        self.assertIn("FROM_BATCH_1_STEP_1", report["steps"][0]["error"])
+        # The one _do_mutate call is the durable "this step failed" log
+        # entry (issue 16) — never the Interview Type create itself.
+        self.assertEqual(m["_do_mutate"].call_count, 1)
+        self.assertEqual(m["_do_mutate"].call_args.args[1], core_client.JOB_APPROVAL_DOCTYPE)
+
+    def test_a_failed_batch_1_leaves_no_name_to_resolve(self):
+        failed_log = [{"batch_index": 1, "step_index": 1, "name": None, "modified": None,
+                      "outcome": "failed"}]
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(
+                _placeholder_row(execution_log=failed_log))
+            report = operations.run_batch(copy.deepcopy(PLACEHOLDER_PLAN[1]), testsupport.ctx(),
+                                          job_id=PLACEHOLDER_JOB, job_batch_index=2)
+        self.assertEqual(report["steps"][0]["status"], "failed")
+        self.assertIn("FROM_BATCH_1_STEP_1", report["steps"][0]["error"])
+        self.assertEqual(m["_do_mutate"].call_count, 1)
+        self.assertEqual(m["_do_mutate"].call_args.args[1], core_client.JOB_APPROVAL_DOCTYPE)
+
+
 if __name__ == "__main__":
     unittest.main()

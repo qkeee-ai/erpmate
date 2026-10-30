@@ -1986,7 +1986,8 @@ def query_resource(tag: str, doctype: str, filters=None, fields: list = None, li
                     *, order_by: str = None, count_only: bool = False,
                     session_id: str = None, domain_code: str = None,
                     requested_by: str = None, channel: str = None, channel_metadata: dict = None,
-                    prompt_summary: str = None, latest_prompt: str = None) -> dict:
+                    prompt_summary: str = None, latest_prompt: str = None,
+                    internal: bool = False) -> dict:
     """Generic resource query — read any DocType with filters/fields.
 
     `filters` goes through normalize_filters() first; `order_by` is one
@@ -2002,10 +2003,15 @@ def query_resource(tag: str, doctype: str, filters=None, fields: list = None, li
     — accepted volume cost (a read-heavy domain like MIS makes Read rows
     the biggest source in the audit trail) in exchange for an audit row on
     every access, no exceptions.
+
+    `internal=True`: same meaning as get_resource()'s own flag — this
+    call is the connector's own plumbing (e.g. the job-resume lookup,
+    issue 17), not a business-intent read on someone's behalf. Skips
+    logging and the RBAC permission check the same way.
     """
     filters = normalize_filters(filters)
     _check_order_by(order_by)
-    _validate_prod_requester(tag, requested_by, doctype, "read",
+    _validate_prod_requester(tag, requested_by, doctype, "read", internal=internal,
                               session_id=session_id, domain_code=domain_code,
                               channel=channel, channel_metadata=channel_metadata,
                               prompt_summary=prompt_summary, latest_prompt=latest_prompt)
@@ -2018,7 +2024,7 @@ def query_resource(tag: str, doctype: str, filters=None, fields: list = None, li
         response = {"count": result.get("message")}
         _log_read(cfg, doctype, None, requested_by, session_id, domain_code, channel,
                   channel_metadata, response_payload=response, prompt_summary=prompt_summary,
-                  latest_prompt=latest_prompt)
+                  latest_prompt=latest_prompt, internal=internal)
         return response
     params = {"limit_page_length": limit + 1}
     if filters:
@@ -2034,7 +2040,8 @@ def query_resource(tag: str, doctype: str, filters=None, fields: list = None, li
     response = {"data": rows[:limit], "has_more": has_more, "limit": limit}
 
     _log_read(cfg, doctype, None, requested_by, session_id, domain_code, channel, channel_metadata,
-              response_payload=response, prompt_summary=prompt_summary, latest_prompt=latest_prompt)
+              response_payload=response, prompt_summary=prompt_summary, latest_prompt=latest_prompt,
+              internal=internal)
 
     return response
 

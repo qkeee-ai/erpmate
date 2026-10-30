@@ -436,13 +436,33 @@ class ErpTools:
         requester = self._requester()
         ctx = self._context(args, requester)
         if phase == "render" and batches is not None:
+            # A freshly generated id, discarded by prepare_job() itself
+            # (issue 17) when an existing Pending/Approved row already
+            # covers this exact plan — always read job_id back from `out`
+            # below, never this local variable, so a resumed job's real
+            # id is what every later instruction actually names.
             job_id = f"JOB-{uuid.uuid4().hex[:10].upper()}"
             out = operations.prepare_job(batches, ctx, job_id)
+            job_id = out.get("job_id") or job_id
             if out.get("policy") == operations.POLICY_NONE:
                 out["_note"] = ("No step in this job needs a confirmation. Execute each batch "
                                 "directly with phase=execute, batch=<that batch>; job_id/"
                                 "job_batch_index are not needed.")
+            elif out.get("resumed") and out.get("status") == "Approved":
+                out["_note"] = (
+                    f"This exact plan already has an Approved job (job_id=\"{job_id}\") — do NOT "
+                    f"send another approval email. Execute each batch directly with "
+                    f"phase=execute, batch=<that batch>, job_id=\"{job_id}\", "
+                    f"job_batch_index=<1-based position>.")
             else:
+                # Covers both a genuinely new job AND a resumed one still
+                # Pending (out.get("resumed") True, status "Pending"): the
+                # Requester hasn't replied yet either way, so the same
+                # "send the approval email" instruction applies — a
+                # resend of the identical job_id/code to a Requester who
+                # hasn't answered is a harmless nudge, unlike resending to
+                # one who already has (the Approved branch above, which
+                # this specifically avoids).
                 out["_note"] = (
                     f"Do NOT show confirmation_code or job_token to the user in chat — this is a "
                     f"job-level approval (agents ADR 0008), approved by email only, never a chat "

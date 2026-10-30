@@ -1778,7 +1778,7 @@ class ProdGateWiringTests(unittest.TestCase):
     def test_query_resource_gates_with_read(self, mocked_request, mocked_cfg, mocked_gate):
         ec.query_resource("prod", "Sales Order", requested_by="priya@org.com")
         mocked_gate.assert_called_once_with("prod", "priya@org.com", "Sales Order", "read",
-                                             session_id=None, domain_code=None,
+                                             internal=False, session_id=None, domain_code=None,
                                              channel=None, channel_metadata=None,
                                              prompt_summary=None, latest_prompt=None)
 

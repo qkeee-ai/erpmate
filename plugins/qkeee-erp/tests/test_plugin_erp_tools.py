@@ -271,12 +271,52 @@ class JobToolTests(ToolTestCase):
         args, kw = mocked.call_args
         self.assertEqual(args[0], [[{"op": "sales.generic", "args": {}}]])
         self.assertEqual(args[1].requested_by, "nikhil@org.com")
-        job_id = args[2]
-        self.assertTrue(job_id.startswith("JOB-"))
+        generated_id = args[2]
+        self.assertTrue(generated_id.startswith("JOB-"))
         self.assertNotIn("AB12CD", out["result"]["_note"])
         self.assertIn("Do NOT show", out["result"]["_note"])
         self.assertIn("notify.job_approval_request", out["result"]["_note"])
-        self.assertIn(job_id, out["result"]["_note"])
+        # The note names the job_id prepare_job() actually returned
+        # ("placeholder" here) — never the caller's own generated id,
+        # which prepare_job() discards when it resumes an existing job
+        # (issue 17).
+        self.assertIn("placeholder", out["result"]["_note"])
+        self.assertNotIn(generated_id, out["result"]["_note"])
+
+    @patch.object(operations, "prepare_job")
+    def test_render_batches_resuming_an_approved_job_skips_the_email_note(self, mocked):
+        # Issue 17: when prepare_job() resumes an existing, already-
+        # Approved job, the agent must not be told to send a SECOND
+        # approval email for it.
+        mocked.return_value = {"policy": operations.POLICY_TOKEN_USER_CODE, "job": [],
+                               "batches": [], "job_id": "JOB-OLD", "job_token": "t",
+                               "confirmation_code": "AB12CD", "expires_at": "2026-10-25T00:00:00Z",
+                               "resumed": True, "status": "Approved"}
+        out = self.call(self.tools(SENDER), "erp_execute_write",
+                        {"phase": "render", "batches": [[{"op": "sales.generic", "args": {}}]]})
+        self.assertTrue(out["ok"])
+        self.assertIn("already has an Approved job", out["result"]["_note"])
+        self.assertIn("JOB-OLD", out["result"]["_note"])
+        self.assertNotIn("notify.job_approval_request", out["result"]["_note"])
+        self.assertNotIn("AB12CD", out["result"]["_note"])
+
+    @patch.object(operations, "prepare_job")
+    def test_render_batches_resuming_a_pending_job_still_sends_the_email_note(self, mocked):
+        # A resumed job still awaiting the Requester's reply gets the same
+        # "send the approval email" instruction as a brand-new one — a
+        # resend of the SAME job_id/code to someone who hasn't answered
+        # yet is a harmless nudge (contrast the Approved case above,
+        # which this deliberately skips).
+        mocked.return_value = {"policy": operations.POLICY_TOKEN_USER_CODE, "job": [],
+                               "batches": [], "job_id": "JOB-OLD", "job_token": "t",
+                               "confirmation_code": "AB12CD", "expires_at": "2026-10-25T00:00:00Z",
+                               "resumed": True, "status": "Pending"}
+        out = self.call(self.tools(SENDER), "erp_execute_write",
+                        {"phase": "render", "batches": [[{"op": "sales.generic", "args": {}}]]})
+        self.assertTrue(out["ok"])
+        self.assertIn("notify.job_approval_request", out["result"]["_note"])
+        self.assertIn("JOB-OLD", out["result"]["_note"])
+        self.assertNotIn("AB12CD", out["result"]["_note"])
 
     @patch.object(operations, "prepare_job", return_value={"policy": operations.POLICY_NONE,
                                                             "job": [], "batches": []})
