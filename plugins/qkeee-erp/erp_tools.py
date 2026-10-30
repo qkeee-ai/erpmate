@@ -110,8 +110,12 @@ SCHEMAS = {
         "prepare the exact request; show its request and confirmation_code to the user and wait for "
         "their reply. execute: run the operation with the rendered args unchanged, plus "
         "confirmation_token, issued_at and the user's own reply, verbatim, as user_confirmation_text "
-        "(never write that text yourself); pass latest_prompt. batch: several steps, stops at the "
-        "first failure. render with batches (plural, agents ADR 0008) instead of batch starts a "
+        "(never write that text yourself); pass latest_prompt. batch: several steps; with job_id "
+        "(a kanban job batch, agents ADR 0010) a step the approved plan didn't anticipate PARKS "
+        "(result.counts.parked > 0) and later independent steps still run — check erp_discover "
+        "and the environment's latched qkeee-erp-learned skill before accepting a park as final, "
+        "and report every parked step's reason in the close-out; a plain chat batch (no job_id) "
+        "still stops at the first failure. render with batches (plural, agents ADR 0008) instead of "
         "kanban job: several batches get ONE email approval instead of one chat code per batch — "
         "never show the returned code/token in chat, send it with op=notify.job_approval_request "
         "instead. confirm_job: after the Requester's email reply arrives as its own turn, bind it "
@@ -510,7 +514,12 @@ class ErpTools:
         if batch is not None:
             report = operations.run_batch(batch, ctx, batch_token=args.get("batch_token"),
                                           job_id=job_id, job_batch_index=args.get("job_batch_index"))
-            return json.dumps({"ok": report["stopped_at"] is None, "result": report}, default=str)
+            # A parked step (agents ADR 0010/issue 19) is not a hard stop —
+            # the rest of the batch kept running — but it is still not a
+            # clean "ok": something needs a human decision. Never silently
+            # fold a park into a plain success.
+            clean = report["stopped_at"] is None and not report["counts"].get("parked")
+            return json.dumps({"ok": clean, "result": report}, default=str)
         result = operations.run_operation(args["op"], args.get("args") or {}, ctx)
         if (isinstance(result, dict) and isinstance(result.get("data"), dict)
                 and not args.get("full_result")):

@@ -131,7 +131,8 @@ class SameCodePathTests(CliTestCase):
 
     def test_execute_write_batch(self):
         steps = [{"op": "sales.generic", "args": {}}]
-        with patch.object(operations, "run_batch", return_value={"stopped_at": None, "steps": []}) as mocked:
+        with patch.object(operations, "run_batch",
+                         return_value={"stopped_at": None, "steps": [], "counts": {"parked": 0}}) as mocked:
             code, _, err = self.run_cli(["execute-write", "--batch", json.dumps(steps),
                                           "--latest-prompt", "go", "--requested-by", REQ])
         self.assertEqual(code, 0, err)

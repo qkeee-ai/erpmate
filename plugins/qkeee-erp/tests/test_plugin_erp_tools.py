@@ -222,7 +222,7 @@ class ExecuteWriteToolTests(ToolTestCase):
         # be refused by the same guard.
         kanban_sender = {**SENDER, "HERMES_SESSION_SOURCE": "kanban"}
         with patch.object(operations, "run_batch",
-                         return_value={"stopped_at": None}) as mocked:
+                         return_value={"stopped_at": None, "counts": {"parked": 0}}) as mocked:
             out = self.call(self.tools(kanban_sender), "erp_execute_write",
                             {"phase": "execute",
                              "batch": [{"op": "system_admin.disable_user",

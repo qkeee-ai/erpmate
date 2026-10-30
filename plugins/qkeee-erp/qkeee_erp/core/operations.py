@@ -1021,6 +1021,10 @@ def _resolve_from_step(i: int, args: dict, req: PreparedRequest, written: dict) 
     if k is None:
         return args
     doctype, name, modified = written.get(k, (None, None, None))
+    if doctype is None and name is None:
+        raise _c.PreconditionFailedError(
+            f"batch step {i}: from_step {k} did not produce a usable record (it was parked or "
+            f"failed earlier in this batch). Nothing was sent for this step.")
     if (doctype, name) != (req.doctype, req.name):
         raise _c.PreconditionFailedError(
             f"batch step {i}: from_step {k} wrote {doctype} {name!r}, a different record from "
@@ -1062,8 +1066,8 @@ def _resolve_from_batch(i: int, args: dict, log_lookup: dict) -> dict:
             raise _c.PreconditionFailedError(
                 f"batch step {i}: <FROM_BATCH_{batch_n}_STEP_{step_m}> does not resolve — batch "
                 f"{batch_n} step {step_m} has no recorded record name in this job's execution "
-                f"log (it may not have run yet, it failed, or it wasn't a create). Nothing was "
-                f"sent for this step.")
+                f"log (it may not have run yet, it was parked, it failed, or it wasn't a "
+                f"create). Nothing was sent for this step.")
         return name
 
     def walk(value):
@@ -1078,6 +1082,67 @@ def _resolve_from_batch(i: int, args: dict, log_lookup: dict) -> dict:
     return walk(args)
 
 
+_PARK_ELIGIBLE_CLASSES = (_c.WriteRejectedError, _c.PreconditionFailedError)
+_HTTP_FORBIDDEN = 403
+
+
+def _is_park_eligible(e: Exception) -> bool:
+    """agents ADR 0010 point 2/issue 19: a step the approved job template
+    did not anticipate — ERPNext rejected the write outright (a structured
+    failure the pipeline already parses: a missing/invalid field) or an
+    operation's own precondition refused it (concurrency, KYC, or — via
+    _resolve_from_step()/_resolve_from_batch(), for a step chained off one
+    that itself parked — an unresolved placeholder, which is exactly how
+    the cascade in run_batch() below falls out of the existing from_step/
+    from_batch machinery with no separate dependency graph needed) — parks
+    that one step instead of stopping the whole job. A plain permission
+    403 ERPNext itself returns, uncaught by any gate above (the ADR's own
+    named example), is the same kind of unanticipated gap. Everything
+    else — a timeout, an unresolved/stale/tampered confirmation, read-only
+    mode, no requester, self-escalation, an outright disallowed doctype —
+    is a systemic problem no park can fix, and still stops the batch."""
+    if isinstance(e, _PARK_ELIGIBLE_CLASSES):
+        return True
+    return isinstance(e, _c.ERPNextAPIError) and e.status == _HTTP_FORBIDDEN
+
+
+def _discover_check(req: PreparedRequest, ctx: WriteContext) -> str:
+    """Best-effort live-metadata check BEFORE a step's park is accepted as
+    final (agents ADR 0010 point 3/issue 19: "First, attempt resolution
+    via erp_discover ... log which check ran and that it came up empty").
+    `discover.py` is a plain Python library this module may call (it
+    imports only client.py, never operations.py — no cycle); the
+    qkeee-erp-learned skill half of that requirement has no Python form
+    and stays a skill-doc obligation (tool-cookbook.md). This never
+    auto-fixes the payload or un-parks the step — issue 19 names no
+    resolution logic to run, only that the live check happens and its
+    result is recorded — and a failure to even run the check is itself
+    recorded, never raised past here: the park already happened for a
+    real reason; this is diagnostic context for the close-out, not a
+    second gate."""
+    from .. import discover  # lazy: avoids a module-load-order assumption, mirrors schema_mapping's own lazy import above
+    try:
+        if req.action == "create":
+            result = discover.preflight(ctx.tag, req.doctype, payload=req.body,
+                                        requested_by=ctx.requested_by, **ctx.audit_kwargs())
+            if result.get("ready"):
+                return (f"erp_discover preflight({req.doctype}): ready=true — live metadata named "
+                       f"no blocker; the rejection may be transient or a rule preflight can't see.")
+            missing = result.get("missing_fields")
+            return (f"erp_discover preflight({req.doctype}): ready=false, "
+                   f"missing_fields={missing!r} — came up empty, no auto-fix attempted."
+                   if missing else
+                   f"erp_discover preflight({req.doctype}): ready=false, no missing_fields named "
+                   f"— came up empty, no auto-fix attempted.")
+        meta = discover.doctype_meta(ctx.tag, req.doctype, requested_by=ctx.requested_by,
+                                     **ctx.audit_kwargs())
+        return (f"erp_discover meta({req.doctype}): module={meta.get('module')!r}, "
+               f"custom_fields_merged={meta.get('custom_fields_merged')!r} — came up empty, "
+               f"no auto-fix attempted.")
+    except Exception as e:  # noqa: BLE001 — diagnostic only, the park stands either way
+        return f"erp_discover check on {req.doctype} failed: {e}"
+
+
 def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: str = None,
              job_batch_index: int = None) -> dict:
     """Run several operations in order and STOP AT THE FIRST FAILURE (issue
@@ -1086,6 +1151,17 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
     every step reports `succeeded`, `failed` or `not_attempted`, so the
     agent can show created / failed / not attempted as one table. Never
     retry or patch a failed step here: ask the user.
+
+    EXCEPTION, job-approved batches only (`job_id` is not None; agents
+    ADR 0010/issue 19): a park-eligible failure (`_is_park_eligible()`) —
+    a step the approved template did not anticipate — reports `parked`
+    instead of `failed` and does NOT stop the batch; later steps that do
+    not depend on the parked one still run. A step chained off a parked
+    one's `<FROM_STEP_N>`/`<FROM_BATCH_N_STEP_M>` parks too, automatically,
+    via the same unresolved-placeholder refusal that already fires for a
+    genuinely failed step. A non-job (`batch_token`) batch keeps the
+    original stop-at-first-failure behavior unchanged — a live chat
+    session is right there to react. `counts` now also tracks `parked`.
 
     With `batch_token` (from prepare_batch(); ctx carries issued_at and the
     user's reply): each step is exactly {"op", "args"}, the whole batch is
@@ -1153,21 +1229,37 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
                     approval_note=step.get("approval_note"))
             result = run_operation(step["op"], args, step_ctx)
         except _c.ConnectorError as e:
-            stopped_at = i
-            row.update(status="failed", error=str(e), refused=isinstance(e, _c.GateRefusal),
+            # agents ADR 0010 point 2/issue 19: within a job-approved
+            # batch, a step the template didn't anticipate parks instead
+            # of stopping every later step in this batch — a live chat
+            # batch (job_id is None) keeps the original stop-at-first-
+            # failure behavior, since a human is right there to react.
+            park = job_id is not None and _is_park_eligible(e)
+            row.update(status="parked" if park else "failed", error=str(e),
+                       refused=isinstance(e, _c.GateRefusal),
                        outcome_unknown=isinstance(e, (_c.TransportTimeoutError,
                                                       _c.PartialOutcomeError)))
             if isinstance(e, _c.WriteRejectedError):
                 row["write_failure"] = e.failure
             if isinstance(e, _c.StateNotConfirmedError):
                 row.update(outcome="not_applied", state_confirmed=False, read_back=e.read_back)
+            checked = _discover_check(prepared[i - 1][2], ctx) if park else None
+            if checked is not None:
+                row["checked"] = checked
             if job_id is not None:
                 # A later batch/the resume poller (issues 17/18) must see
-                # that this step failed, not just silence where its entry
-                # would be — an all-success ledger can't distinguish
-                # "nothing ran yet" from "this one broke".
+                # that this step failed or parked, not just silence where
+                # its entry would be — an all-success ledger can't
+                # distinguish "nothing ran yet" from "this one broke", and
+                # a step chained off THIS one (_resolve_from_step/
+                # _resolve_from_batch) must see no usable record either
+                # way, which is what makes the cascade below automatic.
                 log_entries.append({"batch_index": job_batch_index, "step_index": i,
-                                    "name": None, "modified": None, "outcome": "failed"})
+                                    "name": None, "modified": None,
+                                    "outcome": "parked" if park else "failed",
+                                    **({"checked": checked} if checked is not None else {})})
+            if not park:
+                stopped_at = i
             rows.append(row)
             continue
         record = _written_record(result)
@@ -1188,7 +1280,7 @@ def run_batch(steps: list, ctx: WriteContext, batch_token: str = None, job_id: s
             row["notes"] = list(result["_notes"])
         rows.append(row)
     counts = {s: sum(r["status"] == s for r in rows)
-              for s in ("succeeded", "failed", "not_attempted")}
+              for s in ("succeeded", "failed", "parked", "not_attempted")}
     report = {"steps": rows, "stopped_at": stopped_at, "counts": counts}
     if job_id is not None:
         try:

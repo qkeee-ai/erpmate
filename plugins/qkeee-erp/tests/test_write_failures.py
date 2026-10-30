@@ -151,7 +151,7 @@ class BatchStopRuleTests(_PipelineMixin, unittest.TestCase):
                           (3, "not_attempted", None)])
         self.assertEqual(report["steps"][1]["write_failure"], FIXTURES["MandatoryError"][1])
         self.assertEqual(report["stopped_at"], 2)
-        self.assertEqual(report["counts"], {"succeeded": 1, "failed": 1, "not_attempted": 1})
+        self.assertEqual(report["counts"], {"succeeded": 1, "failed": 1, "parked": 0, "not_attempted": 1})
         self.assertTrue(all(r["doctype"] == "Employee" and r["action"] == "create"
                             for r in report["steps"]))
 
@@ -159,7 +159,7 @@ class BatchStopRuleTests(_PipelineMixin, unittest.TestCase):
         self.mutate_results("A", "B", "C")
         report = operations.run_batch(self.STEPS, testsupport.ctx())
         self.assertIsNone(report["stopped_at"])
-        self.assertEqual(report["counts"], {"succeeded": 3, "failed": 0, "not_attempted": 0})
+        self.assertEqual(report["counts"], {"succeeded": 3, "failed": 0, "parked": 0, "not_attempted": 0})
 
     def test_a_gate_refusal_also_stops_the_batch(self):
         self.mutate_results("A", "B", "C")

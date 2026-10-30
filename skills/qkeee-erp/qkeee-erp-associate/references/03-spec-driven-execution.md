@@ -230,7 +230,18 @@ unreviewed multi-step write costs a lot.
       docstatus, and for a non-submittable doctype the word "live");
       a pointer to the Deviations section; the audit status per write
       (`_audit_log_status`, and the approval basis); open follow-ups
-      (gaps, pending skills, teardown due).
+      (gaps, pending skills, teardown due). **A job-batch execute that
+      parked anything** (agents ADR 0010/issue 19 —
+      `result.counts.parked > 0`): list every parked step by name —
+      which step, ERPNext's own rejection or the precondition that
+      failed (`error`/`write_failure`), the live `erp_discover` check
+      `run_batch()` already ran against it and what it found (`checked`
+      — never re-run the same check yourself, it already came up
+      empty or this wouldn't still be parked), whether the environment's
+      latched `qkeee-erp-learned` skill had an answer, and the specific
+      decision still needed. Never fold a parked step into the records
+      table as if it succeeded, and never drop it silently because the
+      rest of the job otherwise finished.
    Leave the file in place — it's the audit trail for this task, not
    deleted on success. Working-scratch files are disposable across
    *sessions* (`01-connectivity.md`), not mid-task. Tell the user per
@@ -374,6 +385,9 @@ Report-back items 1–4 (`00-conventions.md`): warnings first; records
 table (doctype | name | action | docstatus, "live" for non-submittable);
 a pointer to the Deviations section (do not repeat it); audit status per
 write (`_audit_log_status`, and the approval basis); open follow-ups.
+Every parked step (agents ADR 0010/issue 19), separately from the
+records table: step, reason, which check came up empty, decision
+needed.
 ```
 
 A worked example, the 2026-10-07 DEMO_ERP spec rewritten to this

@@ -4,6 +4,8 @@ every value escaped, and execute logs exactly the rendered email."""
 
 import copy
 import json
+import sys
+import types
 import unittest
 from unittest.mock import patch
 
@@ -414,6 +416,152 @@ class JobApprovalRequestTests(unittest.TestCase):
         self.assertIn("1. create Item &lt;X&gt;", html_body)
         self.assertIn("ABC123", html_body)
         self.assertIn("ABC123", text)
+
+
+STATUS_KEY = "notify.job_status_update"
+STATUS_JOB_ROW = dict(JOB_ROW, status="Approved", monitor_platform="google_chat",
+                      monitor_channel_id="spaces/AAA/threads/BBB")
+STATUS_ARGS = {
+    "job_id": JOB_ID,
+    "items": [{"step": "batch 2 step 1", "reason": "role permission 403 on submit",
+               "decision_needed": "grant Sales Invoice submit to the bot role"}],
+    "summary": {"parked": 1, "blocked": 0, "completed": 3},
+}
+
+
+def _fake_send_message_tool(result):
+    """`patch.dict(sys.modules, ...)` fixture for the lazy
+    `tools.send_message_tool` import (agents issue 21): the real module
+    lives in the hermes-agent repo, not importable from this plugin's own
+    test environment (conftest.py's own "no Hermes install needed" rule)."""
+    mod = types.ModuleType("tools.send_message_tool")
+    calls = []
+
+    def send_message_tool(args):
+        calls.append(args)
+        return json.dumps(result)
+    mod.send_message_tool = send_message_tool
+    pkg = types.ModuleType("tools")
+    pkg.send_message_tool = mod
+    return {"tools": pkg, "tools.send_message_tool": mod}, calls
+
+
+class JobStatusUpdateTests(unittest.TestCase):
+    """notify.job_status_update (agents ADR 0010 point 3, issue 21): one
+    consolidated email + Google Chat report per poller pass of every open
+    park/block for a kanban job — never one send per event."""
+
+    def _render(self, args=None, job_row=None):
+        row = job_row if job_row is not None else STATUS_JOB_ROW
+        with connector() as m, patch.object(core_client, "get_env_config",
+                                            side_effect=_env_config()):
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(row)}
+            return testsupport.render(STATUS_KEY, copy.deepcopy(args or STATUS_ARGS))
+
+    def test_render_reads_the_stored_monitor_channel_and_requester(self):
+        full_args, ctx, out = self._render()
+        self.assertEqual(out["policy"], operations.POLICY_TOKEN)
+        self.assertEqual(full_args["requested_by"], testsupport.REQ)
+        self.assertEqual(full_args["monitor_platform"], "google_chat")
+        self.assertEqual(full_args["monitor_channel_id"], "spaces/AAA/threads/BBB")
+        body = out["request"]["body"]
+        self.assertEqual(body["recipients"], testsupport.REQ)
+        self.assertEqual(body["reference_doctype"], core_client.JOB_APPROVAL_DOCTYPE)
+        self.assertEqual(body["reference_name"], JOB_ID)
+        self.assertIn("1 parked, 0 blocked, 3 completed", body["subject"])
+        html = body["content"]
+        self.assertIn("role permission 403 on submit", html)
+        self.assertIn("grant Sales Invoice submit to the bot role", html)
+
+    def test_empty_items_is_the_good_news_case_not_a_missing_argument(self):
+        args = dict(STATUS_ARGS, items=[], summary={"parked": 0, "blocked": 0, "completed": 5})
+        _, _, out = self._render(args)
+        self.assertIn("No open parks or blocks", out["request"]["body"]["content"])
+
+    def test_bad_item_or_summary_shape_is_refused(self):
+        for bad in ({"items": [{"step": "x"}]}, {"items": "not a list"},
+                    {"summary": {"parked": 1}}, {"summary": {"parked": -1, "blocked": 0,
+                                                             "completed": 0}}):
+            with self.subTest(bad=bad), self.assertRaises(core_client.ConnectorError):
+                self._render(dict(STATUS_ARGS, **bad))
+
+    def test_job_not_found_is_refused(self):
+        with self.assertRaises(core_client.ConnectorError):
+            self._render(job_row={})
+
+    def test_execute_sends_email_and_chat_then_logs_one_communication(self):
+        full_args, ctx, out = self._render()
+        modules, calls = _fake_send_message_tool({"success": True})
+        with connector() as m, patch.dict(sys.modules, modules):
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(STATUS_JOB_ROW)}
+            result = operations.run_operation(STATUS_KEY, full_args, ctx)
+        to, subject, html, text = m["send_html"].call_args.args
+        body = out["request"]["body"]
+        self.assertEqual((to, subject, html), (testsupport.REQ, body["subject"], body["content"]))
+        self.assertEqual(calls, [{"action": "send", "target": "google_chat:spaces/AAA/threads/BBB",
+                                  "message": text}])
+        sent = m["_do_mutate"].call_args.args
+        self.assertEqual(sent[1:3], ("Communication", "create"))
+        self.assertEqual(result["_audit_log_status"], "ok")
+
+    def test_email_only_monitor_channel_never_gets_a_chat_send(self):
+        row = dict(STATUS_JOB_ROW, monitor_platform="email", monitor_channel_id="")
+        full_args, ctx, _ = self._render(job_row=row)
+        modules, calls = _fake_send_message_tool({"success": True})
+        with connector() as m, patch.dict(sys.modules, modules):
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(row)}
+            operations.run_operation(STATUS_KEY, full_args, ctx)
+        self.assertEqual(calls, [])
+
+    def test_no_monitor_channel_at_all_never_gets_a_chat_send(self):
+        row = dict(JOB_ROW, status="Approved")  # no monitor_platform/monitor_channel_id at all
+        full_args, ctx, _ = self._render(job_row=row)
+        modules, calls = _fake_send_message_tool({"success": True})
+        with connector() as m, patch.dict(sys.modules, modules):
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(row)}
+            operations.run_operation(STATUS_KEY, full_args, ctx)
+        self.assertEqual(calls, [])
+
+    def test_failed_chat_send_still_keeps_the_email_sent(self):
+        full_args, ctx, _ = self._render()
+        modules, calls = _fake_send_message_tool({"success": False, "error": "channel archived"})
+        with connector() as m, patch.dict(sys.modules, modules):
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(STATUS_JOB_ROW)}
+            result = operations.run_operation(STATUS_KEY, full_args, ctx)
+        self.assertTrue(calls)
+        self.assertEqual(result["_audit_log_status"], "ok")
+        self.assertTrue(any("Google Chat update failed" in n for n in result["_notes"]))
+
+    def test_chat_import_failure_still_keeps_the_email_sent(self):
+        """No `tools` module injected at all: the lazy import raises
+        ModuleNotFoundError, caught — email already went out by then."""
+        full_args, ctx, _ = self._render()
+        with connector() as m:
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(STATUS_JOB_ROW)}
+            result = operations.run_operation(STATUS_KEY, full_args, ctx)
+        m["send_html"].assert_called_once()
+        self.assertEqual(result["_audit_log_status"], "ok")
+        self.assertTrue(any("Google Chat update failed" in n for n in result["_notes"]))
+
+    def test_failed_send_logs_nothing(self):
+        full_args, ctx, _ = self._render()
+        for error in (mailer.EmailNotConfiguredError("no mailbox"), mailer.EmailSendError("smtp")):
+            with self.subTest(error=type(error).__name__), connector() as m:
+                m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(STATUS_JOB_ROW)}
+                m["send_html"].side_effect = error
+                with self.assertRaises(type(error)):
+                    operations.run_operation(STATUS_KEY, full_args, ctx)
+                self.assertFalse(m["_do_mutate"].called)
+
+    def test_render_job_status_is_pure_and_escapes(self):
+        subject, html_body, text = notify.render_job_status(
+            job_id="J & 1", items=[{"step": "s1", "reason": "r <b>x</b>", "decision_needed": "d"}],
+            summary={"parked": 1, "blocked": 0, "completed": 0}, status="Approved",
+            requester="r@x.com", tag="t", instance="https://e.x", generated_on="2026-10-30 00:00 UTC")
+        self.assertIn("[t] Job J & 1 status", subject)
+        self.assertIn("J &amp; 1", html_body)
+        self.assertIn("r &lt;b&gt;x&lt;/b&gt;", html_body)
+        self.assertIn("r <b>x</b>", text)  # text part is not HTML-escaped
 
 
 if __name__ == "__main__":

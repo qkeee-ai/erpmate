@@ -31,6 +31,7 @@ grant the bot create on it.
 
 import datetime
 import html
+import json
 import urllib.parse
 
 from .. import mailer
@@ -692,4 +693,205 @@ operations.register_operation(operations.Operation(
                "expires_at": "filled by render", "ttl_minutes": "filled by render",
                "confirmation_code": "filled by render", "batches": "filled by render",
                "instance": "filled by render", "admin_email": "filled by render"},
+))
+
+
+# ================================================================ notify.job_status_update
+#
+# Agents ADR 0010 point 3: every park/block a kanban job accumulates must
+# reach the Requester, not just a `kanban_comment` on the card — but as one
+# consolidated report per pass over the job's current state (issue 23's
+# poller is the intended caller, once per pass), never one send per event.
+# Live testing (28/29-Oct runs) found every block posted only as a
+# kanban_comment: no email, no chat message, so nobody not watching the
+# board learned a job had stalled.
+#
+# Render reads the job's stored monitor_platform/monitor_channel_id
+# (issue 16/22, ADR 0010 point 4) and requested_by — never caller-supplied,
+# same discipline as job_approval_request reading the stored plan instead
+# of trusting an agent's own claim. Execute sends BOTH: an email to the
+# Requester (always, logged as a Communication on the Job Approval row,
+# ADR 0009's pattern) and, only when the job's monitor channel actually is
+# Google Chat, a message to that stored channel/thread — never invented
+# when the monitor channel was email-only. `kanban_comment` keeps logging
+# each event individually on the card for audit; this is the
+# Requester-facing, consolidated side of it.
+
+_MAX_ITEMS = 25
+_ITEM_KEYS = frozenset({"step", "reason", "decision_needed"})
+_SUMMARY_KEYS = frozenset({"parked", "blocked", "completed"})
+
+
+def _items(args) -> list:
+    items = args.get("items")
+    if not isinstance(items, list) or len(items) > _MAX_ITEMS:
+        raise core_client.ConnectorError(f"items: a list of at most {_MAX_ITEMS} entries.")
+    for i, it in enumerate(items, start=1):
+        if (not isinstance(it, dict) or set(it) != _ITEM_KEYS
+                or any(not isinstance(it[k], str) or not it[k] or len(it[k]) > _MAX_LINE
+                       for k in _ITEM_KEYS)):
+            raise core_client.ConnectorError(
+                f"items[{i}]: needs exactly {sorted(_ITEM_KEYS)}, each a non-empty string at most "
+                f"{_MAX_LINE} characters.")
+    return items
+
+
+def _summary(args) -> dict:
+    summary = args.get("summary")
+    if (not isinstance(summary, dict) or set(summary) != _SUMMARY_KEYS
+            or any(not isinstance(summary[k], int) or isinstance(summary[k], bool) or summary[k] < 0
+                   for k in _SUMMARY_KEYS)):
+        raise core_client.ConnectorError(
+            f"summary: needs exactly {sorted(_SUMMARY_KEYS)}, each a non-negative integer.")
+    return summary
+
+
+def _job_status_render(args, ctx):
+    args = dict(args)
+    # "items" stays out of require_args' required list: an empty list (no
+    # open park/block this pass — the good-news case) is a legitimate
+    # value, and require_args treats [] as missing.
+    require_args(args, ["job_id", "summary"], ["items"])
+    _items(args)
+    _summary(args)
+    _require_bot_can_log(ctx)
+    data = operations.get_job_approval(args["job_id"], ctx)
+    if not data:
+        raise core_client.ConnectorError(
+            f"notify.job_status_update: job {args['job_id']!r} not found — nothing was sent.")
+    args["requested_by"] = data.get("requested_by") or ""
+    args["status"] = data.get("status") or ""
+    args["monitor_platform"] = data.get("monitor_platform") or ""
+    args["monitor_channel_id"] = data.get("monitor_channel_id") or ""
+    # Always from config and the clock, never from the caller.
+    args["instance"] = core_client.get_env_config(ctx.tag).get("base_url", "")
+    args["generated_on"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return args
+
+
+def render_job_status(*, job_id, items, summary, status, requester, tag, instance,
+                      generated_on) -> tuple:
+    """(subject, html, text) for one consolidated park/block report.
+    `text` is reused as both the email's plain-text part and the Google
+    Chat message body: one plain representation, two deliveries. Pure:
+    every value is escaped, links point only at `instance`."""
+    e = html.escape
+    counts = f"{summary['parked']} parked, {summary['blocked']} blocked, {summary['completed']} completed"
+    subject = f"[{tag}] Job {job_id} status: {counts}"
+    rows = "".join(
+        f'<li style="margin:8px 0"><b>{e(it["step"])}</b> — {e(it["reason"])}'
+        f'<div style="color:#6b7280;font-size:12px">Needs: {e(it["decision_needed"])}</div></li>'
+        for it in items)
+    items_html = (f'<ul style="margin:0;padding-left:20px;color:#374151">{rows}</ul>' if items
+                 else '<div style="color:#6b7280">No open parks or blocks since the last report.</div>')
+    body = (
+        '<!doctype html><html><body style="margin:0;padding:0;background:#f3f4f6">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="background:#f3f4f6;padding:24px 0"><tr><td align="center">'
+        '<table role="presentation" width="640" cellpadding="0" cellspacing="0" '
+        'style="max-width:640px;width:100%;background:#ffffff;border:1px solid #e5e7eb;'
+        'border-radius:8px;font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#111827">'
+        '<tr><td style="padding:20px 24px;border-bottom:1px solid #e5e7eb">'
+        '<div style="font-size:12px;color:#b45309;font-weight:600;letter-spacing:.04em">JOB STATUS'
+        '</div>'
+        f'<h2 style="margin:6px 0 0;font-size:18px">Job {e(job_id)} ({e(status)})</h2>'
+        f'<div style="margin-top:4px;color:#6b7280">{e(counts)}</div>'
+        '</td></tr><tr><td style="padding:16px 24px">'
+        + items_html +
+        '</td></tr><tr><td style="padding:14px 24px;border-top:1px solid #e5e7eb;'
+        'font-size:12px;color:#6b7280">'
+        f'Instance <b>{e(tag)}</b> ({e(instance)}) · Requested by {e(requester)} · '
+        f'Generated {e(generated_on)}<br>Sent by the ERPNext associate.'
+        '</td></tr></table></td></tr></table></body></html>')
+    text_lines = [f"Job {job_id} status ({status}): {counts}", ""]
+    if items:
+        for it in items:
+            text_lines.append(f"- {it['step']}: {it['reason']} — needs: {it['decision_needed']}")
+    else:
+        text_lines.append("No open parks or blocks since the last report.")
+    text_lines += ["", f"Instance {tag} ({instance}) · Requested by {requester} · "
+                       f"Generated {generated_on}", "Sent by the ERPNext associate."]
+    return subject, body, "\n".join(text_lines)
+
+
+def _job_status_prepare(args, ctx):
+    required = ["job_id", "summary", "requested_by", "status", "instance", "generated_on"]
+    # "items" (can be [], the good-news case) and monitor_platform/
+    # monitor_channel_id (legitimately "" — no stored monitor channel, or
+    # a job rendered before issue 22) stay out of required: require_args
+    # treats []/"" as missing.
+    require_args(args, required, ["items", "monitor_platform", "monitor_channel_id"])
+    items = _items(args)
+    summary = _summary(args)
+    subject, body, text = render_job_status(
+        job_id=args["job_id"], items=items, summary=summary, status=args["status"],
+        requester=args["requested_by"], tag=ctx.tag, instance=args["instance"],
+        generated_on=args["generated_on"])
+    return PreparedRequest(
+        transport="resource", doctype="Communication", action="create",
+        body={"communication_type": "Communication", "communication_medium": "Email",
+              "sent_or_received": "Sent", "subject": subject, "content": body,
+              "recipients": args["requested_by"],
+              "reference_doctype": core_client.JOB_APPROVAL_DOCTYPE,
+              "reference_name": args["job_id"]},
+        # Same bookkeeping-doctype anchor as job_approval_request (ADR 0009):
+        # no single business record to gate a read on.
+        rbac_doctype=core_client.JOB_APPROVAL_DOCTYPE, rbac_ptype="read",
+        audit_doctype=core_client.JOB_APPROVAL_DOCTYPE, audit_reference=args["job_id"],
+        bound={"text": text, "monitor_platform": args["monitor_platform"],
+               "monitor_channel_id": args["monitor_channel_id"]},
+        notes=["Intended as one call per poller pass (agents issue 23), reporting every "
+               "currently open park/block together — never one call per individual event. "
+               "Execute with these args, confirmation_token and issued_at unchanged."])
+
+
+def _send_job_status(req, args, ctx):
+    """pre_send: every gate has passed. Email always; a Google Chat
+    message to the stored monitor channel only when that channel actually
+    is Google Chat (agents ADR 0010 point 4) — a failed chat send is
+    logged as a warning, never raised, since the email (the durable,
+    audited half) already went out by the time this runs."""
+    _require_bot_can_log(ctx)
+    body = req.body
+    sent = mailer.send_html(body["recipients"], body["subject"], body["content"], req.bound["text"])
+    body["message_id"] = sent["message_id"]
+    body["sender"] = sent["from"]
+    req.notes.append(f"Email sent from {sent['from']} to {sent['to']}, "
+                     f"Message-ID {sent['message_id']}.")
+    platform = req.bound.get("monitor_platform")
+    channel_id = req.bound.get("monitor_channel_id")
+    if platform != "google_chat" or not channel_id:
+        return
+    try:
+        from tools.send_message_tool import send_message_tool  # gateway-side helper (cron/kanban use it too)
+        result = json.loads(send_message_tool(
+            {"action": "send", "target": f"{platform}:{channel_id}", "message": req.bound["text"]}))
+        if not result.get("success"):
+            req.notes.append(f"WARNING: the Google Chat update failed ({result.get('error')!r}); "
+                             f"only the email above went out. Tell the user.")
+    except Exception as e:  # noqa: BLE001 — chat is the secondary channel; the email already sent
+        req.notes.append(f"WARNING: the Google Chat update failed ({e!r}); only the email above "
+                         f"went out. Tell the user.")
+
+
+operations.register_operation(operations.Operation(
+    key="notify.job_status_update", domain=DOMAIN_NAME,
+    summary="agents ADR 0010: one consolidated report per poller pass of every open park/block "
+            "for a kanban job, sent on email always and Google Chat when that's the job's "
+            "monitor channel — never one send per event",
+    prepare=_job_status_prepare, render_defaults=_job_status_render,
+    pre_send=_send_job_status, on_failure=_sent_but_not_logged,
+    token_policy=operations.POLICY_TOKEN, skip_comment=True,
+    example_args={"job_id": "JOB-1",
+                  "items": [{"step": "batch 2 step 1", "reason": "role permission 403 on submit",
+                             "decision_needed": "grant Sales Invoice submit to the bot role, or "
+                                                "approve submitting without it"}],
+                  "summary": {"parked": 1, "blocked": 0, "completed": 3}},
+    args_help={"job_id": "the kanban job id (agents ADR 0008/0010)",
+               "items": f"every currently open park/block for this job, "
+                       f"[{{step, reason, decision_needed}}], at most {_MAX_ITEMS}",
+               "summary": "counts since the last report: {parked, blocked, completed}",
+               "requested_by": "filled by render", "status": "filled by render",
+               "monitor_platform": "filled by render", "monitor_channel_id": "filled by render",
+               "instance": "filled by render", "generated_on": "filled by render"},
 ))

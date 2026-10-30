@@ -9,8 +9,10 @@ import copy
 import json
 import time
 import unittest
+from unittest.mock import patch
 
 from qkeee_erp_plugin import erp_tools
+from qkeee_erp_plugin.qkeee_erp import discover
 from qkeee_erp_plugin.qkeee_erp.core import client as core_client
 from qkeee_erp_plugin.qkeee_erp.core import operations
 import testsupport
@@ -71,7 +73,7 @@ class ExecuteTests(unittest.TestCase):
         with connector() as m:
             out = _render(MIXED)
             report = _execute(out)
-        self.assertEqual(report["counts"], {"succeeded": 5, "failed": 0, "not_attempted": 0})
+        self.assertEqual(report["counts"], {"succeeded": 5, "failed": 0, "parked": 0, "not_attempted": 0})
         self.assertEqual(m["_do_mutate"].call_count, 5)
 
     def test_any_change_refused_before_step_1(self):
@@ -259,7 +261,7 @@ class JobBatchTests(unittest.TestCase):
         self.assertIsNone(ctx.confirmation_token)
         self.assertIsNone(ctx.user_confirmation_text)
         report, m = self._run(index=2)
-        self.assertEqual(report["counts"], {"succeeded": 4, "failed": 0, "not_attempted": 0})
+        self.assertEqual(report["counts"], {"succeeded": 4, "failed": 0, "parked": 0, "not_attempted": 0})
         # 4 step writes + one durable execution-log append (issue 16).
         self.assertEqual(m["_do_mutate"].call_count, 5)
 
@@ -292,10 +294,16 @@ class JobBatchTests(unittest.TestCase):
                      if c.kwargs["doctype"] != core_client.JOB_APPROVAL_DOCTYPE]
         self.assertIn(f"job {JOB_ID} batch 1/2 step 1/1", step_calls[-1].kwargs["approval_note"])
 
-    def test_a_failed_step_is_logged_as_failed_not_silently_dropped(self):
-        # Issue 16's ledger must distinguish "this step failed" from "it
-        # never ran" — not just record successes.
-        with connector() as m:
+    def test_a_rejected_write_parks_instead_of_stopping_the_job(self):
+        # agents ADR 0010/issue 19: ERPNext's own structured rejection
+        # (a missing/invalid field the approved template didn't
+        # anticipate) parks the step in a job batch — the job isn't
+        # stopped by it, and issue 16's ledger must distinguish "this
+        # step parked" from both "it succeeded" and "it never ran".
+        # Issue 19 bullet 1's own live check (erp_discover preflight for
+        # a create step) ran and is recorded alongside the park.
+        with connector() as m, patch.object(
+                discover, "preflight", return_value={"ready": False, "missing_fields": ["department"]}) as pf:
             m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
             m["_do_mutate"].side_effect = [
                 core_client.WriteRejectedError(
@@ -305,12 +313,108 @@ class JobBatchTests(unittest.TestCase):
             ]
             report = operations.run_batch(copy.deepcopy(JOB_PLAN[0]), testsupport.ctx(),
                                           job_id=JOB_ID, job_batch_index=1)
-        self.assertEqual(report["counts"], {"succeeded": 0, "failed": 1, "not_attempted": 0})
+        self.assertIsNone(report["stopped_at"])
+        self.assertEqual(report["steps"][0]["status"], "parked")
+        self.assertEqual(report["counts"], {"succeeded": 0, "failed": 0, "parked": 1, "not_attempted": 0})
+        pf.assert_called_once()
+        self.assertEqual(pf.call_args.kwargs["payload"], {"first_name": "Arjun"})
+        checked = report["steps"][0]["checked"]
+        self.assertIn("preflight", checked)
+        self.assertIn("missing_fields=['department']", checked)
         append_call = next(c for c in m["_do_mutate"].call_args_list
                            if c.args[1] == core_client.JOB_APPROVAL_DOCTYPE)
         logged = json.loads(append_call.args[3]["execution_log"])
         self.assertEqual(logged, [{"batch_index": 1, "step_index": 1, "name": None,
-                                   "modified": None, "outcome": "failed"}])
+                                   "modified": None, "outcome": "parked", "checked": checked}])
+
+    def test_discover_check_uses_preflight_for_create_and_meta_otherwise(self):
+        # Issue 19 bullet 1 vs. bullet 2's "existing record" framing maps
+        # to which live check is even meaningful: preflight is documented
+        # as a write-readiness gate for "one create" only; a submit/
+        # cancel/delete on an existing record checks its live schema
+        # facts (doctype_meta) instead.
+        ctx = testsupport.ctx()
+        create_req = operations.PreparedRequest(transport="resource", doctype="Item",
+                                                 action="create", body={"item_code": "X"})
+        submit_req = operations.PreparedRequest(transport="resource", doctype="Sales Order",
+                                                action="submit", name="SO-1")
+        with connector(), patch.object(
+                discover, "preflight",
+                return_value={"ready": False, "missing_fields": ["item_group"]}) as pf:
+            checked = operations._discover_check(create_req, ctx)
+        pf.assert_called_once_with("test", "Item", payload={"item_code": "X"},
+                                   requested_by=testsupport.REQ, **ctx.audit_kwargs())
+        self.assertIn("preflight(Item)", checked)
+        self.assertIn("missing_fields=['item_group']", checked)
+
+        with connector(), patch.object(
+                discover, "doctype_meta",
+                return_value={"module": "Selling", "custom_fields_merged": True}) as meta:
+            checked = operations._discover_check(submit_req, ctx)
+        meta.assert_called_once_with("test", "Sales Order", requested_by=testsupport.REQ,
+                                     **ctx.audit_kwargs())
+        self.assertIn("meta(Sales Order)", checked)
+        self.assertIn("module='Selling'", checked)
+
+    def test_discover_check_failure_is_recorded_not_raised(self):
+        with connector() as m, patch.object(discover, "preflight", side_effect=RuntimeError("timeout")):
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            m["_do_mutate"].side_effect = [
+                core_client.PreconditionFailedError("locked"),
+                {"data": {"name": "JOB-7"}},
+            ]
+            report = operations.run_batch(copy.deepcopy(JOB_PLAN[0]), testsupport.ctx(),
+                                          job_id=JOB_ID, job_batch_index=1)
+        self.assertEqual(report["steps"][0]["status"], "parked")
+        self.assertIn("erp_discover check on Employee failed: timeout", report["steps"][0]["checked"])
+
+    def test_a_systemic_refusal_still_stops_the_job_rather_than_parking(self):
+        # Not every failure is "the template didn't anticipate this one
+        # step" — read-only mode, a missing requester, self-escalation or
+        # an outright disallowed doctype are systemic; parking one step
+        # can't fix them, so the batch still stops exactly as before, and
+        # no live check is spent on something a park can't fix anyway.
+        with connector() as m, patch.object(discover, "preflight") as pf:
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            steps = copy.deepcopy(JOB_PLAN[0])
+            report = operations.run_batch(
+                steps, testsupport.ctx(mode="read-only"), job_id=JOB_ID, job_batch_index=1)
+        self.assertEqual(report["stopped_at"], 1)
+        self.assertEqual(report["steps"][0]["status"], "failed")
+        self.assertEqual(report["counts"], {"succeeded": 0, "failed": 1, "parked": 0, "not_attempted": 0})
+        self.assertNotIn("checked", report["steps"][0])
+        pf.assert_not_called()
+
+    def test_a_plain_403_not_caught_by_any_gate_also_parks(self):
+        # agents ADR 0010's own named example: a role-permission gap on
+        # one action the template didn't flag, surfaced only as ERPNext's
+        # own HTTP rejection (not a structured write_failure, not one of
+        # this plugin's own precondition checks).
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            m["_do_mutate"].side_effect = [
+                core_client.ERPNextAPIError(403, "POST", "/api/resource/Employee",
+                                            {"tag": "t", "base_url": "u"}, "PermissionError"),
+                {"data": {"name": "JOB-7"}},
+            ]
+            report = operations.run_batch(copy.deepcopy(JOB_PLAN[0]), testsupport.ctx(),
+                                          job_id=JOB_ID, job_batch_index=1)
+        self.assertIsNone(report["stopped_at"])
+        self.assertEqual(report["steps"][0]["status"], "parked")
+        self.assertEqual(report["counts"], {"succeeded": 0, "failed": 0, "parked": 1, "not_attempted": 0})
+
+    def test_a_401_is_not_park_eligible(self):
+        # Unlike a 403 (a permission gap on one flagged action — ADR
+        # 0010's own example), a 401 means the bot's own credential is
+        # bad — systemic, not something one park fixes.
+        with connector() as m:
+            m["get_resource"].side_effect = _get_resource_side_effect(_job_row())
+            m["_do_mutate"].side_effect = core_client.ERPNextAPIError(
+                401, "POST", "/api/resource/Employee", {"tag": "t", "base_url": "u"}, "AuthError")
+            report = operations.run_batch(copy.deepcopy(JOB_PLAN[0]), testsupport.ctx(),
+                                          job_id=JOB_ID, job_batch_index=1)
+        self.assertEqual(report["stopped_at"], 1)
+        self.assertEqual(report["steps"][0]["status"], "failed")
 
     def test_execution_log_append_failure_does_not_discard_the_batchs_real_outcomes(self):
         # The batch's own writes already happened for real; a transient
@@ -322,7 +426,7 @@ class JobBatchTests(unittest.TestCase):
                 [{"data": {"name": "I-1"}}] * 4 + [core_client.ConnectorError("network blip")])
             report = operations.run_batch(copy.deepcopy(JOB_PLAN[1]), testsupport.ctx(),
                                           job_id=JOB_ID, job_batch_index=2)
-        self.assertEqual(report["counts"], {"succeeded": 4, "failed": 0, "not_attempted": 0})
+        self.assertEqual(report["counts"], {"succeeded": 4, "failed": 0, "parked": 0, "not_attempted": 0})
         self.assertIn("network blip", report["execution_log_error"])
 
     def test_job_not_approved_is_refused(self):
@@ -468,39 +572,45 @@ class CrossBatchPlaceholderTests(unittest.TestCase):
                 _placeholder_row(execution_log=stored_log))
             report = operations.run_batch(copy.deepcopy(PLACEHOLDER_PLAN[1]), testsupport.ctx(),
                                           job_id=PLACEHOLDER_JOB, job_batch_index=2)
-        self.assertEqual(report["counts"], {"succeeded": 1, "failed": 0, "not_attempted": 0})
+        self.assertEqual(report["counts"], {"succeeded": 1, "failed": 0, "parked": 0, "not_attempted": 0})
         sent_payload = m2["_do_mutate"].call_args_list[0].args[3]
         self.assertEqual(sent_payload["name"], "EMP-1")
 
-    def test_unresolved_placeholder_refuses_clearly_as_a_failed_step(self):
-        # Same convention as _resolve_from_step's own refusal
-        # (test_from_step_refuses_a_different_record above): a batch
-        # stops at the first failure, reported in `steps`, never a raise
-        # out of run_batch() itself.
+    def test_unresolved_placeholder_parks_rather_than_stopping_the_job(self):
+        # agents ADR 0010/issue 19 bullet 3: a step referencing an earlier
+        # one's <FROM_BATCH_N_STEP_M> that never produced a usable record
+        # parks (the dependency graph is already implicit in the
+        # placeholder structure) rather than stopping the whole job —
+        # same convention as _resolve_from_step's own refusal
+        # (test_from_step_refuses_a_different_record above), just no
+        # longer a hard stop.
         with connector() as m:
             m["get_resource"].side_effect = _get_resource_side_effect(
                 _placeholder_row(execution_log=[]))  # batch 1 never ran
             report = operations.run_batch(copy.deepcopy(PLACEHOLDER_PLAN[1]), testsupport.ctx(),
                                           job_id=PLACEHOLDER_JOB, job_batch_index=2)
-        self.assertEqual(report["steps"][0]["status"], "failed")
+        self.assertIsNone(report["stopped_at"])
+        self.assertEqual(report["steps"][0]["status"], "parked")
         self.assertIn("FROM_BATCH_1_STEP_1", report["steps"][0]["error"])
-        # The one _do_mutate call is the durable "this step failed" log
+        # The one _do_mutate call is the durable "this step parked" log
         # entry (issue 16) — never the Interview Type create itself.
         self.assertEqual(m["_do_mutate"].call_count, 1)
         self.assertEqual(m["_do_mutate"].call_args.args[1], core_client.JOB_APPROVAL_DOCTYPE)
 
-    def test_a_failed_batch_1_leaves_no_name_to_resolve(self):
-        failed_log = [{"batch_index": 1, "step_index": 1, "name": None, "modified": None,
-                      "outcome": "failed"}]
-        with connector() as m:
-            m["get_resource"].side_effect = _get_resource_side_effect(
-                _placeholder_row(execution_log=failed_log))
-            report = operations.run_batch(copy.deepcopy(PLACEHOLDER_PLAN[1]), testsupport.ctx(),
-                                          job_id=PLACEHOLDER_JOB, job_batch_index=2)
-        self.assertEqual(report["steps"][0]["status"], "failed")
-        self.assertIn("FROM_BATCH_1_STEP_1", report["steps"][0]["error"])
-        self.assertEqual(m["_do_mutate"].call_count, 1)
-        self.assertEqual(m["_do_mutate"].call_args.args[1], core_client.JOB_APPROVAL_DOCTYPE)
+    def test_a_parked_or_failed_batch_1_leaves_no_name_to_resolve(self):
+        for outcome in ("failed", "parked"):
+            with self.subTest(outcome=outcome):
+                log = [{"batch_index": 1, "step_index": 1, "name": None, "modified": None,
+                       "outcome": outcome}]
+                with connector() as m:
+                    m["get_resource"].side_effect = _get_resource_side_effect(
+                        _placeholder_row(execution_log=log))
+                    report = operations.run_batch(copy.deepcopy(PLACEHOLDER_PLAN[1]), testsupport.ctx(),
+                                                  job_id=PLACEHOLDER_JOB, job_batch_index=2)
+                self.assertEqual(report["steps"][0]["status"], "parked")
+                self.assertIn("FROM_BATCH_1_STEP_1", report["steps"][0]["error"])
+                self.assertEqual(m["_do_mutate"].call_count, 1)
+                self.assertEqual(m["_do_mutate"].call_args.args[1], core_client.JOB_APPROVAL_DOCTYPE)
 
 
 if __name__ == "__main__":

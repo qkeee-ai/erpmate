@@ -279,6 +279,29 @@ erp_execute_write(phase="render", op="notify.job_approval_request",
 # Requester's approval of the JOB happens later, over email, via
 # confirm_job below.
 
+# One consolidated park/block report per pass (agents ADR 0010 point
+# 3/issue 21) — intended as issue 23's poller call, once per pass over a
+# job's current state, never one send per individual park/block event.
+# `items`/`summary` are the caller's own current-pass snapshot (every
+# currently open park/block, each {step, reason, decision_needed}, plus
+# counts) — render re-reads the job's stored monitor_platform/
+# monitor_channel_id (issue 16/22) and requested_by, never caller-
+# supplied. Execute sends an email always, and a Google Chat message to
+# the stored channel only when that is actually the job's monitor
+# channel (never invented when it was email-only). `kanban_comment`
+# keeps logging each event individually on the card; this is the
+# Requester-facing, consolidated side of it.
+erp_execute_write(phase="render", op="notify.job_status_update",
+                  args={"job_id": "<job_id>",
+                        "items": [{"step": "batch 2 step 1",
+                                   "reason": "role permission 403 on submit",
+                                   "decision_needed": "grant Sales Invoice submit to the bot "
+                                                      "role, or approve submitting without it"}],
+                        "summary": {"parked": 1, "blocked": 0, "completed": 3}})
+# then phase="execute" with the FULL rendered args, confirmation_token
+# and issued_at unchanged, and latest_prompt — no user code needed
+# (POLICY_TOKEN, same shape as notify.job_approval_request).
+
 # A bespoke gated operation
 erp_execute_write(phase="render", op="system_admin.disable_user",
                   args={"name": "<user email>", "reason": "<stated reason>"})
@@ -307,6 +330,26 @@ erp_execute_write(phase="execute", batch=<rendered batch>, batch_token="<rendere
 # with no partial re-approval. Mutually exclusive with batch_token.
 erp_execute_write(phase="execute", batch=[{"op": "...", "args": {...}}],
                   job_id="<job_id>", job_batch_index=2, prompt_summary="<one line>")
+# -> {"ok": ..., "result": {"steps": [...], "stopped_at": ..., "counts": {...}}}
+#
+# A job batch step the approved template didn't anticipate (agents ADR
+# 0010 point 2/issue 19) PARKS instead of stopping the whole job: check
+# `result.counts.parked` after every job-batch execute, not just `ok` —
+# `ok` is already false whenever parked > 0, but the card itself is only
+# `kanban_block`-worthy once EVERY remaining step depends, directly or
+# transitively, on a parked one (a step chained off a parked step's
+# <FROM_STEP_N>/<FROM_BATCH_N_STEP_M> parks too, automatically — no
+# separate check needed for that). A parked step's own `checked` field
+# already names the live erp_discover check run_batch() ran against it
+# (preflight for a create, meta otherwise) and whether it came up
+# empty — read it before re-running the same check yourself. It never
+# auto-fixes anything, so still check this environment's latched
+# `qkeee-erp-learned` skill for an answer (a wrong HSN digit count, a
+# renamed field) before accepting the park as final — most "surprises"
+# are answerable live, not a genuinely new human decision. Record every
+# parked step's `error` (`write_failure` when ERPNext rejected it
+# outright) and `checked` in the close-out (`03-spec-driven-execution.md`
+# step 7) with the specific decision needed — never silently drop it.
 
 # Binding the Requester's reply to a job (agents ADR 0008, issue 09): the
 # approval email's subject is "[<tag>] Approval needed: job <job_id> (...
