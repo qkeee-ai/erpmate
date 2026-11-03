@@ -678,6 +678,19 @@ def _send_job_approval_email(req, args, ctx):
         + (f", cc {sent['cc']}" if sent.get("cc") else "") + f", Message-ID {sent['message_id']}.")
 
 
+def _job_approval_request_policy(req) -> str:
+    """POLICY_NONE from a kanban-dispatched (headless) worker: it has no
+    live chat session to cite latest_prompt from, and the real approval
+    gate is the Requester's email reply (operations.verify_job_reply(),
+    ADR 0008's two-factor code+sender check) via confirm_job, not a chat
+    confirmation on sending the request email itself. A live chat session
+    still needs a fresh token (POLICY_TOKEN, no user-typed code) before it
+    may send on the Requester's behalf, same as every other notify.* op —
+    this exemption is scoped to the headless path only."""
+    return (operations.POLICY_NONE if core_client.session_env("HERMES_SESSION_SOURCE") == "kanban"
+            else operations.POLICY_TOKEN)
+
+
 operations.register_operation(operations.Operation(
     key="notify.job_approval_request", domain=DOMAIN_NAME,
     summary="ADR 0008: the kanban job's full ordered plan as one approval email to the Requester "
@@ -685,7 +698,7 @@ operations.register_operation(operations.Operation(
     prepare=_job_approval_prepare, render_defaults=_job_approval_render,
     preconditions=(_check_job_still_pending_for_email,),
     pre_send=_send_job_approval_email, on_failure=_sent_but_not_logged,
-    token_policy=operations.POLICY_TOKEN, skip_comment=True,
+    token_policy=_job_approval_request_policy, skip_comment=True,
     example_args={"job_id": "JOB-1"},
     args_help={"job_id": "the kanban job id operations.prepare_job() stored the plan under",
                "status": "filled by render", "requested_by": "filled by render",

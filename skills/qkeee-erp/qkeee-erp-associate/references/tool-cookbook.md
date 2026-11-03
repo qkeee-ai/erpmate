@@ -309,6 +309,16 @@ erp_execute_write(phase="render", op="notify.job_approval_request",
 # latest_prompt. Sending the email itself needs no user code; the
 # Requester's approval of the JOB happens later, over email, via
 # confirm_job below.
+#
+# A kanban-dispatched (headless) worker calls the exact same render/
+# execute pair directly — no latest_prompt, no confirmation_token/
+# issued_at, no live chat session needed. This op's token_policy is
+# POLICY_NONE whenever HERMES_SESSION_SOURCE=="kanban" (never for a live
+# chat session, which still needs the token path above): the send is a
+# bounded, pre-validated action (render re-fetches the stored plan; a
+# precondition re-checks the job is still Pending), and the real approval
+# gate stays the Requester's email reply via confirm_job, untouched
+# either way.
 
 # One consolidated park/block report per pass (agents ADR 0010 point
 # 3/issue 21) — intended as issue 23's poller call, once per pass over a

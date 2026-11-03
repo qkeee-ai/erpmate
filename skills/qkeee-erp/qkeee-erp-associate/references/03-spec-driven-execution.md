@@ -33,10 +33,27 @@ restart. Kanban remains the right tool only for work that is genuinely
 not an ERPNext write sequence (routing a checklist to the right humans,
 tracking non-ERPNext steps).
 
+**An explicit user ask for kanban tracking overrides the default above,
+but not the mechanism.** If the user explicitly asks for kanban tracking
+of ERPNext execution work, don't silently run it as a plain spec/batch
+sequence instead (that ignores the ask) and don't fall back to plain
+`kanban_create` either (still triage-bound, still subject to the
+auto-decomposer, issue 01) — start the job through the ADR 0008/0010
+`batches` path (`erp_execute_write phase=render batches=...`). That path
+creates its own single, non-decomposed job-execution card (ADR 0010
+point 4/5) the user can track on the board. Say that this is what
+"kanban" means for ERPNext execution work before doing it, so the
+substitution is visible, not silent.
+
 **Cards go through the tools.** Create, read and route cards only with
 the `kanban_*` tools; they run in the gateway, which records each card's
 requester for its workers. A card you create lands in triage: tell the
 user it waits there to be specified and split, then reaches workers.
+**Exception (ADR 0010 point 5):** a job-execution card created by the
+ADR 0008 `batches` path above is never decomposed and skips triage —
+it's created straight into `todo`/`ready`. The triage default in this
+paragraph applies only to a plain `kanban_create` card (non-ERPNext
+coordination work).
 When the `kanban_*` tools are missing from your tool list, say so (the
 Operator runs `hermes qkeee-erp setup --apply-profile-fixes`) and keep
 the plan in a spec file.

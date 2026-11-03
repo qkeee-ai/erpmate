@@ -382,6 +382,36 @@ class JobApprovalRequestTests(unittest.TestCase):
         self.assertEqual(start["name"], JOB_ID)
         self.assertEqual(result["_audit_log_status"], "ok")
 
+    def _kanban_reader(self):
+        core_client.set_session_env_reader(
+            lambda name, default="": "kanban" if name == "HERMES_SESSION_SOURCE" else default)
+        self.addCleanup(core_client.set_session_env_reader, None)
+
+    def test_render_policy_is_none_from_a_kanban_session(self):
+        # A kanban-dispatched worker has no live chat session to cite
+        # latest_prompt from. The real approval gate is the Requester's
+        # email reply (verify_job_reply/confirm_job), not a chat
+        # confirmation on sending the request email itself.
+        self._kanban_reader()
+        full_args, ctx, out = self._render()
+        self.assertEqual(out["policy"], operations.POLICY_NONE)
+        self.assertNotIn("confirmation_token", out)
+
+    def test_kanban_session_executes_without_a_token(self):
+        self._kanban_reader()
+        full_args, ctx, out = self._render()
+        with connector() as m:
+            m["get_resource"].side_effect = lambda tag, doctype, name, **kw: {"data": dict(JOB_ROW)}
+            operations.run_operation(JOB_KEY, full_args, ctx)
+        m["send_html"].assert_called_once()
+
+    def test_a_live_chat_session_still_needs_a_token(self):
+        # The exemption is scoped to the headless path only — unchanged
+        # from today for a live chat session.
+        full_args, ctx, out = self._render()
+        self.assertEqual(out["policy"], operations.POLICY_TOKEN)
+        self.assertIn("confirmation_token", out)
+
     def test_execute_refuses_a_job_approved_since_render(self):
         """The live precondition (step 7) re-checks the stored row — a job
         approved, or re-rendered under the same job_id, between render and
