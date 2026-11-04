@@ -371,8 +371,6 @@ UNSCOPED_DENY = frozenset({
     "OAuth Client", "Social Login Key", "Connected App", "LDAP Settings",
     # audit / history
     "Version", "Deleted Document", "Comment", _c.AUDIT_LOG_DOCTYPE, _c.JOB_APPROVAL_DOCTYPE,
-    # manufacturing has no write path yet (references/domains/manufacturing.md)
-    "BOM", "Work Order", "Job Card", "Production Plan", "Routing", "Workstation", "Operation",
 })
 
 
