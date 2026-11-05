@@ -1,49 +1,49 @@
 # Spec-driven execution
 
-Every non-trivial task gets a written spec before any domain action
+Every non-trivial task gets a written plan before any domain action
 starts: clarify, draft, persist, approve, execute. This procedure sits
 between the activation sequence (`SKILL.md`) and the domain reference
 doing the actual work.
 
-## Kanban instead of a spec file
+## The floor: direct reply, or planned intake — nothing in between
 
-A spec file suits a single-session, single-actor task. When the work
-instead **crosses agent boundaries, needs to survive a restart, needs
-human input mid-task, or needs to stay discoverable later** — an
-onboarding checklist spanning HR + system-admin, work that genuinely has
-no ERPNext writes of its own on the critical path — propose Hermes'
-Kanban feature (the `kanban_*` tools: `kanban_create`, `kanban_show`,
-`kanban_list`) instead of, or alongside, a flat spec file. A spec file has no board view and
-nothing else can discover or pick it up later; Kanban is durable,
-human-visible, and built for that shape of work. Write the spec below
-when the work fits one sitting with one actor — don't reach for Kanban by
-default.
+A single-turn, read-only exchange is answered directly: no plan, no
+kanban card. Anything else — any write (create/update/submit/cancel/
+delete), any multi-step investigation, anything spanning more than one
+turn, anything the user frames as a project/task — gets the full
+intake below: a comprehensive plan (the spec), decomposed into atomic,
+independently-dispatchable tasks, each created as its own
+`kanban_create` card (agents ADR 0011, `docs/adr/0011-kanban-first-
+task-intake.md`). There is no complexity judgment call to make between
+those two — a single-record create is a write, so it gets a plan and a
+card like any other; the floor above is the only gate, replacing the
+old "is this complex enough to warrant Kanban" heuristic.
 
-**Not for ERPNext execution work itself (`00-conventions.md`).** A
-multi-day payroll run with checkpoints or a bulk data migration — the
-exact shape this section used to point at `kanban_create` for — is
-ERPNext execution work: the board's auto-decomposer splits it into
-sub-cards no worker can run (`.scratch/qkeee-erp-kanban-execution-steering/issues/01-*`),
-a live finding, not a hypothetical. For that shape, stay in one spec/one
-session and use the job-level email approval path instead (agents ADR
-0008, `tool-cookbook.md`'s "Starting a kanban job" example): one email
-covers every batch in the plan, so a multi-batch job no longer needs
-either per-batch chat codes or a kanban card to stay coherent across a
-restart. Kanban remains the right tool only for work that is genuinely
-not an ERPNext write sequence (routing a checklist to the right humans,
-tracking non-ERPNext steps).
+## Kanban is how the plan gets dispatched
 
-**An explicit user ask for kanban tracking overrides the default above,
-but not the mechanism.** If the user explicitly asks for kanban tracking
-of ERPNext execution work, don't silently run it as a plain spec/batch
-sequence instead (that ignores the ask) — start the job through the ADR
-0008/0010 `batches` path (`erp_execute_write phase=render
-batches=...`), dispatched as one atomic, non-decomposed `kanban_create`
-card (never the board's own auto-decomposer — issue 01). That card is
-the "kanban" the user asked for; its own worker reaches for the
-`batches`/`job_id` execute path from inside it for the actual
-confirmation-gated writes. Say that explicitly before doing it, so the
-substitution is visible, not silent.
+The planner — this agent thread on the originating channel — is the
+decomposition authority. It produces one comprehensive plan up front
+(the anchor spec, below), splits it into atomic tasks each
+independently dispatchable (no task depends on a sibling still being
+planned), and creates one `kanban_create` card per atomic task. The
+board's own auto-decomposer is never used to do this splitting — it
+fans a card out into sub-cards no worker can run
+(`.scratch/qkeee-erp-kanban-execution-steering/issues/01-*`, still
+open) — the planner decomposing up front is what keeps that mitigation
+in effect, now for every domain, not only ERPNext execution.
+
+**ERPNext execution work is not special-cased away from Kanban
+anymore.** It's one atomic card like any other; the one thing that
+distinguishes it is what its *worker* does once dispatched: a card
+whose work includes a confirmation-gated ERPNext write reaches for the
+ADR 0008/0010 job-level `batches`/`job_id` path
+(`erp_execute_write phase=render batches=...`, then `op=notify.
+job_approval_request`) from inside its own dispatched run, because a
+kanban worker is headless and that path is what makes a headless
+worker's confirmation possible at all. That mechanism is unchanged by
+this section — only *when a card gets created* changed (now: for any
+write/multi-step request, uniformly), never *how a card's own
+confirmation-gated writes get approved*.
 
 **Cards go through the tools, and default to `ready`/`todo`, not
 triage.** Create, read and route cards only with the `kanban_*` tools;
@@ -52,8 +52,8 @@ workers. `kanban_create`'s `triage` argument defaults to `false`
 (`hermes_cli/kanban_db_graph.py`'s `initial_task_state()`:
 `triage → "triage"`, else any unfinished parent → `"todo"`, else
 `"ready"`) — **omit it** (or pass `triage: false` explicitly) for any
-card you create; it reaches a worker without a human specifying/
-splitting it first, exactly like the ADR 0008 job-execution card above.
+card you create; the planner already did the specifying/splitting
+above, so the card reaches a worker without a human doing that again.
 Pass `triage: true` only when the work genuinely isn't planned yet and
 a specifier profile needs to flesh out the body before any worker
 should touch it — the exception now, not the default.
@@ -81,8 +81,13 @@ where the detail actually lives (a spec file, a domain doctype, a
 comment thread) — a decision or a finding lives in exactly one place,
 never restated across the card and its detail going out of sync.
 
-**One anchor spec per objective, one per-card spec per card.** For a
-multi-card objective, write one **anchor spec** at the usual path
+**One anchor spec per objective, one per-card spec per card — the
+default planning artifact for any planned intake, not an opt-in used
+only when a human happened to pick Kanban.** The planner's
+comprehensive plan (the floor above) *is* the anchor spec; each atomic
+task's own scope is its per-card spec. For an objective that
+decomposes into more than one card, write one **anchor spec** at the
+usual path
 (`./qkeee-erp-specs/<slug>-<YYYYMMDD-HHMM>.md`): the objective, the
 global Deviations log, and the planned batch/card count. Then write one
 **per-card spec** per kanban card
@@ -99,17 +104,19 @@ re-reading the chat transcript would catch.
 
 ## When a spec is required
 
-**Required:** any write (create/update/submit/cancel/delete), any
-multi-step investigation (environment assessment, cross-domain work, a
-report touching more than one doctype), anything the user frames as a
-project/task rather than a single question, and anything run
-autonomously — autonomous mode doesn't exempt a task from this.
-
-**Skippable:** a single read-only lookup answerable in one or two
-`query`/`get`/`report` calls ("what's the leave balance for X", "pull
-the last 5 POs for supplier Y"). Don't wrap a one-shot read in spec
-overhead. When in doubt, write the spec — a short one costs little; an
-unreviewed multi-step write costs a lot.
+Same floor as "The floor" section above, restated for the spec
+specifically since it's possible to need a plan without yet having
+decided the card breakdown: **required** for any write (create/update/
+submit/cancel/delete), any multi-step investigation (environment
+assessment, cross-domain work, a report touching more than one
+doctype), anything the user frames as a project/task rather than a
+single question, and anything run autonomously — autonomous mode
+doesn't exempt a task from this. **Skippable** only for a single-turn,
+read-only lookup answerable in one or two `query`/`get`/`report` calls
+("what's the leave balance for X", "pull the last 5 POs for supplier
+Y") — don't wrap a one-shot read in spec-and-card overhead. When in
+doubt, write the spec — a short one costs little; an unreviewed
+multi-step write costs a lot.
 
 ## Procedure
 

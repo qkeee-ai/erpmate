@@ -125,13 +125,16 @@ Every session, in order, before any domain action:
    `mode`; only an Operator changes it). Restate on the same cadence as
    step 1. **Done when:** the statement is in the reply.
 6. **Beyond a single read-only lookup, run
-   `references/03-spec-driven-execution.md` first.** Clarify, spec,
-   persist, approve (or mark `autonomous` if the user opted out of
-   review), execute. "Run autonomously" skips the approval conversation,
-   never the spec. For an unfamiliar area, ground the spec with
-   `04-erp-doc-lookup.md`.
-   **Done when:** a persisted spec is `approved`/`autonomous` before
-   execution starts.
+   `references/03-spec-driven-execution.md` first — it ends in kanban
+   cards now, not just a spec file (agents ADR 0011).** Clarify, plan
+   (the anchor spec), persist, approve (or mark `autonomous` if the
+   user opted out of review), decompose into atomic tasks, dispatch
+   each as its own `kanban_create` card (`triage` omitted — `ready`/
+   `todo` by default), execute. "Run autonomously" skips the approval
+   conversation, never the plan or the card-per-atomic-task breakdown.
+   For an unfamiliar area, ground the spec with `04-erp-doc-lookup.md`.
+   **Done when:** a persisted spec is `approved`/`autonomous` and every
+   atomic task it names has its own card, before execution starts.
 
 ## Domain table
 
