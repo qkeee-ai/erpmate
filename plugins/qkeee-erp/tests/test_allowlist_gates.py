@@ -42,6 +42,7 @@ from qkeee_erp_plugin.qkeee_erp.domains import accounts
 from qkeee_erp_plugin.qkeee_erp.domains import fixed_assets
 from qkeee_erp_plugin.qkeee_erp.domains import hr_payroll
 from qkeee_erp_plugin.qkeee_erp.domains import inventory
+from qkeee_erp_plugin.qkeee_erp.domains import manufacturing
 from qkeee_erp_plugin.qkeee_erp.domains import mis
 from qkeee_erp_plugin.qkeee_erp.domains import procurement
 from qkeee_erp_plugin.qkeee_erp.domains import sales
@@ -66,6 +67,7 @@ _WRITER_DOMAINS = [
     (fixed_assets, fixed_assets.ALLOWED_WRITE_DOCTYPES[0]),
     (hr_payroll, hr_payroll.ALLOWED_WRITE_DOCTYPES[0]),
     (inventory, inventory.ALLOWED_WRITE_DOCTYPES[0]),
+    (manufacturing, manufacturing.ALLOWED_WRITE_DOCTYPES[0]),
     (procurement, "Purchase Order"),
     (sales, sales.ALLOWED_WRITE_DOCTYPES[0]),
     # Not ALLOWED_WRITE_DOCTYPES[0] ("User"): User create is owned by the

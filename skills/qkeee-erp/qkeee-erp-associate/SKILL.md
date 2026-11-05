@@ -150,7 +150,7 @@ the draft payload before `meta`; `preflight` lists the mandatory fields.
 | `sales` | Customer, Quotation, Sales Order, Delivery Note |
 | `procurement` | Supplier, Purchase Order, Request for Quotation, Supplier Quotation |
 | `inventory` | Item (master: `unscoped.generic`, see "Item master"), Warehouse, Stock Entry, Stock Reconciliation, Material Request, Batch, Serial No |
-| `manufacturing` | BOM, Work Order, Job Card — **unvalidated, no write path yet** |
+| `manufacturing` | BOM, Work Order, Job Card, Production Plan, Routing, Workstation, Operation — write path live via `manufacturing.generic`, pending the live round trip (see `domains/manufacturing.md`) |
 | `fixed-assets` | Asset, Asset Category, Asset Movement, Asset Maintenance, Asset Repair |
 | `system-admin` | User, Role, Role Profile, Workflow, Custom Field, Webhook, Notification |
 | `doc-extraction` | No doctypes — document/URL extraction into a staged report |

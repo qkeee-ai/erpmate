@@ -145,7 +145,7 @@ code; "Planned" = documented but no code exists yet.
 | **Fixed Assets** | Asset, Asset Movement, Asset Repair | Depreciation-run and disposal double-confirm tokens; concurrency-safe mutate wrapper; whitelisted-RPC dispatch for `make_depreciation_entry`/`scrap_asset`/`restore_asset`/`make_sales_invoice` |
 | **System Admin** | User, Role, Custom Field, Property Setter, Webhook, Workflow | Permission-manager calls, destructive-action gate, elevated-user creation, config-change gate, scheduler-status check, get_roles_and_doctypes/get_permissions |
 | **MIS** | *(none — empty allowlist by design)* | Structurally read-only; operation `mis.generic` always raises `DoctypeNotAllowedError` |
-| **Manufacturing** | *(none yet — no code)* | **Planned**: BOM/Work Order/Job Card domain, documented as an unvalidated hypothesis pending a real-instance confirmation pass |
+| **Manufacturing** | BOM, Work Order, Job Card, Production Plan, Routing, Workstation, Operation | `manufacturing.generic` live; BOM default-marking ambiguity refusal and Work Order stock-shortfall note enforced in code; init-bot provisioning (`DOMAIN_TEMPLATE_ROLES`) and the live round trip against a real instance pending |
 | **Doc Extraction** | *(none — structurally no connector at all)* | Turns attached PDFs/DOCX/XLSX/images or a shared URL into a staged, human-reviewable field report for a target doctype; never writes directly, not even gated by `qkeee_erp.mode`; low-confidence/illegible fields explicitly flagged rather than guessed; URL fetches never bypass a login/paywall |
 | **GRC-Audit** | *(cross-cutting, no doctypes of its own)* | Statutory-audit-trail conversational framing layered on top of another domain's work |
 

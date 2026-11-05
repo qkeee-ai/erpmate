@@ -242,6 +242,13 @@ DOMAIN_TEMPLATE_ROLES = {
     "inventory": ("Stock Manager", "Stock User", "Item Manager"),
     "procurement": ("Purchase Manager", "Purchase User", "Purchase Master Manager"),
     "sales": ("Sales Manager", "Sales User", "Sales Master Manager"),
+    # Stock ERPNext manufacturing-module roles. Not yet live-confirmed
+    # against a real instance's Role list the way every other row here
+    # was (agents .scratch/qkeee-erp-manufacturing-domain/issues/02-*,
+    # live round trip pending) -- a role missing on the instance adds
+    # nothing (DOMAIN_TEMPLATE_ROLES' own doc comment above), so a wrong
+    # name here fails safe, not silently.
+    "manufacturing": ("Manufacturing Manager", "Manufacturing User"),
 }
 
 

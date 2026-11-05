@@ -68,6 +68,7 @@ MAPPED_INVOICE = {"doctype": "Sales Invoice", "company": "Acme", "customer": Non
 TAMPER = {
     "accounts.generic": "name", "sales.generic": "name", "hr_payroll.generic": "name",
     "inventory.generic": "name", "procurement.generic": "name", "fixed_assets.generic": "name",
+    "manufacturing.generic": "name",
     "system_admin.generic": "payload", "unscoped.generic": "payload",
     "fixed_assets.depreciation_run": "total_depreciation", "fixed_assets.scrap": "reason",
     "fixed_assets.restore": "reason", "fixed_assets.sell": "reason",
