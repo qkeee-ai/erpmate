@@ -36,24 +36,33 @@ tracking non-ERPNext steps).
 **An explicit user ask for kanban tracking overrides the default above,
 but not the mechanism.** If the user explicitly asks for kanban tracking
 of ERPNext execution work, don't silently run it as a plain spec/batch
-sequence instead (that ignores the ask) and don't fall back to plain
-`kanban_create` either (still triage-bound, still subject to the
-auto-decomposer, issue 01) — start the job through the ADR 0008/0010
-`batches` path (`erp_execute_write phase=render batches=...`). That path
-creates its own single, non-decomposed job-execution card (ADR 0010
-point 4/5) the user can track on the board. Say that this is what
-"kanban" means for ERPNext execution work before doing it, so the
+sequence instead (that ignores the ask) — start the job through the ADR
+0008/0010 `batches` path (`erp_execute_write phase=render
+batches=...`), dispatched as one atomic, non-decomposed `kanban_create`
+card (never the board's own auto-decomposer — issue 01). That card is
+the "kanban" the user asked for; its own worker reaches for the
+`batches`/`job_id` execute path from inside it for the actual
+confirmation-gated writes. Say that explicitly before doing it, so the
 substitution is visible, not silent.
 
-**Cards go through the tools.** Create, read and route cards only with
-the `kanban_*` tools; they run in the gateway, which records each card's
-requester for its workers. A card you create lands in triage: tell the
-user it waits there to be specified and split, then reaches workers.
-**Exception (ADR 0010 point 5):** a job-execution card created by the
-ADR 0008 `batches` path above is never decomposed and skips triage —
-it's created straight into `todo`/`ready`. The triage default in this
-paragraph applies only to a plain `kanban_create` card (non-ERPNext
-coordination work).
+**Cards go through the tools, and default to `ready`/`todo`, not
+triage.** Create, read and route cards only with the `kanban_*` tools;
+they run in the gateway, which records each card's requester for its
+workers. `kanban_create`'s `triage` argument defaults to `false`
+(`hermes_cli/kanban_db_graph.py`'s `initial_task_state()`:
+`triage → "triage"`, else any unfinished parent → `"todo"`, else
+`"ready"`) — **omit it** (or pass `triage: false` explicitly) for any
+card you create; it reaches a worker without a human specifying/
+splitting it first, exactly like the ADR 0008 job-execution card above.
+Pass `triage: true` only when the work genuinely isn't planned yet and
+a specifier profile needs to flesh out the body before any worker
+should touch it — the exception now, not the default.
+`initial_status` is a narrower knob than it looks: it is checked only
+for the literal value `"blocked"` (parks the card for human ops);
+anything else, including `"running"` or `"ready"`, is silently ignored
+by `initial_task_state()` and has no effect on which stage the card
+actually lands in — don't reach for it to influence `ready`/`todo`/
+`triage`, only `triage` controls that.
 When the `kanban_*` tools are missing from your tool list, say so (the
 Operator runs `hermes qkeee-erp setup --apply-profile-fixes`) and keep
 the plan in a spec file.
