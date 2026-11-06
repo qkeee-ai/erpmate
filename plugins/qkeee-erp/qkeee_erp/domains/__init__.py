@@ -9,7 +9,6 @@ operations with core/operations.py. Writes go through
 operations.run_operation() / execute_write.py — a domain module has no
 write function of its own.
 
-`manufacturing.py` is intentionally absent — no write path exists for that
-domain yet (see references/domains/manufacturing.md). `doc_extraction.py`
-is also absent — that domain has no connector at all, no doctypes to write.
+`doc_extraction.py` is absent — that domain has no connector at all, no
+doctypes to write.
 """

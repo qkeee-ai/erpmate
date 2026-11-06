@@ -12,7 +12,7 @@ confirmation token -> RBAC -> audit -> send.
 """
 
 # Import every domain module for its side effect: registering its allowlist
-# and its operations. manufacturing/doc_extraction have no write path.
+# and its operations. doc_extraction has no write path.
 # notify is not a business domain (no generic op): its one operation logs
 # the task summary email.
 from .domains import (  # noqa: F401
@@ -20,6 +20,7 @@ from .domains import (  # noqa: F401
     fixed_assets,
     hr_payroll,
     inventory,
+    manufacturing,
     mis,
     notify,
     procurement,
