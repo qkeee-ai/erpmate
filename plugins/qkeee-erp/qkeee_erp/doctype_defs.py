@@ -68,7 +68,9 @@ AUDIT_LOG = {
         # describes. As a Dynamic Link, every audited record became
         # undeletable (Frappe's check_if_doc_is_dynamically_linked raises
         # LinkExistsError) — found live on DEMO_ERP, 2026-10-06. init_bot.py
-        # migrates an existing instance (MIGRATABLE_FIELDS below).
+        # converges an existing instance onto this type (see managed_keys()
+        # below — every field's type/options/etc. this module names is
+        # converged the same way, not just this one).
         {"fieldname": "reference_name", "label": "Reference Name", "fieldtype": "Data",
          "in_list_view": 1},
         {"fieldname": "requested_by", "label": "Requested By", "fieldtype": "Link",
@@ -303,9 +305,20 @@ def is_bot_read_link(field: dict) -> bool:
     return not (field.get("hidden") or field.get("read_only") or field.get("fetch_from"))
 
 
-# Fields whose type init_bot.py may change on an ALREADY-provisioned
-# instance, to converge it on the definitions above. Only these — nothing
-# else about a live doctype is ever modified by a re-run.
-MIGRATABLE_FIELDS = {
-    "Qkeee Bot Audit Log": ("reference_name",),
-}
+def managed_keys(field_def: dict) -> set:
+    """The keys this module's field definition itself specifies — every
+    one of them is what init_bot.py may converge a live field onto (type,
+    options, reqd, in_list_view, label, description, default, whatever
+    this field's dict happens to name). `fieldname` is the identity key,
+    never itself "converged". Any key NOT in this set (idx, permlevel,
+    Frappe's internal `name`, a Frappe-added field like `amended_from`
+    doctype_defs.py never defines at all) is never touched by a re-run —
+    see init_bot.py's _check_live_only_fields_unchanged() and
+    _provision_migrate_prepare().
+
+    Replaces the old MIGRATABLE_FIELDS allowlist (which named exactly one
+    field, "Qkeee Bot Audit Log".reference_name, the Dynamic Link -> Data
+    flip documented above) — that was a second, easily-stale list of field
+    names; every field this module defines is managed now, generically,
+    by its own definition instead."""
+    return set(field_def) - {"fieldname"}

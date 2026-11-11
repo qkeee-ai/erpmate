@@ -1910,6 +1910,7 @@ def health_check(tag: str = "default") -> dict:
     read fails or the bot lacks `Qkeee Bot` — the gate then refuses every
     business call.
     """
+    from .. import env_defs  # lazy: avoids a module-load-order assumption, same as operations.py's
     cfg = get_env_config(tag)
     result = _request(cfg, "GET", "/api/method/frappe.auth.get_logged_user")
     reset_identity_caches(tag)
@@ -1919,6 +1920,8 @@ def health_check(tag: str = "default") -> dict:
     # Account reads the bot's roles, and the bot holds `Qkeee Bot`.
     identity_gaps = bot_identity_gaps(tag, trust)
     capabilities["rbac_identity"] = not identity_gaps
+    env = _qkeee_env()
+    present = {suffix for suffix in env_defs.REQUIRED_PER_TAG if _tag_env_var(tag, suffix) in env}
     out = {
         "tag": tag, "base_url": cfg["base_url"], "status": "ok",
         "logged_in_as": result.get("message"),
@@ -1930,6 +1933,10 @@ def health_check(tag: str = "default") -> dict:
         "token_ttl_minutes": token_ttl_seconds(tag) // 60,
         "capabilities": capabilities,
         "gaps": identity_gaps + gaps,
+        # Report-only (env_defs.py): never read or returned as a value,
+        # just whether the required key is set at all. Never blocks this
+        # check or any other call.
+        "env_var_gaps": env_defs.missing_required_keys(present),
     }
     if trust.get("bot_stock_roles"):
         out["service_account_warning"] = (

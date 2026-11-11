@@ -82,19 +82,22 @@ class RunRealCallsLogRoleProvisioningAfterDoctypesTests(unittest.TestCase):
     can be written into it, so log_role_provisioning() must run AFTER
     the DocType-creation loop, not before/alongside Role creation."""
 
+    @patch.object(init_bot, "log_migration_summary")
     @patch.object(init_bot, "log_role_provisioning")
     @patch.object(init_bot, "ensure_qkeee_env_file_skeleton", return_value=False)
     @patch.object(init_bot, "ensure_doctype", return_value=True)
     @patch.object(init_bot, "ensure_role", return_value=True)
     @patch.object(init_bot.core_client, "health_check", return_value={"status": "ok"})
     @patch.object(init_bot, "compute_plan", return_value={"role_needed": True, "doctypes_needed": ["Qkeee Bot Audit Log"],
-                                                       "fields_to_migrate": []})
+                                                       "fields_to_migrate": [], "env_var_gaps": []})
     def test_log_role_provisioning_called_after_doctype_loop(
-            self, mocked_plan, mocked_health, mocked_role, mocked_doctype, mocked_env, mocked_log):
+            self, mocked_plan, mocked_health, mocked_role, mocked_doctype, mocked_env, mocked_log,
+            mocked_summary):
         calls = []
         mocked_doctype.side_effect = lambda *a, **k: calls.append("doctype") or True
         mocked_role.side_effect = lambda *a, **k: calls.append("role") or True
         mocked_log.side_effect = lambda *a, **k: calls.append("log")
+        mocked_summary.side_effect = lambda *a, **k: calls.append("summary")
 
         issued_at = int(time.time())
         token = init_bot._init_plan_token("qa", "admin@org.com", True,
@@ -103,9 +106,13 @@ class RunRealCallsLogRoleProvisioningAfterDoctypesTests(unittest.TestCase):
 
         # run_real() iterates ALL_DOCTYPES unconditionally (init_bot.py:983),
         # not just compute_plan()'s doctypes_needed — one "doctype" call per
-        # entry (Audit Log, Job Approval).
-        self.assertEqual(calls, ["role"] + ["doctype"] * len(doctype_defs.ALL_DOCTYPES) + ["log"])
+        # entry (Audit Log, Job Approval). log_migration_summary() runs last,
+        # after log_role_provisioning() (the Audit Log DocType must exist
+        # for either to land anywhere).
+        self.assertEqual(calls, ["role"] + ["doctype"] * len(doctype_defs.ALL_DOCTYPES)
+                         + ["log", "summary"])
         mocked_log.assert_called_once_with("qa", "admin@org.com", True, unittest.mock.ANY)
+        mocked_summary.assert_called_once()
 
 
 class AuditFieldMigrationTests(unittest.TestCase):
@@ -117,14 +124,33 @@ class AuditFieldMigrationTests(unittest.TestCase):
 
     AUDIT = "Qkeee Bot Audit Log"
 
-    def _live(self, reference_type):
+    def _live(self, reference_type, drop=()):
         from qkeee_erp_plugin.qkeee_erp.doctype_defs import ALL_DOCTYPES
         fields = [dict(f, name=f"row-{i}") for i, f in
-                  enumerate(next(d for d in ALL_DOCTYPES if d["name"] == self.AUDIT)["fields"])]
+                  enumerate(next(d for d in ALL_DOCTYPES if d["name"] == self.AUDIT)["fields"])
+                  if f["fieldname"] not in drop]
         for f in fields:
             if f["fieldname"] == "reference_name":
                 f["fieldtype"] = reference_type
         return {"name": self.AUDIT, "fields": fields}
+
+    @staticmethod
+    def _no_drift(name):
+        """A live fixture for `name` with every field exactly as
+        doctype_defs.py defines it — contributes no changes."""
+        from qkeee_erp_plugin.qkeee_erp.doctype_defs import ALL_DOCTYPES
+        defn = next(d for d in ALL_DOCTYPES if d["name"] == name)
+        return {"name": name, "fields": [dict(f, name=f"row-{i}")
+                                         for i, f in enumerate(defn["fields"])]}
+
+    def _live_doctype_side_effect(self, audit_live):
+        """_live_doctype() mock covering every doctype in ALL_DOCTYPES, not
+        just the Audit Log — compute_plan()/converge_fields() now iterate
+        all of them, so a blanket return_value (one fixture for every
+        doctype) would misreport every other doctype's fields as missing."""
+        def _side_effect(tag, name):
+            return audit_live if name == self.AUDIT else self._no_drift(name)
+        return _side_effect
 
     def test_definition_is_data_not_dynamic_link(self):
         from qkeee_erp_plugin.qkeee_erp.doctype_defs import ALL_DOCTYPES
@@ -133,12 +159,48 @@ class AuditFieldMigrationTests(unittest.TestCase):
         self.assertEqual(ref["fieldtype"], "Data")
 
     def test_plan_detects_a_dynamic_link_instance(self):
-        with patch.object(init_bot.core_client, "resource_exists", return_value=True),                 patch.object(init_bot, "_live_doctype", return_value=self._live("Dynamic Link")),                 patch.object(init_bot, "_bot_read_grants_needed", return_value=[]):
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True), \
+                patch.object(init_bot, "_live_doctype",
+                             side_effect=self._live_doctype_side_effect(self._live("Dynamic Link"))), \
+                patch.object(init_bot, "_bot_read_grants_needed", return_value=[]):
             plan = init_bot.compute_plan("qa")
         self.assertEqual(plan["fields_to_migrate"],
                          [f"{self.AUDIT}.reference_name: Dynamic Link -> Data"])
-        with patch.object(init_bot.core_client, "resource_exists", return_value=True),                 patch.object(init_bot, "_live_doctype", return_value=self._live("Data")),                 patch.object(init_bot, "_bot_read_grants_needed", return_value=[]):
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True), \
+                patch.object(init_bot, "_live_doctype",
+                             side_effect=self._live_doctype_side_effect(self._live("Data"))), \
+                patch.object(init_bot, "_bot_read_grants_needed", return_value=[]):
             self.assertEqual(init_bot.compute_plan("qa")["fields_to_migrate"], [])
+
+    def test_plan_detects_an_additive_field(self):
+        """A field doctype_defs.py defines that the live doctype is
+        missing entirely (an instance provisioned before that field
+        shipped) is reported as additive, not silently skipped — this is
+        the exact bug that broke init-bot on an old instance."""
+        live = self._live("Data", drop=("domain_code",))
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True), \
+                patch.object(init_bot, "_live_doctype",
+                             side_effect=self._live_doctype_side_effect(live)), \
+                patch.object(init_bot, "_bot_read_grants_needed", return_value=[]):
+            plan = init_bot.compute_plan("qa")
+        self.assertEqual(plan["fields_to_migrate"],
+                         [f"{self.AUDIT}.domain_code: + Data (new field)"])
+
+    def test_plan_detects_a_property_only_change(self):
+        """A field whose type already matches but some other property
+        (here in_list_view) drifted from doctype_defs.py converges too,
+        not just a fieldtype change."""
+        live = self._live("Data")
+        for f in live["fields"]:
+            if f["fieldname"] == "channel":
+                f["in_list_view"] = 0
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True), \
+                patch.object(init_bot, "_live_doctype",
+                             side_effect=self._live_doctype_side_effect(live)), \
+                patch.object(init_bot, "_bot_read_grants_needed", return_value=[]):
+            plan = init_bot.compute_plan("qa")
+        self.assertEqual(plan["fields_to_migrate"],
+                         [f"{self.AUDIT}.channel: in_list_view 0 -> 1"])
 
     def test_plan_token_covers_the_migration(self):
         a = init_bot._init_plan_token("qa", "a@b.c", False, [], issued_at=1, fields_to_migrate=[])
@@ -147,9 +209,12 @@ class AuditFieldMigrationTests(unittest.TestCase):
 
     def test_migration_patches_only_the_migratable_field_through_the_pipeline(self):
         live = self._live("Dynamic Link")
-        with patch.object(init_bot, "_live_doctype", return_value=live),                 patch.object(init_bot.operations, "run_operation") as run_op:
-            migrated = init_bot.migrate_fields("qa", "admin@org.com", "confirmed")
-        self.assertEqual(migrated, [f"{self.AUDIT}.reference_name"])
+        with patch.object(init_bot, "_live_doctype",
+                           side_effect=self._live_doctype_side_effect(live)), \
+                patch.object(init_bot.operations, "run_operation") as run_op:
+            migrated = init_bot.converge_fields("qa", "admin@org.com", "confirmed")
+        self.assertEqual(migrated, [f"{self.AUDIT}.reference_name: Dynamic Link -> Data"])
+        run_op.assert_called_once()
         key, args, _ctx = run_op.call_args.args
         self.assertEqual(key, "provisioning.migrate_fields")
         sent = {f["fieldname"]: f for f in args["fields"]}
@@ -158,6 +223,25 @@ class AuditFieldMigrationTests(unittest.TestCase):
             [f["fieldname"] for f in live["fields"]].index("reference_name")]["name"])
         untouched = [f for f in args["fields"] if f["fieldname"] != "reference_name"]
         self.assertEqual(untouched, [f for f in live["fields"] if f["fieldname"] != "reference_name"])
+
+    def test_converge_fields_adds_a_missing_field_through_the_pipeline(self):
+        """The bug this module exists to fix: a live doctype missing a
+        field doctype_defs.py now defines must get that field ADDED by
+        converge_fields(), not just silently skipped."""
+        live = self._live("Data", drop=("domain_code",))
+        with patch.object(init_bot, "_live_doctype",
+                           side_effect=self._live_doctype_side_effect(live)), \
+                patch.object(init_bot.operations, "run_operation") as run_op:
+            migrated = init_bot.converge_fields("qa", "admin@org.com", "confirmed")
+        self.assertEqual(migrated, [f"{self.AUDIT}.domain_code: + Data (new field)"])
+        run_op.assert_called_once()
+        _key, args, _ctx = run_op.call_args.args
+        sent = {f["fieldname"]: f for f in args["fields"]}
+        self.assertIn("domain_code", sent)
+        self.assertEqual(sent["domain_code"]["fieldtype"], "Data")
+        # every other live field rides along unchanged
+        untouched = [f for f in args["fields"] if f["fieldname"] != "domain_code"]
+        self.assertEqual(untouched, live["fields"])
 
     def test_migrate_operation_refuses_anything_but_the_definition(self):
         from qkeee_erp_plugin.qkeee_erp.core import operations
@@ -174,6 +258,15 @@ class AuditFieldMigrationTests(unittest.TestCase):
         with self.assertRaises(init_bot.core_client.DoctypeNotAllowedError):
             op.prepare({"doctype_name": "User", "fields": good}, ctx)
 
+    def test_migrate_operation_accepts_any_all_doctypes_member(self):
+        """MIGRATABLE_FIELDS is gone: every doctype this module ships is
+        now a valid doctype_name, not just the Audit Log."""
+        from qkeee_erp_plugin.qkeee_erp.core import operations
+        ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
+        op = operations.get_operation("provisioning.migrate_fields")
+        op.prepare({"doctype_name": self._no_drift("Qkeee Bot Job Approval")["name"],
+                   "fields": self._no_drift("Qkeee Bot Job Approval")["fields"]}, ctx)  # accepted
+
     def _run_gates(self, fields, live):
         from qkeee_erp_plugin.qkeee_erp.core import operations
         ctx = operations.WriteContext(tag="qa", mode="read-write", requested_by="a@b.c")
@@ -187,26 +280,49 @@ class AuditFieldMigrationTests(unittest.TestCase):
     def test_migration_keeps_a_live_only_legacy_field_unchanged(self):
         """Found live on DEMO_ERP 2026-10-06: the provisioned audit doctype
         carries a Frappe-added `amended_from` Link that doctype_defs.py
-        doesn't define. migrate_fields() sends every live row back, so the
+        doesn't define. converge_fields() sends every live row back, so the
         guard must accept a live-only row sent unchanged — otherwise the
         migration can never run on such an instance."""
         legacy = {"fieldname": "amended_from", "fieldtype": "Link", "options": self.AUDIT,
-                  "name": "row-legacy"}
+                  "label": "Amended From", "name": "row-legacy"}
         live = self._live("Dynamic Link")
         live["fields"].append(dict(legacy))
-        with patch.object(init_bot, "_live_doctype", return_value=live), \
+        with patch.object(init_bot, "_live_doctype",
+                           side_effect=self._live_doctype_side_effect(live)), \
                 patch.object(init_bot.operations, "run_operation") as run_op:
-            init_bot.migrate_fields("qa", "admin@org.com", "confirmed")
+            init_bot.converge_fields("qa", "admin@org.com", "confirmed")
         _key, args, _ctx = run_op.call_args.args
         self._run_gates(args["fields"], live)  # accepted
         for label, fields in (
                 ("retyped legacy", [dict(f, fieldtype="Code") if f["fieldname"] == "amended_from"
                                     else f for f in args["fields"]]),
+                ("relabeled legacy", [dict(f, label="Something Else")
+                                      if f["fieldname"] == "amended_from" else f
+                                      for f in args["fields"]]),
                 ("new extra field", args["fields"] + [{"fieldname": "evil", "fieldtype": "Code"}]),
                 ("dropped legacy", [f for f in args["fields"] if f["fieldname"] != "amended_from"])):
             with self.subTest(case=label):
                 with self.assertRaises(init_bot.core_client.GateRefusal):
                     self._run_gates(fields, live)
+
+    def test_migration_refuses_an_unmanaged_key_changed_on_a_shipped_field(self):
+        """A key doctype_defs.py's own definition doesn't name for a field
+        it DOES define (e.g. idx) must stay exactly as live — only the
+        keys that field's definition specifies may ever move, even once
+        other properties on that same field are legitimately converging."""
+        live = self._live("Dynamic Link")
+        for f in live["fields"]:
+            if f["fieldname"] == "session":
+                f["idx"] = 1
+        with patch.object(init_bot, "_live_doctype",
+                           side_effect=self._live_doctype_side_effect(live)), \
+                patch.object(init_bot.operations, "run_operation") as run_op:
+            init_bot.converge_fields("qa", "admin@org.com", "confirmed")
+        _key, args, _ctx = run_op.call_args.args
+        self._run_gates(args["fields"], live)  # accepted: idx rode along unchanged
+        tampered = [dict(f, idx=2) if f["fieldname"] == "session" else f for f in args["fields"]]
+        with self.assertRaises(init_bot.core_client.GateRefusal):
+            self._run_gates(tampered, live)
 
 
 class BotReadGrantTests(unittest.TestCase):
@@ -317,6 +433,7 @@ class BotReadGrantTests(unittest.TestCase):
 
     def test_run_real_grants_after_the_doctypes_exist(self):
         plan = {"role_needed": False, "doctypes_needed": [], "fields_to_migrate": [],
+                "env_var_gaps": [],
                 "bot_read_grants": ["Module Def: add", "Workflow: set_read"]}
         issued_at = int(time.time())
         token = init_bot._init_plan_token("qa", "admin@org.com", False, [], issued_at=issued_at,
@@ -328,6 +445,7 @@ class BotReadGrantTests(unittest.TestCase):
                 patch.object(init_bot, "ensure_doctype",
                              side_effect=lambda *a, **k: calls.append("doctype") or False), \
                 patch.object(init_bot, "log_role_provisioning"), \
+                patch.object(init_bot, "log_migration_summary"), \
                 patch.object(init_bot, "ensure_qkeee_env_file_skeleton", return_value=False), \
                 patch.object(init_bot.operations, "run_operation",
                              side_effect=lambda key, args, ctx: calls.append((key, args)) or {}):

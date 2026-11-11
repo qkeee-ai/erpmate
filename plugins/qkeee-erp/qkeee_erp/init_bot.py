@@ -28,9 +28,17 @@ restricted to exactly the Role and Audit Log DocType this script defines,
 and are not reachable from execute_write.py.
 
 **Re-run it on an already-provisioned instance after upgrading this skill.**
-The plan also converges existing provisioned doctypes on doctype_defs.py's
-MIGRATABLE_FIELDS — currently the audit log's `reference_name`, changed
-from Dynamic Link to Data because a Dynamic Link made every audited record
+The plan also converges every field doctype_defs.py defines, on every
+doctype it ships, onto the live instance: a field missing live (added
+since that instance was last provisioned) is added, and a field present
+on both sides gets every key doctype_defs.py specifies for it (type,
+options, reqd, in_list_view, label, …) converged to match — see
+doctype_defs.managed_keys(). A live-only field (one this module doesn't
+define at all, e.g. a Frappe-added `amended_from`) is never touched.
+Nothing is ever dropped, and no permission grant doctype_defs.py no
+longer wants is ever auto-revoked — both stay report-only, admin-decided.
+The motivating case: the audit log's `reference_name`, changed from
+Dynamic Link to Data because a Dynamic Link made every audited record
 undeletable (LinkExistsError) and silently dropped audit rows naming a
 record that doesn't exist. Until that migration runs, deletes of records
 the skill has audited fail on that instance.
@@ -74,11 +82,13 @@ from .core.client import ConnectorError, _qkeee_env_file_path, _audit_insert, _a
 from .core.confirm_token import compute_token, is_fresh, DEFAULT_TOKEN_TTL_SECONDS
 import urllib.parse
 
-from .doctype_defs import (ALL_DOCTYPES, AUDIT_LOG, BOT_READ_GRANTS, MIGRATABLE_FIELDS,
+from . import env_defs
+from .doctype_defs import (ALL_DOCTYPES, AUDIT_LOG, BOT_READ_GRANTS,
                            PROVISION_PTYPES, ROLE_NAME, ROLE_PAYLOAD, UNSCOPED_PROVISION_DOCTYPES,
                            DOMAIN_MASTER_DOCTYPES, DOMAIN_TEMPLATE_ROLES, HIDDEN_READS,
                            PERMLEVEL_PTYPES,
-                           SUBMIT_GATE_FIELDS, is_bot_read_link, level_key, split_level_key)
+                           SUBMIT_GATE_FIELDS, is_bot_read_link, level_key, managed_keys,
+                           split_level_key)
 
 
 # ---------------------------------------------------------------------------
@@ -112,45 +122,71 @@ def _definition(doctype_name: str) -> dict:
 
 
 def _provision_migrate_prepare(args, ctx):
-    """Field-type migration of an existing provisioned doctype. The body
-    must carry every shipped field with exactly the shipped type, so this
-    can only converge the live doctype on doctype_defs.py. Fields the
-    definition doesn't name (e.g. a Frappe-added `amended_from` on an
-    instance provisioned by an older version) may ride along, but only
-    unchanged — _check_live_only_fields_unchanged() enforces that against
-    the live doctype. Never adds a field, drops one, or sets another type."""
+    """Field convergence of an existing provisioned doctype. The body must
+    carry every field doctype_defs.py defines for `doctype_name`, with
+    every key that field's own definition specifies (doctype_defs.
+    managed_keys() — fieldtype, options, reqd, in_list_view, label, …,
+    whatever that field's dict happens to name) set to exactly that
+    value. This is what lets the body add a field doctype_defs.py defines
+    but the live doctype doesn't have yet: it's just another managed
+    field, pinned to the definition, same as one that's merely changing
+    type or a property. Fields the definition doesn't name at all (e.g. a
+    Frappe-added `amended_from` on an instance provisioned by an older
+    version) may ride along, but only unchanged —
+    _check_live_only_fields_unchanged() enforces that against the live
+    doctype. Never drops a field, and never sets a key this module
+    doesn't itself specify for that field."""
     name = args.get("doctype_name")
-    if set(args) != {"doctype_name", "fields"} or name not in MIGRATABLE_FIELDS:
+    names = {d["name"] for d in ALL_DOCTYPES}
+    if set(args) != {"doctype_name", "fields"} or name not in names:
         raise core_client.DoctypeNotAllowedError(
-            f"provisioning.migrate_fields only migrates {sorted(MIGRATABLE_FIELDS)}.")
-    want = {f["fieldname"]: f["fieldtype"] for f in _definition(name)["fields"]}
-    got = {f.get("fieldname"): f.get("fieldtype") for f in args["fields"]}
-    if {k: got.get(k) for k in want} != want:
-        raise core_client.DoctypeNotAllowedError(
-            f"provisioning.migrate_fields: the fields sent for {name!r} must match "
-            f"doctype_defs.py exactly (names and types).")
+            f"provisioning.migrate_fields only migrates {sorted(names)}.")
+    shipped = {f["fieldname"]: f for f in _definition(name)["fields"]}
+    got = {f.get("fieldname"): f for f in args["fields"]}
+    for fieldname, want in shipped.items():
+        sent = got.get(fieldname) or {}
+        if any(sent.get(key) != want.get(key) for key in managed_keys(want)):
+            raise core_client.DoctypeNotAllowedError(
+                f"provisioning.migrate_fields: the fields sent for {name!r} must match "
+                f"doctype_defs.py exactly (names and the keys each field's definition "
+                f"specifies).")
     return operations.PreparedRequest(transport="resource", doctype="DocType", action="update",
                                       name=name, body={"fields": args["fields"]})
 
 
 def _check_live_only_fields_unchanged(req, args, ctx):
     """Precondition for provisioning.migrate_fields: the fields sent must be
-    exactly the live doctype's fields (none added, none dropped), and every
-    field doctype_defs.py doesn't define must keep its live type/options."""
+    exactly the live doctype's fields plus any doctype_defs.py defines that
+    aren't live yet (none dropped, nothing else added). Two kinds of key
+    must never move, even though _provision_migrate_prepare() already
+    pins every MANAGED key to doctype_defs.py:
+      - every key on a field doctype_defs.py doesn't define at all (a
+        live-only field) must equal its live value, in full;
+      - on a field doctype_defs.py DOES define, every key its definition
+        does NOT manage (idx, permlevel, Frappe's internal `name`, …)
+        must also equal its live value — doctype_defs.py's managed_keys()
+        is the only thing this convergence may ever touch on any field."""
     name = args["doctype_name"]
-    shipped = {f["fieldname"] for f in _definition(name)["fields"]}
+    shipped = {f["fieldname"]: f for f in _definition(name)["fields"]}
     live = {f.get("fieldname"): f for f in _live_doctype(ctx.tag, name).get("fields", [])}
     sent = {f.get("fieldname"): f for f in args["fields"]}
-    if set(sent) != set(live) | shipped:
+    if set(sent) != set(live) | set(shipped):
         raise core_client.PreconditionFailedError(
             f"provisioning.migrate_fields: fields sent for {name!r} add or drop a field "
-            f"(sent {sorted(set(sent) ^ (set(live) | shipped))} differ from live+definition).")
-    for fieldname in set(sent) - shipped:
-        s, l = sent[fieldname], live[fieldname]
-        if (s.get("fieldtype"), s.get("options")) != (l.get("fieldtype"), l.get("options")):
+            f"(sent {sorted(set(sent) ^ (set(live) | set(shipped)))} differ from "
+            f"live+definition).")
+    for fieldname in set(sent) - set(shipped):
+        if sent[fieldname] != live[fieldname]:
             raise core_client.PreconditionFailedError(
                 f"provisioning.migrate_fields: live-only field {fieldname!r} on {name!r} must be "
                 f"sent unchanged.")
+    for fieldname in set(sent) & set(shipped) & set(live):
+        unmanaged = set(live[fieldname]) - managed_keys(shipped[fieldname])
+        if any(sent[fieldname].get(key) != live[fieldname].get(key) for key in unmanaged):
+            raise core_client.PreconditionFailedError(
+                f"provisioning.migrate_fields: field {fieldname!r} on {name!r} changed a key "
+                f"doctype_defs.py doesn't manage for it; only {sorted(managed_keys(shipped[fieldname]))} "
+                f"may ever change.")
 
 
 for _key, _prep, _summary, _pre in (
@@ -702,15 +738,15 @@ def compute_plan(tag: str, domains=None, strip_stock_roles: bool = False) -> dic
         if not core_client.resource_exists(tag, "DocType", d["name"], credential="admin")
     ]
     fields_to_migrate = []
-    for name, fieldnames in sorted(MIGRATABLE_FIELDS.items()):
+    for doctype_def in sorted(ALL_DOCTYPES, key=lambda d: d["name"]):
+        name = doctype_def["name"]
         if name in doctypes_needed:
             continue  # created fresh from the current definition
-        live = {f.get("fieldname"): f.get("fieldtype") for f in _live_doctype(tag, name).get("fields", [])}
-        want = {f["fieldname"]: f["fieldtype"] for f in _definition(name)["fields"]}
-        fields_to_migrate += [f"{name}.{fn}: {live.get(fn)} -> {want[fn]}"
-                              for fn in fieldnames if live.get(fn) != want[fn]]
+        _, changes = _classify_fields(tag, name)
+        fields_to_migrate += changes
     plan = {"role_needed": role_needed, "doctypes_needed": doctypes_needed,
             "fields_to_migrate": fields_to_migrate,
+            "env_var_gaps": _env_var_gaps(tag),
             "bot_read_grants": _bot_read_grants_needed(tag),
             **_bot_role_plan(tag, strip_stock_roles),
             "business_grants": [], "skipped_privileged": [], "extra_rights": [],
@@ -718,6 +754,15 @@ def compute_plan(tag: str, domains=None, strip_stock_roles: bool = False) -> dic
     if domains:
         plan.update(_business_plan(tag, domains))
     return plan
+
+
+def _env_var_gaps(tag: str) -> list:
+    """Required qkeee-erp.env keys (env_defs.REQUIRED_PER_TAG) not set for
+    `tag`. Presence-only, never reads a value — see env_defs.py."""
+    env = core_client._qkeee_env()
+    present = {suffix for suffix in env_defs.REQUIRED_PER_TAG
+              if core_client._tag_env_var(tag, suffix) in env}
+    return env_defs.missing_required_keys(present)
 
 
 def _plan_token(tag, requested_by, plan, issued_at):
@@ -757,6 +802,12 @@ def _print_bot_findings(plan) -> None:
               f"skipped.")
     for extra in plan.get("extra_rights") or []:
         print(f"NOTE: {ROLE_NAME} holds rights beyond the plan (not removed): {extra}.")
+    for change in plan.get("fields_to_migrate") or []:
+        print(f"NOTE: field convergence needed — {change}.")
+    for suffix in plan.get("env_var_gaps") or []:
+        print(f"WARN: qkeee-erp.env is missing required QKEEE_ERP_<TAG>_{suffix} "
+              f"({env_defs.REQUIRED_PER_TAG[suffix]}). Add it manually — this tooling never "
+              f"writes secret values.")
 
 
 def _live_doctype(tag: str, name: str) -> dict:
@@ -766,34 +817,66 @@ def _live_doctype(tag: str, name: str) -> dict:
     return core_client._request(cfg, "GET", f"/api/resource/DocType/{urllib.parse.quote(name)}").get("data") or {}
 
 
-def migrate_fields(tag: str, requested_by: str, approval_note: str) -> list:
-    """Converge each provisioned doctype's MIGRATABLE_FIELDS on
-    doctype_defs.py. Keeps every live field row (so Frappe updates rows in
-    place) and changes only the type/options of the migratable ones."""
-    migrated = []
-    for name, fieldnames in sorted(MIGRATABLE_FIELDS.items()):
-        live_fields = _live_doctype(tag, name).get("fields", [])
-        want = {f["fieldname"]: f for f in _definition(name)["fields"]}
-        changed = [f["fieldname"] for f in live_fields
-                   if f.get("fieldname") in fieldnames
-                   and f.get("fieldtype") != want[f["fieldname"]]["fieldtype"]]
-        if not changed:
+def _classify_fields(tag: str, name: str) -> tuple:
+    """(patched_fields, change_strings) for one doctype: every live field,
+    with every doctype_defs.managed_keys() key on a changed field
+    converged to doctype_defs.py's value, plus one new field dict (taken
+    verbatim) per field doctype_defs.py defines that the live doctype
+    doesn't have yet. `change_strings` describes each change for plan/
+    report output — tagged additive ("+ <type> (new field)"), type-changed
+    ("<old> -> <new>"), or property-changed (the differing keys, not
+    fieldtype). Shared by compute_plan() (report-only) and
+    converge_fields() (acts on it), so the two can never disagree about
+    what needs converging. A live-only field (not in doctype_defs.py) is
+    never touched or reported here — see _check_live_only_fields_unchanged()."""
+    live_fields = _live_doctype(tag, name).get("fields", [])
+    live = {f.get("fieldname"): f for f in live_fields}
+    shipped = {f["fieldname"]: f for f in _definition(name)["fields"]}
+    patched = [dict(f) for f in live_fields]
+    by_name = {f["fieldname"]: f for f in patched}
+    changes = []
+    for fieldname, want in shipped.items():
+        if fieldname not in live:
+            patched.append(dict(want))
+            changes.append(f"{name}.{fieldname}: + {want.get('fieldtype')} (new field)")
             continue
-        patched = []
-        for f in live_fields:
-            f = dict(f)
-            if f.get("fieldname") in changed:
-                f["fieldtype"] = want[f["fieldname"]]["fieldtype"]
-                f["options"] = want[f["fieldname"]].get("options")
-            patched.append(f)
+        row = by_name[fieldname]
+        diffs = sorted(k for k in managed_keys(want) if row.get(k) != want.get(k))
+        if not diffs:
+            continue
+        before = {k: row.get(k) for k in diffs}
+        for k in managed_keys(want):
+            row[k] = want.get(k)
+        if "fieldtype" in diffs:
+            changes.append(f"{name}.{fieldname}: {before['fieldtype']} -> {want['fieldtype']}")
+        else:
+            detail = ", ".join(f"{k} {before[k]!r} -> {want.get(k)!r}" for k in diffs)
+            changes.append(f"{name}.{fieldname}: {detail}")
+    return patched, changes
+
+
+def converge_fields(tag: str, requested_by: str, approval_note: str) -> list:
+    """Converge every doctype in ALL_DOCTYPES onto doctype_defs.py: adds a
+    field doctype_defs.py defines but the live doctype doesn't have yet,
+    and converges every managed key (type, options, reqd, in_list_view,
+    label, …) on a field present on both sides. Never drops a live-only
+    field doctype_defs.py doesn't define, and never touches a key that
+    field's own definition doesn't name — see doctype_defs.managed_keys()
+    and _check_live_only_fields_unchanged()."""
+    migrated = []
+    for doctype_def in sorted(ALL_DOCTYPES, key=lambda d: d["name"]):
+        name = doctype_def["name"]
+        patched, changes = _classify_fields(tag, name)
+        if not changes:
+            continue
         operations.run_operation("provisioning.migrate_fields",
                                  {"doctype_name": name, "fields": patched},
                                  operations.WriteContext(tag=tag, mode="read-write",
                                                          requested_by=requested_by,
                                                          user_approved=True,
                                                          approval_note=approval_note))
-        migrated += [f"{name}.{fn}" for fn in changed]
-        print(f"Migrated {name}: {changed} -> doctype_defs.py types.")
+        migrated += changes
+        print(f"Converged {name}: {changes}.")
     return migrated
 
 
@@ -879,6 +962,59 @@ def log_role_provisioning(tag: str, requested_by: str, role_created: bool, appro
     })
     _audit_submit(cfg, create_name)
     print(f"Logged Create of Role '{ROLE_NAME}' to Qkeee Bot Audit Log"
+          + (f" ({create_name})." if create_name else " — insert failed, see WARN above."))
+
+
+def log_migration_summary(tag: str, requested_by: str, approval_note: str, plan: dict,
+                          summary: dict) -> None:
+    """One Qkeee Bot Audit Log row per init-bot run recording the full
+    categorized convergence plan (field_diff: fields_to_migrate,
+    bot_read_grants, business_grants, env_var_gaps — what this run
+    found, whether or not anything changed), and, only when something
+    actually changed, a second row recording what was applied
+    (payload_after: this run's own summary dict).
+
+    This is the durable per-run trail init_bot.py relies on instead of a
+    persisted state/version file: compute_plan() still live-diffs the
+    target fresh on every invocation (no cache to go stale), and this is
+    what makes each run's result queryable afterwards. Reuses
+    _audit_insert()/_audit_submit() directly, the same bypass
+    log_role_provisioning() above uses and for the same reason: this
+    records the tool's own bootstrap/convergence action, not a business
+    write, and runs after that function so the Qkeee Bot Audit Log
+    DocType is guaranteed to already exist."""
+    cfg = core_client.get_env_config(tag)
+    common = {
+        "session": "init_bot", "domain_code": "qkeee-erp-associate/init_bot",
+        "environment_tag": tag, "channel": "CLI",
+        "reference_doctype": "DocType", "reference_name": "init-bot convergence check",
+        "requested_by": requested_by,
+    }
+    found = {k: plan.get(k, []) for k in
+            ("fields_to_migrate", "bot_read_grants", "business_grants", "env_var_gaps")}
+
+    read_name = _audit_insert(cfg, {
+        **common, "action": "Read", "timestamp": _now_iso(), "status": "Success",
+        "user_approved": "Not Required", "field_diff": json.dumps(found),
+    })
+    _audit_submit(cfg, read_name)
+    print(f"Logged convergence check to Qkeee Bot Audit Log"
+          + (f" ({read_name})." if read_name else " — insert failed, see WARN above."))
+
+    changed = any(summary.get(k) for k in
+                 ("role_created", "doctypes_created", "fields_migrated", "bot_read_grants",
+                  "bot_role_change", "business_grants"))
+    if not changed:
+        print("Nothing converged this run — skipping the applied-changes audit entry.")
+        return
+
+    create_name = _audit_insert(cfg, {
+        **common, "action": "Update", "timestamp": _now_iso(), "status": "Success",
+        "user_approved": "Approved", "approval_note": approval_note,
+        "payload_after": json.dumps(summary),
+    })
+    _audit_submit(cfg, create_name)
+    print(f"Logged applied convergence to Qkeee Bot Audit Log"
           + (f" ({create_name})." if create_name else " — insert failed, see WARN above."))
 
 
@@ -985,7 +1121,7 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int, do
         results[doctype_def["name"]] = ensure_doctype(tag, doctype_def, requested_by, approval_note)
 
     _step("Field migrations")
-    migrated = migrate_fields(tag, requested_by, approval_note) if plan["fields_to_migrate"] else []
+    migrated = converge_fields(tag, requested_by, approval_note) if plan["fields_to_migrate"] else []
 
     _step(f"Read grants for {ROLE_NAME}")
     granted = grant_bot_reads(tag, requested_by, grants, approval_note) if grants else []
@@ -1023,8 +1159,12 @@ def run_real(tag: str, requested_by: str, confirm_token: str, issued_at: int, do
         "extra_rights": plan.get("extra_rights", []),
         "template_roles_empty": plan.get("template_roles_empty", []),
         "qkeee_env_file_created": env_created,
+        "env_var_gaps": plan.get("env_var_gaps", []),
     }
     print(json.dumps(summary, indent=2))
+
+    _step("Qkeee Bot Audit Log: recording this run's convergence")
+    log_migration_summary(tag, requested_by, approval_note, plan, summary)
 
     _step("Before going live — steady-state bot account check")
     print(

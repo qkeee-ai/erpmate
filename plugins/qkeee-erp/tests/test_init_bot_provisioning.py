@@ -343,6 +343,7 @@ class BotRolePlanTests(unittest.TestCase):
 
 class RunTests(unittest.TestCase):
     PLAN = {"role_needed": False, "doctypes_needed": [], "fields_to_migrate": [],
+            "env_var_gaps": [],
             "bot_read_grants": ["Workflow: add"],
             "bot_role_change": {"user": BOT, "roles_before": [], "roles_after": [ROLE]},
             "bot_stock_roles": [], "bot_identity_error": None,
@@ -365,6 +366,7 @@ class RunTests(unittest.TestCase):
                 patch.object(init_bot, "ensure_role", return_value=False), \
                 patch.object(init_bot, "ensure_doctype", return_value=False), \
                 patch.object(init_bot, "log_role_provisioning"), \
+                patch.object(init_bot, "log_migration_summary"), \
                 patch.object(init_bot, "ensure_qkeee_env_file_skeleton", return_value=False), \
                 patch.object(init_bot.operations, "run_operation",
                              side_effect=lambda key, args, ctx: calls.append(key) or {}):
@@ -385,6 +387,54 @@ class RunTests(unittest.TestCase):
         printed = "\n".join(str(c.args[0]) for c in out.call_args_list if c.args)
         self.assertIn("--strip-stock-roles", printed)
         self.assertIn("a new row (read) on 'Item'", printed)
+
+
+class EnvVarManifestTests(unittest.TestCase):
+    """env_defs.py's required-key presence check: report-only, never
+    blocks a run, never part of the confirm token."""
+
+    def test_compute_plan_reports_missing_required_keys(self):
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True), \
+                patch.object(init_bot, "_live_doctype",
+                             side_effect=lambda tag, name: next(
+                                 d for d in init_bot.ALL_DOCTYPES if d["name"] == name)), \
+                patch.object(init_bot, "_bot_read_grants_needed", return_value=[]), \
+                patch.object(init_bot.core_client, "_qkeee_env", return_value={}):
+            plan = init_bot.compute_plan("qa")
+        self.assertEqual(plan["env_var_gaps"], sorted(init_bot.env_defs.REQUIRED_PER_TAG))
+
+    def test_compute_plan_reports_no_gaps_once_every_required_key_is_set(self):
+        env = {init_bot.core_client._tag_env_var("qa", s): "x"
+              for s in init_bot.env_defs.REQUIRED_PER_TAG}
+        with patch.object(init_bot.core_client, "resource_exists", return_value=True), \
+                patch.object(init_bot, "_live_doctype",
+                             side_effect=lambda tag, name: next(
+                                 d for d in init_bot.ALL_DOCTYPES if d["name"] == name)), \
+                patch.object(init_bot, "_bot_read_grants_needed", return_value=[]), \
+                patch.object(init_bot.core_client, "_qkeee_env", return_value=env):
+            plan = init_bot.compute_plan("qa")
+        self.assertEqual(plan["env_var_gaps"], [])
+
+    def test_env_var_gaps_never_triggers_needs_action(self):
+        plan = dict(self.PLAN, bot_read_grants=[], business_grants=[], bot_role_change=None,
+                   env_var_gaps=sorted(init_bot.env_defs.REQUIRED_PER_TAG))
+        self.assertFalse(init_bot._needs_action(plan))
+
+    def test_env_var_gaps_is_excluded_from_the_confirm_token(self):
+        base = dict(self.PLAN, env_var_gaps=[])
+        changed = dict(self.PLAN, env_var_gaps=sorted(init_bot.env_defs.REQUIRED_PER_TAG))
+        self.assertEqual(init_bot._plan_token("qa", "a@b.c", base, 1),
+                         init_bot._plan_token("qa", "a@b.c", changed, 1))
+
+    def test_print_bot_findings_warns_on_a_gap(self):
+        plan = dict(self.PLAN, env_var_gaps=["ADMIN_API_KEY"])
+        with patch("builtins.print") as out:
+            init_bot._print_bot_findings(plan)
+        printed = "\n".join(str(c.args[0]) for c in out.call_args_list if c.args)
+        self.assertIn("QKEEE_ERP_<TAG>_ADMIN_API_KEY", printed)
+        self.assertIn("never writes secret values", printed)
+
+    PLAN = RunTests.PLAN
 
 
 class AdminKeyReadsTests(unittest.TestCase):
