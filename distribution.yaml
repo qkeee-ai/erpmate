@@ -45,6 +45,7 @@ distribution_owned:
   - skills/email/DESCRIPTION.md
   - skills/email/email-inbox-triage
   - skills/email/himalaya
+  - skills/adminops/lcm-self-heal
   - cron/jobs.json
   - config.yaml
   - mcp.json
@@ -56,3 +57,9 @@ distribution_owned:
   # refuses every cron/ path except cron/jobs.json — scripts/ is a
   # sibling top-level dir, not under cron/, so it is not blocked).
   - scripts/qkeee_erp_job_status_poller.py
+  # cron/jobs.json's "lcm-corruption-check" entry names this one; same
+  # scripts/-resolution reasoning as the poller script above. The boot
+  # check (docker/cont-init.d/0186-lcm-corruption-check) runs this exact
+  # file too, so it needs the same explicit ownership to actually land
+  # in $HERMES_HOME/scripts/ on a profile update.
+  - scripts/lcm_corruption_check.py

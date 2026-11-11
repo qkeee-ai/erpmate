@@ -55,6 +55,7 @@ Defined in `SOUL.md` — direct, precise, schema-over-memory, explains the "why"
 - Model / provider: `openrouter/auto-beta` via OpenRouter (`config.yaml` → `model`).
 - MCP servers: none configured (`mcp.json` → `mcpServers` is empty). ERPNext access goes through the `qkeee-erp` plugin's `erp_*` tools (a REST connector in the gateway), not MCP.
 - Cron/scheduled jobs: `qkeee-erp-job-status-poller` (agents ADR 0010, issue 23) — a `no_agent` script, every 5 minutes, reporting open kanban-job parks/blocks by email + Google Chat (`notify.job_status_update`). Ships paused; an Operator reviews `QKEEE_ERP_<TAG>_ADMIN_EMAIL` is set, then `hermes cron resume qkeee-erp-job-status-poller`.
+- `lcm-corruption-check` — a `no_agent` script (`scripts/lcm_corruption_check.py`), every 12 hours and once at container boot (`docker/cont-init.d/0186-lcm-corruption-check`). Runs `adminops/lcm-db-recover.py diagnose` (and, only on damage, `rebuild`) against this profile's `lcm.db` — read-only against the live file, never `swap`/gateway stop (see `skills/adminops/lcm-self-heal/SKILL.md` for why). On a finding: emails `QKEEE_ERP_<TAG>_ADMIN_EMAIL` and, if set, posts to `QKEEE_ERP_<TAG>_OPS_CHAT_WEBHOOK` (a Google Chat incoming webhook) with the diagnose/rebuild output and the exact remaining swap commands. Confirm with `hermes cron list` after install — resume with `hermes cron resume lcm-corruption-check` if it installed paused.
 
 ## Escalation
 

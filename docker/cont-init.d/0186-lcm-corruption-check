@@ -1,0 +1,34 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Boot-time lcm.db corruption check. The `lcm-corruption-check` cron job
+# (cron/jobs.json) runs scripts/lcm_corruption_check.py every 12h too, but
+# a fresh boot is the single most important time to know: once lcm.db is
+# corrupted, compaction fails on every turn from the first chat onward
+# (adminops/lcm-db-recover.md's "Symptoms"). Runs the SAME script, once,
+# for every installed profile that has it.
+#
+# Loops over every profile dir rather than trusting one name, for the same
+# reason 0158-erp-skills-unlock does: the active profile name
+# (/run/hermes-profile-name) does not survive a restart.
+# Idempotent (read-only unless damage is found, and even then only writes
+# a new /tmp candidate file — see the script's own docstring). Non-fatal:
+# a failed check must not stop the agent from starting.
+
+HERMES_HOME_ROOT="${HERMES_HOME:-/opt/data}"
+
+run_for() {  # $1 = that profile's own HERMES_HOME
+    PROFILE_HOME="$1"
+    SCRIPT="$PROFILE_HOME/scripts/lcm_corruption_check.py"
+    [ -f "$SCRIPT" ] || return 0
+    if HOME="$PROFILE_HOME" HERMES_HOME="$PROFILE_HOME" s6-setuidgid hermes python3 "$SCRIPT"; then
+        echo "[lcm-corruption-check] ok ($PROFILE_HOME)"
+    else
+        echo "[lcm-corruption-check] WARNING: check failed for $PROFILE_HOME (non-fatal)" >&2
+    fi
+}
+
+for DIR in "$HERMES_HOME_ROOT"/profiles/*/; do
+    [ -d "$DIR" ] || continue
+    run_for "${DIR%/}"
+done
+exit 0

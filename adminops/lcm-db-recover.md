@@ -53,6 +53,10 @@ The plugin's repair drops the index and rebuilds it from `messages`. That cannot
 
 ## Procedure
 
+The agent itself can run steps 1 (diagnose) and 3 (rebuild) when it recognizes the symptoms below — see the `lcm-self-heal` skill (`skills/adminops/lcm-self-heal/`). It stops there and hands off steps 2, 4 and 5: it can't safely stop the gateway that is serving its own session and then continue.
+
+Nothing has to wait for a live chat session to notice, either: `scripts/lcm_corruption_check.py` (`cron/jobs.json`'s `lcm-corruption-check` job) runs the same diagnose+rebuild pair every 12 hours and once at every container boot (`docker/cont-init.d/0186-lcm-corruption-check`), unattended, and emails/Google-Chats the finding plus the candidate's path to the configured ERP admin — see `profile.md`'s Config Summary. It stops at the same boundary as the skill, for the same reason.
+
 Run every step inside the container as root, so that `swap` can restore the file owner:
 
 ```sh
