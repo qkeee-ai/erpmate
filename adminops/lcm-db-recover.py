@@ -360,12 +360,12 @@ def cmd_rebuild(args) -> int:
         o.execute(sql)
     print(f"  triggers restored: {len(triggers)}, views: {len(views)}")
 
-    try:
-        for name, seq in s.execute("SELECT name, seq FROM sqlite_sequence").fetchall():
-            if o.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = ?", (seq, name)).rowcount == 0:
-                o.execute("INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)", (name, seq))
-    except sqlite3.OperationalError:
-        pass  # no AUTOINCREMENT tables
+    seq_got, seq_errors = scan_rows(s, "sqlite_sequence", ["name", "seq"], use_rowid=False)
+    for name, seq in seq_got.values():
+        if o.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = ?", (seq, name)).rowcount == 0:
+            o.execute("INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)", (name, seq))
+    for e in seq_errors:
+        print(f"  sqlite_sequence: {e}")
 
     if not args.keep_fts_flags and "metadata" in {n for n, _ in tables}:
         if "key" in table_shape(o, "metadata", "")[0]:
