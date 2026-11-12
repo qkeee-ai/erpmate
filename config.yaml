@@ -3,96 +3,27 @@ model:
   provider: openrouter
   base_url: https://openrouter.ai/api/v1
   api_mode: chat_completions
-# fallback_providers: added 2026-10-07. Empty by default, so one provider
-# error (overload/429/5xx) past api_max_retries ended the turn outright.
-# A different vendor from model.default on purpose — a fallback that shares
-# the primary's upstream fails with it. Picked from jev routing.json's
-# medium/general pool (catalog-validated). PAID SKU: this lane is the
-# user-facing turn, not background aux traffic, so free_only does not apply.
+# fallback_providers: used when the primary (model.default) errors past
+# api_max_retries. A different vendor on purpose, so an upstream outage
+# doesn't take out both. PAID SKU: this is the user-facing turn lane, not
+# background aux traffic, so auxiliary.free_only below does not apply.
 fallback_providers:
   - provider: openrouter
     model: z-ai/glm-5.3-flash
-# auxiliary: added 2026-09-03 during the token-usage review. Two problems
-# observed in gateway logs:
-#   1. "Auxiliary client: PAID lane engaged..." WARNING fires on every
-#      non-:free OpenRouter fallback — free_only forces the fallback lane
-#      to stay on :free SKUs (or skip it) instead of silently spending.
-#   2. background_review (the post-turn "review conversation, update skill
-#      library" self-improvement pass) was running on the MAIN model
-#      (nex-agi/nex-n2-mini) every single turn, including trivial ones —
-#      93K/79K input tokens per run in observed logs, one landing
-#      result=none. Routing it to a dedicated free model keeps the
-#      self-improvement mechanism (now safer anyway per skills.write_
-#      approval + curator.consolidate below) without paying main-model
-#      rates for it on every turn.
-#
-# 2026-10-05 follow-up: free_only was silently killing the ENTIRE auxiliary
-# lane, not just the fallback. Every auxiliary task block defaults to
-# provider: "auto", model: "" — which means "inherit the main model", i.e.
-# openrouter/auto-beta (a PAID SKU). _resolve_openrouter_branch() passes that
-# inherited model into _try_openrouter(), where free_only rejects anything not
-# ending in ":free", so each block was skipped before any credential check:
-#
-#   auxiliary.free_only is enabled but the OpenRouter fallback model
-#   'openrouter/auto-beta' is not a :free SKU — skipping the OpenRouter fallback
-#   resolve_provider_client: nous requested but Nous Portal not configured
-#
-# With the Nous lane unauthenticated too, that left NOTHING: compression never
-# ran (so compression.threshold: 0.30 below was dead config and per-turn input
-# cost grew unbounded — the exact problem this file was tuned to fix),
-# background_review never ran, the curator never ran. Only background_review
-# carried an explicit model, which is why only it was ever going to work.
-#
-# Fix: name a :free model on every block that actually fires here. free_only
-# stays true deliberately — it is the guard that makes a block we forgot fail
-# loudly in the log instead of quietly billing main-model rates. Model ids
-# verified against `jev models list` (322-model OpenRouter catalog, 2026-10-05):
-#   nemotron-3.5-lightning:free   1M ctx, no vision — fast/cheap classifiers
-#   nemotron-3-ultra-550b:free    1M ctx, no vision — summarisation, reasoning
-#   thinkingmachines/inkling:free 1M ctx, VISION    — the aux vision lane
-#
-# `review` is deliberately left on "auto": it is a user-invoked /review
-# subagent, not background traffic, and is worth main-model quality.
-#
-# 2026-10-07: moved the whole auxiliary lane from :free to cheap PAID SKUs.
-# The dev-erp gateway log showed the free tier failing two ways:
-#   1. Every block sat on ONE upstream (NVIDIA's own free endpoint). One
-#      "Upstream error from Nvidia: Service temporarily overloaded" took out
-#      background_review, and compression was "blocked (attempts_exhausted)"
-#      at ~117K tokens — the session grew unbounded again.
-#   2. auxiliary.openrouter_model was unset, so the auto-chain's OpenRouter
-#      step inherited the (paid) main model and free_only skipped it on every
-#      turn — the repeating "'openrouter/auto-beta' is not a :free SKU" line.
-# free_only is now FALSE: it rejects ANY non-:free model, explicitly
-# configured ones included ("free_only rejected non-free model"), so it
-# cannot coexist with a paid lane. Expect one "PAID lane engaged" WARNING
-# per model per process — that is the intended signal now, not an error.
-#
-# Model choice (operator preference: cheap paid SKUs from DeepSeek V4.1
-# Flash / Nex N2.5 Mini / GLM 5.3 Flash). Prices are OpenRouter USD per 1M
-# tokens, input/output/cached-input, catalog + endpoint stats 2026-10-07:
-#   deepseek/deepseek-v4.1-flash  $0.30/$1.20/$0.006  1M ctx  vision+tools  29 providers
-#   z-ai/glm-5.3-flash            $0.15/$0.50/$0.030  1M ctx  vision+tools  33 providers
-#   nex-agi/nex-n2.5-mini         $0.025/$0.10/$0.003 262K    vision, NO tool calling,
-#                                                             ONE provider (Nex AGI)
-# Reliability now comes from provider count: OpenRouter routes a paid SKU
-# across every provider serving it, so one provider overloading no longer
-# fails the call. nex-n2.5-mini has a single provider, so every block on it
-# carries a fallback_chain. Primary and fallback are always different
-# vendors (DeepSeek <-> Z.AI, Nex <-> Z.AI).
-#
-# Compression needs a 1M window now: model.default (deepseek-v4.1-flash) is
-# 1M, so compression.threshold 0.30 fires at ~314K tokens. Only 1M models
-# are on that block and its chain. Hermes also refuses a fallback_chain
-# entry whose context is too small for the task (_context_too_small).
-#
-# Rejected: the paid twins of the old free SKUs — nemotron-3-ultra is only
-# 262K paid (1M was free-only) at $0.50/$2.20; inkling $1.00/$4.05;
-# inkling-small single-provider. z-ai/glm-5.2:free is gone from the catalog.
-# nex-n2.5-pro showed 0% uptime on its only provider. Nothing newer than
-# GLM 5.3 is listed; glm-5.3 (non-flash) is $7/1M output.
-# Re-check prices/uptime with `jev models list` or
-# https://openrouter.ai/api/v1/models/<id>/endpoints before changing.
+# auxiliary: per-task model routing for background work (compression,
+# classifiers, curator, etc.), kept off the main model lane.
+# free_only: false — every block below runs on a paid SKU; true would
+# reject any block whose model isn't a :free SKU, including one that
+# inherited the (paid) main model via an unset provider/model pair — so a
+# stray unset block fails loudly in the log instead of silently going dead.
+# Model tiers: deepseek-v4.1-flash / glm-5.3-flash (1M ctx, tool-calling,
+# many providers each) for compression/vision/mcp/goal_judge/curator-style
+# work; nex-n2.5-mini (262K ctx, no tool calling, single provider) for
+# simple classifiers and short plain-text generation, always paired with a
+# glm-5.3-flash fallback_chain entry since it has no second provider of its
+# own. Primary and fallback are always different vendors.
+# `review` (the user-invoked /review subagent) is deliberately left on
+# "auto" — not background traffic, worth main-model quality.
 auxiliary:
   free_only: false
   # Auto-chain fallback for any block that cannot build its own client.
@@ -112,10 +43,7 @@ auxiliary:
     fallback_chain:
       - {provider: openrouter, model: deepseek/deepseek-v4.1-flash}
   # Fast classifiers / short plain-text generations — none of these pass
-  # tools to the model (checked in hermes-agent: approval_smart.py,
-  # memory/query_rewrite.py, title_generator.py, classify_items.py,
-  # profile_describer.py), so nex-n2.5-mini's missing tool support does not
-  # matter.
+  # tools to the model, so nex-n2.5-mini's missing tool support doesn't matter.
   # memory_query_rewrite has an 8s timeout; if nex-n2.5-mini's reasoning
   # makes it miss that, add `reasoning_effort: minimal` to that block.
   approval:
@@ -172,9 +100,8 @@ auxiliary:
     model: z-ai/glm-5.3-flash
     fallback_chain:
       - {provider: openrouter, model: deepseek/deepseek-v4.1-flash}
-  # curator/background_review call tools (skill_manage) — both models below
-  # support tool calling. background_review runs after EVERY turn (~90K
-  # input observed), so it sits on the cheaper-input glm-5.3-flash.
+  # curator/background_review call tools (skill_manage). background_review
+  # runs after every turn, so it sits on the cheaper-input glm-5.3-flash.
   curator:
     provider: openrouter
     model: deepseek/deepseek-v4.1-flash
@@ -195,34 +122,18 @@ checkpoints:
   min_interval_hours: 24
 agent:
   max_turns: 50
-# skills.external_dirs marks skills/qkeee-erp/ (the master qkeee-erp-*
-# family, including qkeee-erp-associate) as externally owned: Hermes'
-# autonomous background-review/curator pass treats anything under an
-# external dir as read-only and never autonomously edits/patches/deletes
-# it (tools/skill_manager_tool.py's _background_review_write_guard, "external
-# skills are read-only to the curator" — confirmed by direct inspection of
-# hermes-agent during the qkeee-erp-associate consolidation, Phase 4).
-# A foreground, user-directed edit is unaffected; only the autonomous pass
-# is blocked. This entry was documented as already in place in README.md/
-# profile.md but was missing from this file — added here rather than left
-# as a doc/config mismatch. Relative path, resolved against this profile's
-# own HERMES_HOME (this repo, via the symlinked live-profile mount — see
-# README.md's "Live Hermes profile" note), never a machine-local absolute
-# path.
+# external_dirs marks skills/qkeee-erp/ (the master qkeee-erp-* family,
+# including qkeee-erp-associate) as externally owned: Hermes' autonomous
+# background-review/curator pass treats it read-only and never auto-edits/
+# patches/deletes it. A foreground, user-directed edit is unaffected.
+# Relative path, resolved against this profile's own HERMES_HOME.
 skills:
   external_dirs:
     - skills/qkeee-erp
-  # write_approval: documented in profile.md ("Local skill writes gated by
-  # skills.write_approval, no unreviewed changes") but was never actually
-  # set here — same doc/config mismatch pattern external_dirs had above,
-  # caught during the invoice-processing/connector-governance duplicate-
-  # skill review (2026-09-02). Without this key, tools/write_approval.py's
-  # write_approval_enabled() defaults False and every skill_manage(create/
-  # edit/patch/delete) — including Hermes' own autonomous "offer to save
-  # as skill" reflex after a hard session — commits straight to disk,
-  # unstaged, unreviewed. true stages every skill write (create/edit/
-  # patch/delete, any origin) to <HERMES_HOME>/pending/skills/ for
-  # foreground review via `/skills pending` instead of silent commit.
+  # write_approval: stages every skill write (create/edit/patch/delete, any
+  # origin, including Hermes' own autonomous "offer to save as skill"
+  # reflex) to <HERMES_HOME>/pending/skills/ for foreground review via
+  # `/skills pending`, instead of committing straight to disk unreviewed.
   write_approval: true
   # disabled: trims the stock skill set to what this ERP/ops profile
   # actually uses — same motivation as platform_toolsets being trimmed
@@ -264,14 +175,9 @@ skills:
     - test-driven-development
     - xurl
     - youtube-content
-# curator.consolidate: OFF by default in agent/curator.py (DEFAULT_CONSOLIDATE).
-# Off means the curator's periodic pass only does the deterministic
-# inactivity prune (stale/archive) and never runs its LLM umbrella-building
-# pass that merges overlapping skills — the mechanism that should have
-# caught erpnext-invoice-processing and erpnext-connector-governance
-# duplicating qkeee-erp-associate's own references/00-conventions.md and
-# domains/accounts.md content. Turned on here so overlapping agent-created
-# skills actually get merged/absorbed instead of accumulating.
+# consolidate: on, so the curator's periodic pass also runs its LLM
+# umbrella-building pass (merging overlapping agent-created skills), not
+# just the default deterministic inactivity prune.
 curator:
   consolidate: true
   interval_hours: 24
@@ -291,16 +197,11 @@ dashboard:
     secret: ""
 tts:
   use_gateway: false
-# command_allowlist: the schema expects literal command patterns/globs
-# here (e.g. "rm", "git push *") that get silently pre-approved past the
-# dangerous-command approval gate (website/docs/user-guide/security.md
-# "Permanent Allowlist"). The three entries below are descriptive prose,
-# not patterns — they do not match anything and are effectively dead
-# config. Left as-is rather than cleared: replace with real patterns or
-# empty this list, as needed. ERPNext writes still run only through the
-# qkeee-erp plugin's erp_execute_write tool (its own confirmation-token
-# gate), never through a terminal command, so this list is not the only
-# thing gating ERP access.
+# command_allowlist: literal command patterns/globs (e.g. "rm", "git push
+# *") pre-approved past the dangerous-command approval gate. The entries
+# below are prose, not patterns, so they do not match anything. ERPNext
+# writes run only through the qkeee-erp plugin's erp_execute_write tool
+# (its own confirmation-token gate), never through a terminal command.
 command_allowlist:
   - delete in root path
   - script execution via -e/-c flag
@@ -310,18 +211,11 @@ onboarding:
     tool_progress_prompt: true
     busy_input_prompt: true
     profile_build_offered: true
-# Schema migration ladder has run through 45 (see "plugins:" block below,
-# required by step 38). Re-check `hermes config migrate --dry-run` before
-# bumping past this.
+# Schema version. Bump only via `hermes config migrate`.
 _config_version: 45
-# compression.threshold: default 0.50 (agent/context_compressor.py). The
-# nex-agi/nex-n2-mini context window is large enough that a single turn's
-# accumulated tool-call history rarely crosses 50% before the turn ends —
-# so auto-compaction never fires, and every extra round-trip within a turn
-# resends the full growing context (observed: one turn climbed 42K->147K
-# input tokens across 18 API calls). Lowered to trigger compaction sooner,
-# capping worst-case per-turn input cost at the price of more frequent
-# summarization calls.
+# threshold: lowered from the 0.50 default so auto-compaction fires
+# earlier, capping worst-case per-turn input cost at the price of more
+# frequent summarization calls.
 compression:
   threshold: 0.30
 session_reset:
@@ -332,21 +226,16 @@ image_gen:
   provider: openrouter
   use_gateway: false
   model: openai/gpt-5.4-image-2
-# platform_toolsets: trimmed 2026-09-03 from the stock full set. Every
-# enabled toolset's tool schema is sent as input on every single API call
-# regardless of use — confirmed as a fixed per-call cost multiplier during
-# the token-usage review (input-heavy Hermes Agent rows, 300K+ tok on some
-# calls). browser/computer_use/image_gen/tts dropped — this profile never
-# drives a browser, controls a desktop, generates images, or does TTS.
-# vision kept deliberately — the doc-extraction domain
-# (qkeee-erp-associate) reads invoice PDFs/images and needs it.
+# platform_toolsets: every enabled toolset's schema is sent as input on
+# every API call regardless of use, so each platform list below is trimmed
+# to what it actually needs. browser/computer_use/image_gen/tts are
+# dropped everywhere — this profile never drives a browser, controls a
+# desktop, generates images, or does TTS. vision is kept everywhere — the
+# doc-extraction domain (qkeee-erp-associate) reads invoice PDFs/images.
 platform_toolsets:
-  # qkeee_erp (plugins/qkeee-erp): the ERPNext tools. On cli because Kanban
-  # workers run with the profile's cli toolsets (hermes_cli/
-  # kanban_db_dispatch.py, _resolve_worker_cli_toolsets); in an interactive
-  # CLI session the tools refuse (no gateway sender), and an operator uses
-  # the skill scripts with --requested-by instead.
-  # connections is present on every platform list below, not just cli.
+  # qkeee_erp tools need a gateway sender; in an interactive CLI session
+  # they refuse, so an operator uses the skill scripts with
+  # --requested-by instead. connections is present on every list below.
   cli:
     - clarify
     - code_execution
@@ -363,11 +252,9 @@ platform_toolsets:
     - todo
     - vision
     - web
-  # google_chat: every enabled toolset's tool schema is sent as input on
-  # every API call regardless of use, so this list is kept trimmed to what
-  # the platform actually serves. code_execution is deliberately absent:
-  # no ERP skill needs it, and an execute_code script could read the
-  # ERPNext credentials and call ERPNext without the connector's gate.
+  # code_execution is deliberately absent from google_chat/email: no ERP
+  # skill needs it, and an execute_code script could read the ERPNext
+  # credentials and call ERPNext directly, bypassing the connector's gate.
   # ERPNext is reached only through the qkeee_erp gateway tools below.
   google_chat:
     - clarify
@@ -400,18 +287,11 @@ platform_toolsets:
     - todo
     - vision
     - web
-# Top-level toolsets: Hermes' default plus `kanban`. The kanban tools
-# (kanban_create, kanban_show, kanban_list, ...) show only when this list
-# names `kanban` (tools/kanban_tools.py, _profile_has_kanban_toolset), AND
-# the platform's list above names it: current Hermes treats kanban as a
-# configurable toolset (dev-erp 2026-10-22: `hermes tools list --platform
-# google_chat` showed it disabled with only this list set). cli carries it
-# for Kanban workers. Without it, chat
-# ran `hermes kanban` in the terminal sidecar (dev-erp 2026-10-22): the board
-# landed out of the dispatcher's reach and kanban_hooks never saw the create.
-# `kanban.orchestrator_profile`/`default_assignee` name the Profile, so
-# `hermes qkeee-erp setup --apply-profile-fixes` sets them (item P3) — see
-# the `kanban:` block below.
+# toolsets: Hermes' default plus `kanban`. The kanban tools (kanban_create,
+# kanban_show, kanban_list, ...) only appear when `kanban` is named both
+# here and in the active platform's platform_toolsets list above.
+# kanban.orchestrator_profile/default_assignee below name the Profile
+# Kanban dispatches to.
 toolsets:
   - hermes-cli
   - kanban
@@ -423,12 +303,10 @@ kanban:
   auto_decompose: false
 context:
   engine: lcm
-# A plugin toolset is ON for a platform unless it is "known" here and absent
-# from that platform's list (hermes_cli/tools_config.py,
-# _enabled_plugin_toolsets). On a platform not listed here (email, slack,
-# ...) it is on, and its tools refuse every turn whose sender doesn't match
-# that platform's identity check. discord's entry below is inert while
-# platforms.discord.enabled is false.
+# A plugin toolset is ON for a platform unless it is "known" here and
+# absent from that platform's list. On a platform not listed here (email,
+# slack, ...) it is on, and its tools refuse every turn whose sender
+# doesn't match that platform's identity check.
 known_plugin_toolsets:
   cli:
     - spotify
@@ -466,24 +344,14 @@ plugins:
       settings:
         active_env: demo_erp  # TARGET-PROFILE: set to this deployment's ERP env
         mode: read-write
-# `terminal.cwd: /opt/cwd` is the in-container mount point, not a
-# machine-local path, so it is portable across installs of this image:
-# docker-compose.yaml bind-mounts the host dir there (HERMES_CWD, default
-# /opt/cwd), exports TERMINAL_CWD to match, and cont-init.d/0155-cwd-setup
-# chowns it so the terminal tool can write in it. Never put a host/dev-
-# machine path here (this file is `distribution_owned`) — Hermes' "Never use
-# machine-local paths" rule. If HERMES_CWD is overridden in compose, change
-# this value with it. (Merged 2026-10-07: a second top-level `terminal:` key
-# had been added above, and YAML's last-key-wins silently dropped its cwd.)
-#
-# backend ssh (2026-10-08, requester identity binding issue 06, agents ADR
-# 0002): the terminal, file tools and execute_code run in the compose
-# `terminal` sidecar, which mounts /opt/cwd but never /opt/data, so the agent
-# cannot read the ERPNext credentials or any other gateway secret. ssh_host
-# is the compose service name; 0157-terminal-ssh creates ssh_key and
-# publishes its public key to the sidecar. No sidecar in your deployment?
-# Set backend back to local (and accept that the agent can read /opt/data).
-# Values here override TERMINAL_* env vars (gateway/run.py bridges them).
+# cwd (/opt/cwd) is the in-container mount point, not a machine-local
+# path — portable across installs (docker-compose binds HERMES_CWD there).
+# Never put a host/dev-machine path here (this file is distribution_owned).
+# backend ssh: terminal/file/execute_code run in the compose `terminal`
+# sidecar, which mounts /opt/cwd but never /opt/data, so the agent can't
+# read ERPNext credentials or other gateway secrets via a terminal
+# command. No sidecar in your deployment? Set backend back to local (the
+# agent can then read /opt/data). Values here override TERMINAL_* env vars.
 terminal:
   backend: ssh
   cwd: /opt/cwd
@@ -498,15 +366,10 @@ updates:
   backup_keep: 5
   non_interactive_local_changes: stash
 
-# ── Security ──────────────────────────────────────────────────────────
-# Secret redaction is ON by default — strings that look like API keys,
-# tokens, and passwords are masked in tool output, logs, and chat
-# responses before the model or user ever sees them. Set redact_secrets
-# to false to disable (e.g. when developing the redactor itself).
-# tirith pre-exec scanning is enabled by default when the tirith binary
-# is available. Configure via security.tirith_* keys or env vars
-# (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
-#
+# redact_secrets: masks strings that look like API keys/tokens/passwords
+# in tool output, logs, and chat responses before the model or user sees
+# them. tirith_*: pre-exec command scanning (also configurable via
+# TIRITH_ENABLED/TIRITH_BIN/TIRITH_TIMEOUT/TIRITH_FAIL_OPEN env vars).
 security:
   redact_secrets: true
   tirith_enabled: true
