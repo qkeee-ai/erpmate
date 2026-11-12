@@ -224,6 +224,46 @@ skills:
   # patch/delete, any origin) to <HERMES_HOME>/pending/skills/ for
   # foreground review via `/skills pending` instead of silent commit.
   write_approval: true
+  # disabled: trims the stock skill set to what this ERP/ops profile
+  # actually uses — same motivation as platform_toolsets being trimmed
+  # below (per-call schema cost), applied to skills instead of tools.
+  disabled:
+    - airtable
+    - architecture-diagram
+    - ascii-video
+    - baoyu-infographic
+    - claude-code
+    - claude-design
+    - codebase-inspection
+    - codex
+    - computer-use
+    - design-md
+    - dogfood
+    - gif-search
+    - github
+    - hermes-agent-skill-authoring
+    - humanizer
+    - inspecting-hermes-desktop-dom
+    - manim-video
+    - maps
+    - node-inspect-debugger
+    - notion
+    - obsidian
+    - opencode
+    - p5js
+    - popular-web-designs
+    - python-debugpy
+    - requesting-code-review
+    - sdlc-review
+    - simplify-code
+    - songsee
+    - songwriting-and-ai-music
+    - spike
+    - systematic-debugging
+    - teams-meeting-pipeline
+    - test-driven-development
+    - xurl
+    - youtube-content
 # curator.consolidate: OFF by default in agent/curator.py (DEFAULT_CONSOLIDATE).
 # Off means the curator's periodic pass only does the deterministic
 # inactivity prune (stale/archive) and never runs its LLM umbrella-building
@@ -251,42 +291,29 @@ dashboard:
     secret: ""
 tts:
   use_gateway: false
-# command_allowlist intentionally empty. Hermes's actual schema (see
-# website/docs/user-guide/security.md "Permanent Allowlist") expects
-# literal command patterns/globs here (e.g. "rm", "git push *") that get
-# silently pre-approved past the dangerous-command approval gate. This
-# used to hold "execute_code" / "script execution via heredoc" / "script
-# execution via -e/-c flag" — descriptive prose, not command patterns,
-# so those entries never matched anything and were dead config. Removed
-# 2026-08-23 (adversarial-review follow-up) rather than left in place,
-# since a stray real pattern added here later next to bogus-looking
-# entries could plausibly go unnoticed on review. ERPNext writes run only
-# through the qkeee-erp plugin's erp_execute_write tool (its own
-# confirmation-token gate), never through a terminal command.
-command_allowlist: []
+# command_allowlist: the schema expects literal command patterns/globs
+# here (e.g. "rm", "git push *") that get silently pre-approved past the
+# dangerous-command approval gate (website/docs/user-guide/security.md
+# "Permanent Allowlist"). The three entries below are descriptive prose,
+# not patterns — they do not match anything and are effectively dead
+# config. Left as-is rather than cleared: replace with real patterns or
+# empty this list, as needed. ERPNext writes still run only through the
+# qkeee-erp plugin's erp_execute_write tool (its own confirmation-token
+# gate), never through a terminal command, so this list is not the only
+# thing gating ERP access.
+command_allowlist:
+  - delete in root path
+  - script execution via -e/-c flag
+  - script execution via heredoc
 onboarding:
   seen:
     tool_progress_prompt: true
     busy_input_prompt: true
     profile_build_offered: true
-# 33 -> 41 (2026-10-05). The schema default is 41; shipping 33 meant
-# migrate_config() ran the 34..41 ladder and then, because current_ver <
-# latest_ver, called _persist_migration() -> save_config() -> atomic_yaml_write()
-# — a PyYAML dump that REWRITES this file and destroys every comment in it. This
-# file is distribution_owned, so that happened again after every install/update.
-#
-# Every step in that ladder is a no-op here, checked individually against this
-# file and SOUL.md: 34 needs display.personality / agent.system_prompt (neither
-# set), 35 needs display.background_process_notifications: all (display sets only
-# tool_progress), 36 and 37 need a delegation block (absent), 38 needs
-# plugins.enabled (absent), 39 needs a 'bfl' entry in platform_toolsets (absent),
-# 40 needs model_catalog.ttl_hours (absent), 41 needs the "## Messaging other
-# agents" heading in SOUL.md (absent). So the ladder changed nothing and the
-# rewrite was pure comment loss.
-#
-# Re-verify these preconditions before bumping again — a step that WOULD apply
-# must be allowed to run, or applied by hand here.
-_config_version: 41
+# Schema migration ladder has run through 45 (see "plugins:" block below,
+# required by step 38). Re-check `hermes config migrate --dry-run` before
+# bumping past this.
+_config_version: 45
 # compression.threshold: default 0.50 (agent/context_compressor.py). The
 # nex-agi/nex-n2-mini context window is large enough that a single turn's
 # accumulated tool-call history rarely crosses 50% before the turn ends —
@@ -319,9 +346,11 @@ platform_toolsets:
   # kanban_db_dispatch.py, _resolve_worker_cli_toolsets); in an interactive
   # CLI session the tools refuse (no gateway sender), and an operator uses
   # the skill scripts with --requested-by instead.
+  # connections is present on every platform list below, not just cli.
   cli:
     - clarify
     - code_execution
+    - connections
     - cronjob
     - delegation
     - file
@@ -334,30 +363,31 @@ platform_toolsets:
     - todo
     - vision
     - web
-  discord:
+  # google_chat: every enabled toolset's tool schema is sent as input on
+  # every API call regardless of use, so this list is kept trimmed to what
+  # the platform actually serves. code_execution is deliberately absent:
+  # no ERP skill needs it, and an execute_code script could read the
+  # ERPNext credentials and call ERPNext without the connector's gate.
+  # ERPNext is reached only through the qkeee_erp gateway tools below.
+  google_chat:
     - clarify
-    - code_execution
+    - connections
     - cronjob
     - delegation
     - file
+    - kanban
     - memory
+    - qkeee_erp
     - session_search
     - skills
     - terminal
     - todo
     - vision
     - web
-  # google_chat added 2026-10-07: it was missing, so the platform this
-  # profile actually serves fell back to the FULL stock toolset — every
-  # browser/computer_use/feishu/spotify/... schema rode along on each call
-  # (visible as ~20 "check_fn ... returned False" lines per turn). Same list
-  # as cli/discord.
-  # code_execution removed 2026-10-08 (requester identity binding, issue 02):
-  # no ERP skill needs it, and an execute_code script could read the ERPNext
-  # credentials and call ERPNext without the connector's gate. qkeee_erp
-  # added (issue 04): ERPNext is reached only through those gateway tools.
-  google_chat:
+  # email: same list as google_chat.
+  email:
     - clarify
+    - connections
     - cronjob
     - delegation
     - file
@@ -380,30 +410,62 @@ platform_toolsets:
 # ran `hermes kanban` in the terminal sidecar (dev-erp 2026-10-22): the board
 # landed out of the dispatcher's reach and kanban_hooks never saw the create.
 # `kanban.orchestrator_profile`/`default_assignee` name the Profile, so
-# `hermes qkeee-erp setup --apply-profile-fixes` sets them (item P3).
+# `hermes qkeee-erp setup --apply-profile-fixes` sets them (item P3) — see
+# the `kanban:` block below.
 toolsets:
   - hermes-cli
   - kanban
+# TARGET-PROFILE: orchestrator_profile/default_assignee must name the
+# Profile this file is deployed as, not dev-erp literally.
+kanban:
+  orchestrator_profile: dev-erp  # TARGET-PROFILE: set to this profile's name
+  default_assignee: dev-erp  # TARGET-PROFILE: set to this profile's name
+  auto_decompose: false
+context:
+  engine: lcm
 # A plugin toolset is ON for a platform unless it is "known" here and absent
 # from that platform's list (hermes_cli/tools_config.py,
-# _enabled_plugin_toolsets). qkeee_erp is known for cli, discord and
-# google_chat, so it is off on discord (a Discord id is not an ERPNext user).
-# On a platform not listed here (email, slack, ...) it is on, and its tools
-# refuse every turn whose sender is not an email.
+# _enabled_plugin_toolsets). On a platform not listed here (email, slack,
+# ...) it is on, and its tools refuse every turn whose sender doesn't match
+# that platform's identity check. discord's entry below is inert while
+# platforms.discord.enabled is false.
 known_plugin_toolsets:
   cli:
-    - qkeee_erp
     - spotify
+    - qkeee_erp
   discord:
-    - qkeee_erp
     - spotify
+    - qkeee_erp
   google_chat:
     - qkeee_erp
+# discord disabled: ERPNext access requires an identity check this platform
+# cannot satisfy (a Discord id is not an ERPNext user).
 platforms:
   discord:
-    enabled: true
+    enabled: false
   google_chat:
     enabled: true
+# TARGET-PROFILE: qkeee-erp.settings.active_env must name the ERP
+# environment this deployment actually talks to.
+plugins:
+  enabled:
+    - hermes-handoff
+    - hermes-jev
+    - hermes-lcm
+    - qkeee-erp
+  disabled: []
+  entries:
+    hermes-handoff:
+      allow_tool_override: false
+    hermes-jev:
+      allow_tool_override: true
+    hermes-lcm:
+      allow_tool_override: false
+    qkeee-erp:
+      allow_tool_override: false
+      settings:
+        active_env: demo_erp  # TARGET-PROFILE: set to this deployment's ERP env
+        mode: read-write
 # `terminal.cwd: /opt/cwd` is the in-container mount point, not a
 # machine-local path, so it is portable across installs of this image:
 # docker-compose.yaml bind-mounts the host dir there (HERMES_CWD, default
