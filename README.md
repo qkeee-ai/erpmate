@@ -6,106 +6,209 @@ Git-tracked source of truth for a Hermes Agent profile specialized as an ERPNext
 
 Edit the portable files **here**, not in the live profile directory. On a host install Hermes reads them through symlinks back into this repo; under Docker they are copied in by `hermes profile install` at first boot, so a change here needs a `hermes profile update` or `HERMES_PROFILE_AUTO_UPDATE=1`.
 
-Two deployment paths, both covered below: [Hermes CLI](#hermes-cli-profile-from-this-repo) for a host install, [Docker](#deployment-docker) for the containerised agent (which also layers in the jev model router and the LCM context manager).
+Two deployment paths: [Hermes CLI](#hermes-cli-host) for a host install, [Docker](#docker) for the containerised agent (which also layers in the jev model router and the LCM context manager). Both are covered under [Getting started](#getting-started).
 
-## What this profile is
+## Overview
 
-An ERPNext specialist that acts like a functional consultant, not a click-executor — it explains the "why" behind a process, detects per-instance customizations before assuming stock ERPNext behavior, and treats every submittable document as requiring human review before it goes live. Full scope boundaries (owns / should-not-own) are defined in [`profile.md`](./profile.md); identity and voice are defined in [`SOUL.md`](./SOUL.md).
+### What this profile is
 
-## Directory layout
+An ERPNext specialist that acts like a functional consultant, not a click-executor: it explains the "why" behind a process, detects per-instance customizations before assuming stock ERPNext behavior, and treats every submittable document as requiring human review before it goes live. Full scope boundaries (owns / should-not-own) are defined in [`profile.md`](./profile.md); identity and voice are defined in [`SOUL.md`](./SOUL.md).
 
-### Tracked and symlinked (edit these, in this repo)
+The agent reaches ERPNext only through the `qkeee-erp` plugin's `erp_*` tools, which run in the gateway and take the requester identity from the gateway session — never from config. Calling rules ship with the plugin as the `qkeee-erp:usage` skill; the Operator CLI (`hermes -p <profile> qkeee-erp …`) runs the same handlers a chat turn does, so every code path is audited the same way regardless of who or what calls it.
 
-| File / dir | Purpose |
-|---|---|
-| `distribution.yaml` | Profile manifest / distribution metadata — `distribution_owned` lists exactly what `hermes profile update` is allowed to overwrite: `SOUL.md`, `skills/` (the whole tree, not just `skills/qkeee-erp/`), `cron/jobs.json`, `config.yaml`, `mcp.json` |
-| `SOUL.md` | Agent identity, voice, personality — loaded into system prompt slot #1 |
-| `config.yaml` | Model, provider, toolsets, `skills.external_dirs`, `skills.write_approval`, plus the cost-control block: `auxiliary.*` (every background task pinned to a `:free` model), `compression.threshold`, trimmed `platform_toolsets`, and `context.engine: lcm` written in by the Docker boot hooks |
-| `mcp.json` | MCP server connections (currently no servers configured; ERPNext access goes through the `qkeee-erp` plugin's `erp_*` tools) |
-| `skills/qkeee-erp/` | The `qkeee-erp-associate` skill: ERP domain know-how only, no code — mounts read-only into the live profile via `skills.external_dirs`, edited here only |
-| `plugins/qkeee-erp/` | The `qkeee-erp` gateway plugin: all ERP code, the `erp_*` tools, the identity guard, Kanban hooks, the `qkeee-erp:usage` skill and the Operator CLI (`hermes -p <profile> qkeee-erp …`). Its settings: `plugins.entries.qkeee-erp.settings` (`active_env`, `mode`) |
-| `cron/` | Scheduled jobs. Ships `qkeee-erp-job-status-poller` (agents ADR 0010, issue 23), a `no_agent` script every 5 minutes reporting open kanban-job parks/blocks — paused on install until `QKEEE_ERP_<TAG>_ADMIN_EMAIL` is set and an Operator resumes it. Also ships `lcm-corruption-check`, a `no_agent` script (`scripts/lcm_corruption_check.py`) every 12 hours — plus once at container boot via `docker/cont-init.d/0186-lcm-corruption-check` — diagnosing (and, on damage, rebuilding a candidate for) this profile's `lcm.db`, emailing/Google-Chatting `QKEEE_ERP_<TAG>_ADMIN_EMAIL`/`_OPS_CHAT_WEBHOOK` on a finding. See `skills/adminops/lcm-self-heal/` for the reactive, chat-triggered counterpart |
-| `adminops/` | Operator maintenance tools, baked into the image at `/opt/adminops/` (not run at boot). See [adminops/README.md](adminops/README.md) |
-| `profile.md` | Purpose / Owns / Should-Not-Own / safety policy / operating protocol for this agent — user-owned, not replaced on `profile update` |
+### Audit logging and governance
 
-**Plugin** (`plugins/qkeee-erp/`) — runs only in the gateway process:
+Every ERPNext access — read or write, chat or CLI, any environment — goes through one connector (`plugins/qkeee-erp/qkeee_erp/core/client.py`) that unconditionally runs a requester-permission (RBAC) pre-check and writes an audit-log row. There is no debug flag or PROD-only carve-out that skips either check.
 
-| Path | Role |
-|---|---|
-| `qkeee_erp/core/client.py` | Shared connector — auth, discovery, RBAC pre-check, write-allowlist gate, PII redaction, audit logging |
-| `qkeee_erp/core/operations.py` | The one write pipeline and the registry of named write operations |
-| `qkeee_erp/domains/*.py` | Per-domain allowlists + operations: `hr_payroll`, `accounts`, `mis` (no write path), `sales`, `procurement`, `inventory`, `fixed_assets`, `system_admin` |
-| `qkeee_erp/init_bot.py` | Operator-only (`hermes qkeee-erp init-bot`): provisions the `Qkeee Bot` Role + `Qkeee Bot Audit Log` doctype, assigns the role to the bot user, and grants its business rights — each domain's code doctypes plus its template roles' rows (`doctype_defs.DOMAIN_TEMPLATE_ROLES`, e.g. HR Manager); never delete, never a privileged doctype (agents ADR 0003). Re-run after an app upgrade |
-| `erp_tools.py`, `cli.py`, `settings.py` | The `erp_*` tools, the Operator CLI (same code path as the tools), the plugin settings |
-| `skills/usage/SKILL.md` | `qkeee-erp:usage`: the rules for calling the `erp_*` tools, loaded on demand |
+Core guarantees, enforced in code rather than by prompt discipline:
 
-**Skill** (`skills/qkeee-erp/qkeee-erp-associate/`) — thin `SKILL.md` router, domain procedures loaded on demand, no code:
+- **Token auth only.** `QKEEE_ERP_*` API key/secret pairs — no session-cookie or password fallback that would drop audit attribution.
+- **Requester identity is never configured.** It is the gateway session's sender for the agent, or `--requested-by` on an Operator CLI run; there is deliberately no `_REQUESTED_BY` env var, and the connector ignores one if set.
+- **Draft, review, submit — always.** Every docstatus-bearing document gets a review-before-submit step with explicit human confirmation (`profile.md`'s Safety Policy), enforced for submit/cancel by a fresh confirmation token, not by prompt discipline (`references/00-conventions.md`'s Non-negotiable 5).
+- **Skill write approval.** `skills.write_approval: true` stages every agent-initiated skill write under `~/.hermes/pending/skills/` for `/skills approve`/`/skills reject` review — nothing lands unreviewed.
+- **Skill source separation.** `qkeee-erp-associate` (this repo) mounts read-only via `skills.external_dirs` and is marked externally-owned so Hermes' autonomous background-review pass cannot silently patch its audit/RBAC/GRC logic. The satellite `qkeee-erp-learned/<env-tag>` skills the agent writes via `skill_manage` (per-instance notes: versions, custom doctypes, non-ERPNext API quirks) stay open to that same background review by design.
 
-| Path | Role |
-|---|---|
-| `references/domains/*.md` | Per-domain procedure, one per domain module above, plus `manufacturing.md` and `doc-extraction.md` |
-| `references/00-conventions.md` | Naming rules, GRC baseline, scope guardrail — single copy, referenced by every domain file |
-| `references/tool-cookbook.md` | Worked `erp_*` calls |
+Every bot action lands in ERPNext itself, via doctypes `hermes qkeee-erp init-bot` provisions directly (no custom app):
 
-### Runtime-only (never commit)
-
-`.env`, `auth.json`, `memories/`, `sessions/`, `state.db*`, `logs/`, `workspace/`, `plans/`, `home/`, `local/`, `*_cache/`, `tmp/` — these belong to the live profile instance and can carry secrets or grow to tens of GB. See [Profiles: Running Multiple Agents](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) for what a profile directory holds and why.
-
-### ERPNext credentials: `qkeee-erp.env`, not `.env`
-
-ERPNext instance credentials (`QKEEE_ERP_*`) belong to the `qkeee-erp` plugin, not the profile: `$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` (mode 600), read only in the gateway by the plugin's connector. They never reach the agent's terminal or `execute_code`, and the plugin's identity guard blocks commands that reach for the file. This also keeps ERPNext secrets physically separate from any LLM-provider key in the main `.env`.
-
-- Copy `skills/qkeee-erp/qkeee-erp-associate/qkeee-erp-associate.env.example` to `$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` and fill in real values out-of-band — never by having the agent read/cat this file or echo the values back. A legacy `$HERMES_HOME/qkeee-erp.env` is read until it is moved.
-- One file holds every Instance **tag**: `QKEEE_ERP_<TAG>_BASE_URL` / `_API_KEY` / `_API_SECRET` (required), plus optional per-tag extras (see the example file). The active tag and the write mode are plugin settings (`plugins.entries.qkeee-erp.settings.active_env` / `.mode`). There is deliberately **no** `_REQUESTED_BY` var — the connector ignores it if set; the requester is the gateway session's sender (or `--requested-by` on an Operator CLI run), never config. Add a new ERPNext instance by appending another tag's trio, never by creating a second file.
-- Read audit logging is unconditional on every `query_resource()`/`get_resource()`/`run_query_report()` call — there is no debug flag to gate it.
-
-### Audit-trail doctypes
-
-`hermes qkeee-erp init-bot` (Operator-only) provisions 1 `Qkeee Bot *` doctype directly in ERPNext (no custom app) to give every bot action a compliance-grade trail.
-
-| Doctype | Created | Purpose |
+| Doctype | Written | Holds |
 |---|---|---|
-| `Qkeee Bot Audit Log` | **Always**, every read and write | One row per ERPNext record read/written by the bot — action, reference doc, before/after payload, field diff, `domain_code` (which `references/domains/*.md` procedure made the call), `user_approved` (Approved/Not Confirmed/Not Required — detection, not a write gate), submittable/locked once resolved |
+| `Qkeee Bot Audit Log` | Every read and write, unconditionally | Action, reference doc, before/after payload, field diff, `domain_code` (which domain procedure made the call), `user_approved` (Approved/Not Confirmed/Not Required — detection, not a write gate), submittable/locked once resolved |
+| `Qkeee Bot Job Approval` | First `batches=` write of a kanban-dispatched multi-step job | The `batches` plan and `job_token` it was computed over; an append-only `execution_log` (per-step `{batch_index, step_index, name, modified, outcome}`, succeeded and failed steps alike — survives a worker respawn); `monitor_platform`/`monitor_channel_id`, captured at render time, so a status update always addresses the session that actually dispatched the job |
 
-## Kanban boards and ERPNext execution
+See [Repository layout](#repository-layout) for where the code behind each of these lives, and [Safety & governance](#safety--governance) for the full policy list.
 
-The `qkeee-erp` plugin's Kanban hooks exist so a kanban-dispatched worker can
-make attributed ERPNext calls — each dispatched task's requester origin is
-recorded (`plugins/qkeee-erp/qkeee_erp/core/kanban_origin.py`) and carried
-through to the write pipeline, same as a live chat session.
+## Getting started
 
-**When to use it:** a single, atomic ERPNext task you dispatch to this
-profile's board (`kanban specify`, not auto-decomposed) — the worker gets
-`erp_*` tools like any other `cli`-platform session.
+### Hermes CLI (host)
 
-**When not to:** don't call `kanban_create` to fan a multi-step ERPNext
-build (several doctypes, several records) out into multiple sub-cards. The
-board's auto-decomposer splits it into sub-cards and some root cards become
-"decomposition roots" that re-wake forever with no `cancelled`/`wont-do`
-terminal state to close them honestly — a board-architecture issue, open
-upstream (`agents` repo `.scratch/qkeee-erp-kanban-execution-steering/
-issues/01-*`). The skill's own guidance (`00-conventions.md`) runs this kind
-of work as a spec executed turn by turn in the live session instead, or — if
-the user explicitly asked for "kanban" — as ADR 0008's one job-level email
-approval (`docs/adr/0008-email-approval-for-kanban-jobs.md`).
+This repo *is* a Hermes profile distribution (`distribution.yaml`).
 
-**Setting to check after any setup/update:** `hermes -p <profile> qkeee-erp
-setup status`'s **P1** item. It must cover `platform_toolsets.cli`, not just
-`known_plugin_toolsets.cli` — a profile set up before 2026-10-27
-(`erpnext-hermes@4db8a55`) wrote the latter but never the former, which
-silently excluded `qkeee_erp` from every kanban worker's and every `chat -q`
-CLI invocation's effective toolset list even though the plugin itself
-registered fine. If a dispatched worker shows zero `erp_*` tools, run
-`hermes -p <profile> qkeee-erp setup --apply-profile-fixes` once — `setup
-status` names the gap explicitly (`platform_toolsets.cli lacks qkeee_erp`)
-if it's still unmet.
+```bash
+hermes profile install github.com/qkeee-ai/erpmate --alias --name dev-erpnext
+hermes profile info dev-erpnext   # manifest: version, author, required env vars
+hermes profile list               # all local profiles, distribution source column
+```
 
-**P3** (same `setup status` output) is the other kanban-relevant item:
-`kanban.orchestrator_profile`/`kanban.default_assignee` must name this
-profile, and the top-level `toolsets` list must include `kanban`, or chat
-and kanban workers get no kanban tools at all.
+A host (non-Docker) install gets ERPNext access only with proven Isolation (agents ADR 0006): the agent's terminal must run as a separate OS user that cannot read the gateway's files. Docker gets this for free from its terminal sidecar; on a host, root sets it up once. **Without these steps a host install has no ERPNext access**, not even to DEMO_ERP — the plugin registers no `erp_*` tools. The profile itself (chat, skills, cron) works either way. Windows hosts are not supported.
 
-## Example prompts / tasks this profile handles
+Names below: the gateway runs as your own user (`$USER`). `HERMES_HOME` is `~/.hermes`. The profile is `<p>`, so the profile home is `~/.hermes/profiles/<p>`. The terminal user is `hermes-terminal`; `setup` writes this name into `config.yaml`. The terminal user runs commands with the host's own tools (`bash`, `python3`), not the gateway's Hermes venv.
+
+**0. Your user — get this repo** (steps 1 and 5 use files from it):
+
+```sh
+git clone https://github.com/qkeee-ai/erpmate.git && cd erpmate
+```
+
+**1. Root, once per machine — the terminal user and sshd.**
+
+Linux:
+```sh
+sudo useradd --create-home --shell /bin/bash hermes-terminal
+sudo usermod -p '*' hermes-terminal   # no password, not locked: key login works with UsePAM no too
+sudo install -m 644 host/hermes-terminal.sshd.conf /etc/ssh/sshd_config.d/10-hermes-terminal.conf
+sudo sshd -t && sudo systemctl reload-or-restart ssh   # the unit is `sshd` on RHEL/Fedora/Arch
+```
+
+macOS:
+```sh
+sudo sysadminctl -addUser hermes-terminal -shell /bin/bash -password "$(openssl rand -base64 24)"
+sudo createhomedir -c -u hermes-terminal
+sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist   # Remote Login on; or System Settings > General > Sharing
+sudo dseditgroup -o edit -a hermes-terminal -t user com.apple.access_ssh   # only if Remote Login is limited to some users
+sudo install -m 644 host/hermes-terminal.sshd.conf /etc/ssh/sshd_config.d/10-hermes-terminal.conf
+sudo sshd -t   # launchd starts sshd per connection: no reload needed
+```
+
+The drop-in ([host/hermes-terminal.sshd.conf](host/hermes-terminal.sshd.conf)) applies the sidecar's login and forwarding rules to `hermes-terminal` (and `hermes-terminal-*`) only: key login, no forwarding. It needs `Include /etc/ssh/sshd_config.d/*` in `/etc/ssh/sshd_config` (default on Debian/Ubuntu, Fedora and macOS 13+); without that line, append the file's content to the end of `sshd_config`. If `sshd_config` has an `AllowUsers` line, add `hermes-terminal` to it. Confirm the drop-in applies to `hermes-terminal` and leaves your own user alone:
+
+```sh
+sudo sshd -T -C user=hermes-terminal,host=localhost,addr=127.0.0.1 | grep -Ei '^(authenticationmethods|allowtcpforwarding|x11forwarding|permittty)'
+sudo sshd -T -C user=$USER,host=localhost,addr=127.0.0.1 | grep -Ei '^(authenticationmethods|permittty)'
+```
+
+**2. Your user — install the profile and lock down `HERMES_HOME`.** Other users must not be able to read anything under `~/.hermes`; the Isolation probe checks exactly this.
+
+```sh
+hermes profile install github.com/qkeee-ai/erpmate --name <p>
+chmod 700 ~/.hermes
+```
+
+**3. Your user — enable the plugin and run setup.**
+
+```sh
+hermes -p <p> plugins enable qkeee-erp
+hermes -p <p> qkeee-erp setup --apply-profile-fixes
+```
+
+`--apply-profile-fixes` sets the chat toolsets and points the terminal at the host user (`terminal.backend: ssh`, `ssh_host: localhost`, `ssh_user: hermes-terminal`, `cwd: ~`), replacing the shipped Docker-sidecar values while keeping any value you set by hand. Before it changes `config.yaml` it writes `config.yaml.bak-<UTC>`, and it creates the gateway's ssh key at `~/.hermes/profiles/<p>/.terminal-ssh/id_ed25519`. Credentials and Isolation stay pending until steps 4 and 5.
+
+**4. Root — authorize the gateway key** for `hermes-terminal`, from this machine only (`restrict` also turns off forwarding and the pty):
+
+```sh
+PUB=~/.hermes/profiles/<p>/.terminal-ssh/id_ed25519.pub
+TH=~hermes-terminal
+LINE="restrict,from=\"127.0.0.1,::1\" $(cat "$PUB")"
+sudo install -d -m 700 -o hermes-terminal "$TH/.ssh"
+sudo touch "$TH/.ssh/authorized_keys"
+sudo grep -qxF "$LINE" "$TH/.ssh/authorized_keys" || echo "$LINE" | sudo tee -a "$TH/.ssh/authorized_keys" >/dev/null
+sudo chown hermes-terminal "$TH/.ssh/authorized_keys" && sudo chmod 600 "$TH/.ssh/authorized_keys"
+```
+
+**5. Your user — credentials, setup, check.**
+
+```sh
+mkdir -p -m 700 ~/.hermes/profiles/<p>/plugin-data/qkeee-erp
+install -m 600 skills/qkeee-erp/qkeee-erp-associate/qkeee-erp-associate.env.example ~/.hermes/profiles/<p>/plugin-data/qkeee-erp/qkeee-erp.env
+hermes -p <p> qkeee-erp setup
+hermes -p <p> qkeee-erp setup status
+```
+
+Fill in `qkeee-erp.env` before running `setup` (see [ERPNext credentials](#erpnext-credentials)). `setup status` exits 0 and shows every item `done`; read any non-`done` item against [Common issues](#common-issues). For a new ERPNext Instance, provision the bot account first: `hermes -p <p> qkeee-erp init-bot --dry-run --requested-by <email>`, then run it again with the printed confirm token (see [Operator CLI reference](#operator-cli-reference)). Restart the gateway — the plugin registers the `erp_*` tools when it loads.
+
+**Self-check (proves the probe, not just the config):** set `terminal.ssh_user` to your own user and authorize the key for it; `hermes -p <p> qkeee-erp setup` then reports Isolation as failed and the gateway registers no `erp_*` tools. Set it back to `hermes-terminal` and run `setup` again.
+
+Isolation covers the gateway's secrets only. Uploaded documents and large tool results from every session still reach the terminal (`cache/`); separating one Requester's data from another's is an open problem (see [Open items](#open-items)).
+
+### Docker
+
+[`Dockerfile`](./Dockerfile) + [`docker-compose.yaml`](./docker-compose.yaml) build on `nousresearch/hermes-agent:latest` and add this profile plus the **jev** model router and the **LCM** context manager. Everything is driven from `.env`:
+
+```bash
+cp env.example .env     # then edit — see the annotated blocks in that file
+docker compose up -d --build
+docker logs -f <container>
+```
+
+The container name comes from `HERMES_CONTAINER_NAME`, else `HERMES_PROFILE_NAME`, else the compose project name (this folder). Boot hooks install the profile, enable the plugin, run `qkeee-erp setup --apply-profile-fixes`, wire up jev/LCM and lock down skills automatically — see [Boot hooks](#boot-hooks) for the full sequence if you need to debug one.
+
+**Storage — two bind mounts, both from `.env`:**
+
+| Variable | Mounts at | Holds |
+|---|---|---|
+| `HERMES_DATA_DIR` | `/opt/data` (`$HERMES_HOME`) | Profiles, sessions, skills, `config.yaml`, `.env`, `qkeee-erp.env`, logs, `state.db`. Delete to reset an agent. |
+| `HERMES_CWD_DIR` | `$HERMES_CWD` (default `/opt/cwd`) | The agent's working directory — where the terminal tool starts and generated files land. Also exported as `TERMINAL_CWD`. |
+
+Point these at per-profile host paths to run several agents from one compose file:
+
+```
+HERMES_DATA_DIR=/work/storage/hermes/agent-profiles/dev-erp/hermes-home
+HERMES_CWD_DIR=/work/storage/hermes/agent-profiles/dev-erp/cwd
+```
+
+Set `HERMES_UID`/`HERMES_GID` to the host owner of those directories — see [Common issues](#common-issues) for the symptom when they don't match.
+
+Once the container is up: `docker exec <container> hermes -p <profile> qkeee-erp setup status` should show every item `done`; provision the bot account for a new ERPNext Instance the same way as the CLI path (`init-bot --dry-run --requested-by <email>`, then confirm). For a new ERPNext instance, provision the bot account first: Operator ERP commands always run in the gateway container, never the terminal sidecar: `docker compose exec -u hermes hermes hermes -p <profile> qkeee-erp <command>`.
+
+## Updating
+
+**Hermes CLI:**
+
+```bash
+hermes profile update dev-erpnext
+hermes profile update dev-erpnext --force-config   # reset config.yaml to distro defaults
+```
+
+`hermes profile update` only ever touches what `distribution.yaml`'s `distribution_owned` lists — currently `SOUL.md`, `skills/`, `cron/jobs.json`, `config.yaml`, `mcp.json`. It fetches from the profile's recorded source and preserves your local `config.yaml` edits unless `--force-config` is given. Runtime state (`.env`, `qkeee-erp.env`, `memories/`, `sessions/`, etc.) is never touched by install or update.
+
+**Run `hermes -p <p> qkeee-erp setup` again after every `profile update`.** Until it runs, the plugin registers no `erp_*` tools and logs why. Run `init-bot` again after any app upgrade or any `doctype_defs.py` field addition — re-provisioning converges every field against each doctype's own definition, so it is always safe to re-run.
+
+**Docker auto-update:**
+
+| Variable | Effect |
+|---|---|
+| `HERMES_PROFILE_SOURCE` | Git URL to install from. Empty **string** skips the install entirely. |
+| `HERMES_PROFILE_LOCAL_PATH` | In-container path of a mounted clone (must hold `distribution.yaml` at its root); takes precedence over the URL. |
+| `HERMES_PROFILE_BRANCH` | Branch of the git source; empty = default branch; ignored with `HERMES_PROFILE_LOCAL_PATH`. Hermes cannot clone a branch directly, so the install hook shallow-clones it into `$HERMES_HOME/.profile-src/<name>` and installs from there. If the branch cannot be fetched, nothing is installed or updated. |
+| `HERMES_PROFILE_GIT_TOKEN` / `_TOKEN_FILE` | HTTPS auth, sent as an `Authorization` header for the source's host only — never written to disk or into the URL. |
+| `HERMES_PROFILE_SSH_KEY_FILE` | For `git@host:org/repo` sources. |
+| `HERMES_PROFILE_AUTO_UPDATE` | `1` runs `hermes profile update` every boot. User data is preserved; distribution-owned files are overwritten. Before the update, the install hook sets the profile's recorded source to the configured one (`_SOURCE`, `_LOCAL_PATH` or `_BRANCH`), so a changed source takes effect. |
+| `GATEWAY_PROMOTE_ENABLE` / `_PROFILE` | First boot only: which profile gets promoted to running. `0` leaves `default` running. |
+
+With `HERMES_PROFILE_AUTO_UPDATE=1`, `qkeee-erp setup --apply-profile-fixes` and skill lockdown both re-run every boot, so a config/skill drift introduced by the update is corrected automatically; an existing install's hand-edited `terminal:` block is not touched by a plain update, only by `--force-config` — copy that block across by hand if you use it.
+
+## Common issues
+
+| Symptom | Fix |
+|---|---|
+| `setup status` I1 `not Isolated: the terminal … can read …` | `chmod 700 ~/.hermes` (host install step 2); confirm `hermes-terminal` is not your own user and has no sudo |
+| `setup status` I1 `probe could not run … Permission denied (publickey)` | Host install step 4 not done, the `from=` address doesn't match, an `AllowUsers` line leaves out `hermes-terminal`, or the drop-in isn't loaded (`sshd -T`, step 1) |
+| `setup status` I1 `probe could not run … Connection refused` | sshd not running (Linux: `systemctl status ssh`; macOS: Remote Login off) |
+| `setup status` I1 `not Isolated: terminal.env_passthrough forwards QKEEE_ERP_…` | Remove that name from `terminal.env_passthrough` |
+| `setup status` I2 `terminal target hermes-terminal@localhost is already Isolated for …` | One ERP-enabled profile per terminal user: create `hermes-terminal-<p>` (host install steps 1 and 4), set `terminal.ssh_user`, run `setup` again |
+| `setup status` P2 `Docker sidecar values in terminal.…` | Run `setup --apply-profile-fixes`, or set `terminal.*` by hand |
+| A dispatched kanban worker (or `chat -q`) shows zero `erp_*` tools | `setup status` P1 must cover `platform_toolsets.cli`, not just `known_plugin_toolsets.cli` — run `qkeee-erp setup --apply-profile-fixes`; `setup status` names the exact gap if still unmet |
+| Chat and kanban workers get no kanban tools at all | `setup status` P3: `kanban.orchestrator_profile`/`kanban.default_assignee` must name this profile, and the top-level `toolsets` list must include `kanban` |
+| Agent's working directory silently relocates to a different path | `HERMES_UID`/`HERMES_GID` don't match the host owner of `HERMES_CWD_DIR`, leaving the mount unwritable; `0155-cwd-setup` logs a warning when it detects this — fix the UID/GID and recreate the container |
+| Dashboard refuses to start / restarts in a loop | A non-loopback bind (`0.0.0.0`, the default) always requires `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` + a password or hash; set one, or bind `HERMES_DASHBOARD_HOST=127.0.0.1` and tunnel in. `HERMES_DASHBOARD_AUTOGUARD=0` disables the autoguard that prevents the loop |
+| Gateway refuses the terminal sidecar's host key | After deleting the `terminal-hostkeys` volume the sidecar gets a new key; clear the pin: `docker compose exec -u hermes hermes ssh-keygen -R terminal -f /opt/data/.ssh/known_hosts` |
+| Every terminal call returns `degraded` | No terminal sidecar in this deployment — set `terminal.backend: local` in `config.yaml` (note: `local` gives the agent read access to everything in `/opt/data`) |
+| `/lcm doctor repair apply` can't fix `lcm.db` (`database disk image is malformed` on every compaction) | Follow [adminops/lcm-db-recover.md](adminops/lcm-db-recover.md); the automated `lcm-corruption-check` cron/boot job already diagnoses and emails/chats `QKEEE_ERP_<TAG>_ADMIN_EMAIL`/`_OPS_CHAT_WEBHOOK` when it finds damage |
+| `config.yaml` loses all its comments after an update | `_config_version` lagging the base image's schema default triggers `migrate_config()`, which rewrites the file through a PyYAML dump and strips every comment; since the file is distribution-owned this recurs on every update once it happens — keep `_config_version` current |
+| `jev doctor` reports `price_order`/`dead_specialty_cells` | A routing pool inverts silently on a catalog change — re-run `jev doctor` after any pool edit or model retirement, and fix the flagged tier in `<profile>/jev/routing.json` |
+
+## Common usage
+
+### Example prompts
 
 **HR & Payroll**
 - "Check leave balance for HR-EMP-00014 and apply 3 days casual leave starting next Monday."
@@ -133,159 +236,96 @@ and kanban workers get no kanban tools at all.
 
 Every example ending in submission (payslips, journal entries, purchase orders, etc.) stops for review and explicit confirmation before the write — no exceptions. See the **Safety Policy** section of [`profile.md`](./profile.md).
 
-## Hermes CLI: profile from this repo
+### Kanban-dispatched ERPNext work
 
-This repo *is* a Hermes profile distribution (`distribution.yaml`). Standard flow:
+A single-turn read gets a direct reply: no plan, no kanban card. Anything else — any write, any multi-step request, anything spanning more than one turn — gets a full plan up front, decomposed into atomic, independently-dispatchable tasks, each its own `kanban_create` card (agents ADR 0011). A single ERPNext write is one atomic card like any other; the `qkeee-erp` plugin's Kanban hooks record each dispatched task's requester origin (`plugins/qkeee-erp/qkeee_erp/core/kanban_origin.py`) and carry it through to the write pipeline, same as a live chat session.
 
-**Install fresh** (clones this repo, validates the manifest, copies distribution-owned files, checks required env vars):
-```bash
-hermes profile install github.com/qkeee-ai/erpmate --alias --name dev-erpnext
-```
+The board's own auto-decomposer is never used to split a `kanban_create`d card, for any domain. The planner decomposes up front; handing the board's own decomposer a multi-step card to split instead produces "decomposition roots" that re-wake every time a child completes and refuse `kanban_complete` as terminal — a board-architecture issue, open upstream (`agents` repo `.scratch/qkeee-erp-kanban-execution-steering/issues/01-*`). A user-dispatched, non-board-decomposed kanban task assigned to this profile is the normal case.
 
-**Pull latest after a commit lands here** (fetches from the recorded source; preserves your local `config.yaml` edits unless overridden):
-```bash
-hermes profile update dev-erpnext
-hermes profile update dev-erpnext --force-config   # reset config.yaml to distro defaults
-```
+A kanban worker is headless, so a multi-step ERPNext write it carries out goes through one job-level email/chat approval instead of per-batch codes (agents ADR 0008/0010): `erp_execute_write phase=render batches=[...]` computes one `job_token` over the whole plan; the Requester approves once; every batch in the plan executes under that approval (`tool-cookbook.md`'s "Starting a kanban job" example has the actual calls). Current behavior:
 
-**Inspect / list:**
-```bash
-hermes profile info dev-erpnext   # manifest: version, author, required env vars
-hermes profile list               # all local profiles, distribution source column
-```
+- A batch step that can't get its own confirmation **parks** instead of failing the whole job; job status reports surface what's parked.
+- A later batch resolves an earlier batch's result (`<FROM_BATCH_N_STEP_M>`) from the job's own durable record (`Qkeee Bot Job Approval`), including across a worker respawn.
+- Every step that completes, succeeded or failed, gets an append-only execution-ledger entry; the platform/channel that first dispatched the job is captured at render time, so a status update always addresses the right thread.
+- A scheduled poller (`cron/qkeee-erp-job-status-poller`, every 5 minutes) reports open parks/blocks once `QKEEE_ERP_<TAG>_ADMIN_EMAIL` is set and an Operator resumes it.
 
-`hermes profile update` only ever touches what `distribution.yaml`'s `distribution_owned` lists — currently `SOUL.md`, `skills/`, `cron/jobs.json`, `config.yaml`, `mcp.json`. Runtime state (`.env`, `qkeee-erp.env`, `memories/`, `sessions/`, etc.) is never touched by install/update.
+### Operator CLI reference
 
-**ERP plugin on a host install:** after `profile install` or `profile update`, enable the plugin and run its setup: `hermes -p <profile> plugins enable qkeee-erp`, then `hermes -p <profile> qkeee-erp setup` (add `--apply-profile-fixes` to let it set the toolsets and the ssh terminal; `--dry-run` shows the plan). Until `hermes -p <profile> qkeee-erp setup status` shows every item done, the plugin registers no ERP tools. Run `setup` again after every `profile update`. Every Deployment gets ERP tools only with proven Isolation (agents ADR 0006): `setup` probes, through the configured ssh terminal, whether the agent's terminal can read `plugin-data/qkeee-erp/qkeee-erp.env` and the profile `.env`, and records the result with a terminal-config fingerprint in `plugin-data/qkeee-erp/isolation.json`. A changed terminal config, or a terminal target that another profile already uses, means no ERP tools until `setup` runs again. Host steps: [Host install (Linux/macOS)](#host-install-linuxmacos).
+`hermes -p <profile> qkeee-erp <command>` — for the Operator, never the agent (the agent uses the `erp_*` tools). Every command that reaches ERPNext takes `--tag` (default: the active `plugins.entries.qkeee-erp.settings.active_env`) and `--requested-by <email>` (required — the Requester Gate checks it exactly as it checks a chat sender), plus optional `--prompt-summary`/`--latest-prompt` for the audit row. Full list, always current: `hermes -p <profile> qkeee-erp --help`.
 
-Other profile commands (not specific to this repo, general Hermes usage): `hermes profile create`, `hermes profile show`, `hermes profile rename`, `hermes profile delete`, `hermes profile use <name>` (set default), `hermes profile export` / `hermes profile import` (tar.gz, for one-off sharing without git).
+**`setup [status] [--dry-run] [--apply-profile-fixes]`** — idempotent; run after every `profile install`/`profile update` and after any manual terminal/toolset edit:
 
-## Host install (Linux/macOS)
-
-A host (non-Docker) install gets ERPNext access only with proven Isolation (agents ADR 0006). The agent's terminal must run as a separate OS user. That user must not be able to read the gateway's files. Docker gets this from the terminal sidecar. On a host, root sets it up once. **Without these steps a host install has no ERPNext access**, not even to DEMO_ERP: the plugin registers no `erp_*` tools. The profile itself (chat, skills, cron) works either way. Windows hosts are not supported yet.
-
-Names below: the gateway runs as your own user (`$USER`). `HERMES_HOME` is `~/.hermes`. The profile is `<p>`, so the profile home is `~/.hermes/profiles/<p>`. The terminal user is `hermes-terminal`; `setup` writes this name into `config.yaml`. The terminal user runs commands with the host's own tools (`bash`, `python3`), not the gateway's Hermes venv.
-
-**0. Your user: get this repo** (steps 1 and 5 use files from it):
-
-```sh
-git clone https://github.com/qkeee-ai/erpmate.git && cd erpmate
-```
-
-**1. Root, once per machine: the terminal user and sshd.**
-
-Linux:
-```sh
-sudo useradd --create-home --shell /bin/bash hermes-terminal
-sudo usermod -p '*' hermes-terminal   # no password, not locked: key login works with UsePAM no too
-sudo install -m 644 host/hermes-terminal.sshd.conf /etc/ssh/sshd_config.d/10-hermes-terminal.conf
-sudo sshd -t && sudo systemctl reload-or-restart ssh   # the unit is `sshd` on RHEL/Fedora/Arch
-```
-
-macOS:
-```sh
-sudo sysadminctl -addUser hermes-terminal -shell /bin/bash -password "$(openssl rand -base64 24)"
-sudo createhomedir -c -u hermes-terminal
-sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist   # Remote Login on; or System Settings > General > Sharing
-sudo dseditgroup -o edit -a hermes-terminal -t user com.apple.access_ssh   # only if Remote Login is limited to some users
-sudo install -m 644 host/hermes-terminal.sshd.conf /etc/ssh/sshd_config.d/10-hermes-terminal.conf
-sudo sshd -t   # launchd starts sshd per connection: no reload needed
-```
-
-The drop-in ([host/hermes-terminal.sshd.conf](host/hermes-terminal.sshd.conf)) applies the sidecar's login and forwarding rules to `hermes-terminal` (and `hermes-terminal-*`) only: key login, no forwarding. It needs `Include /etc/ssh/sshd_config.d/*` in `/etc/ssh/sshd_config` (default on Debian/Ubuntu, Fedora and macOS 13+). Without that line, append the file's content to the end of `sshd_config`. If `sshd_config` has an `AllowUsers` line, add `hermes-terminal` to it. Check that the drop-in applies to `hermes-terminal` and leaves your own user alone:
-
-```sh
-sudo sshd -T -C user=hermes-terminal,host=localhost,addr=127.0.0.1 | grep -Ei '^(authenticationmethods|allowtcpforwarding|x11forwarding|permittty)'
-sudo sshd -T -C user=$USER,host=localhost,addr=127.0.0.1 | grep -Ei '^(authenticationmethods|permittty)'
-```
-
-**2. Your user: install the profile and lock down `HERMES_HOME`.** Other users must not be able to read anything under `~/.hermes`. The Isolation probe checks exactly this.
-
-```sh
-hermes profile install github.com/qkeee-ai/erpmate --name <p>
-chmod 700 ~/.hermes
-```
-
-**3. Your user: enable the plugin and run setup.**
-
-```sh
-hermes -p <p> plugins enable qkeee-erp
-hermes -p <p> qkeee-erp setup --apply-profile-fixes
-```
-
-`--apply-profile-fixes` sets the chat toolsets. It also points the terminal at the host user: `terminal.backend: ssh`, `ssh_host: localhost`, `ssh_user: hermes-terminal`, `cwd: ~`. The shipped `config.yaml` points at the Docker sidecar. Setup replaces each sidecar value and keeps other values that you set by hand. Before it changes `config.yaml`, it writes `config.yaml.bak-<UTC>`. It creates the gateway's ssh key `~/.hermes/profiles/<p>/.terminal-ssh/id_ed25519`. S1 (credentials) and I1 (Isolation) stay pending until steps 4 and 5.
-
-**4. Root: authorize the gateway key** for `hermes-terminal`, from this machine only (`restrict` also turns off forwarding and the pty):
-
-```sh
-PUB=~/.hermes/profiles/<p>/.terminal-ssh/id_ed25519.pub
-TH=~hermes-terminal
-LINE="restrict,from=\"127.0.0.1,::1\" $(cat "$PUB")"
-sudo install -d -m 700 -o hermes-terminal "$TH/.ssh"
-sudo touch "$TH/.ssh/authorized_keys"
-sudo grep -qxF "$LINE" "$TH/.ssh/authorized_keys" || echo "$LINE" | sudo tee -a "$TH/.ssh/authorized_keys" >/dev/null
-sudo chown hermes-terminal "$TH/.ssh/authorized_keys" && sudo chmod 600 "$TH/.ssh/authorized_keys"
-```
-
-**5. Your user: credentials, setup, check.**
-
-```sh
-mkdir -p -m 700 ~/.hermes/profiles/<p>/plugin-data/qkeee-erp
-install -m 600 skills/qkeee-erp/qkeee-erp-associate/qkeee-erp-associate.env.example ~/.hermes/profiles/<p>/plugin-data/qkeee-erp/qkeee-erp.env
-hermes -p <p> qkeee-erp setup
-hermes -p <p> qkeee-erp setup status
-```
-
-Fill in `qkeee-erp.env` before you run `setup` (see [ERPNext credentials](#erpnext-credentials-qkeee-erpenv-not-env)). `setup status` exits 0 and shows every item `done`. I1 reads "Isolated: the terminal hermes-terminal@localhost cannot read …". For a new ERPNext Instance, provision the bot account first: `hermes -p <p> qkeee-erp init-bot --dry-run --requested-by <email>`, then run it again with the printed token. Restart the gateway: the plugin registers the `erp_*` tools when it loads.
-
-**After `hermes profile update <p>`:** run `hermes -p <p> qkeee-erp setup` again. Until then the plugin registers no `erp_*` tools and logs why.
-
-**Self-check (proves the probe, not just the config):** set `terminal.ssh_user` to your own user and authorize the key for it; `hermes -p <p> qkeee-erp setup` then reports I1 "not Isolated: the terminal … can read …" and the gateway registers no `erp_*` tools. Set it back to `hermes-terminal` and run `setup` again.
-
-| `setup status` says | Fix |
+| Form | Effect |
 |---|---|
-| I1 `not Isolated: the terminal … can read …` | `chmod 700 ~/.hermes` (step 2); check that `hermes-terminal` is not your user and has no sudo |
-| I1 `probe could not run … Permission denied (publickey)` | step 4 not done, the `from=` address does not match, an `AllowUsers` line leaves out `hermes-terminal`, or the drop-in is not loaded (`sshd -T` above) |
-| I1 `probe could not run … Connection refused` | sshd not running (Linux: `systemctl status ssh`; macOS: Remote Login off) |
-| I1 `not Isolated: terminal.env_passthrough forwards QKEEE_ERP_…` | remove that name from `terminal.env_passthrough` |
-| I2 `terminal target hermes-terminal@localhost is already Isolated for …` | one ERP-enabled profile per terminal user: create `hermes-terminal-<p>` (steps 1 and 4), set `terminal.ssh_user`, run `setup` |
-| P2 `Docker sidecar values in terminal.…` | run `setup --apply-profile-fixes`, or set `terminal.*` by hand |
+| `setup` (no flag) | Applies whatever prerequisites are currently unmet: moves a legacy `qkeee-erp.env`/`skills.config.qkeee_erp` block (S1/S2), checks the terminal key (S3), refuses a terminal target another profile already uses (I2), probes Isolation through the sidecar (I1) |
+| `setup status` | Reports every item's state (done / pending / what's missing) and changes nothing — run this first when ERP tools don't show up |
+| `--dry-run` | Prints the planned changes, writes nothing |
+| `--apply-profile-fixes` | Also writes the `config.yaml` prerequisites `setup` can't infer on its own: `platform_toolsets.cli` / `known_plugin_toolsets.cli` (P1), the ssh terminal block — `terminal.backend`/`ssh_host`/`ssh_user`/`cwd` (P2). Snapshots `config.yaml.bak-<UTC>` before touching the file |
 
-Isolation covers the gateway's secrets only. Uploaded documents and large tool results from every session still reach the terminal (`cache/`); separating one Requester's data from another's is an open problem.
+**`init-bot [--dry-run] [--confirm-token <t> --issued-at <ts>] [--domains <csv>] [--strip-stock-roles] --requested-by <email>`** — elevated credentials, Operator-only, provisions the `Qkeee Bot` role and the audit doctypes:
 
-## Deployment: Docker
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Reports the plan (role grants, doctypes to create/converge) and prints a confirm token — no write |
+| `--confirm-token` / `--issued-at` | The token/timestamp pair from a prior `--dry-run`; required to actually run it |
+| `--domains <csv>` | Comma-separated domains to grant the bot role's permissions for (e.g. `procurement,inventory`); omit for every domain; `none` provisions only the role + audit doctypes, no domain permissions |
+| `--strip-stock-roles` | Also removes ERPNext's stock roles from the bot user (shown in the plan first, before you confirm) |
 
-[`Dockerfile`](./Dockerfile) + [`docker-compose.yaml`](./docker-compose.yaml) build on `nousresearch/hermes-agent:latest` and add three things the base image does not ship: this profile, the **jev** model router, and the **LCM** context manager. Everything is driven from `.env`:
+**Every other command** — `health` (connectivity/auth/role gaps as the bot account, no Requester needed), `whoami`, `list-envs`, `list-ops` (no network), `query`, `get`, `report`, `roles`, `discover`, `render` and `execute-write` (the only write path; takes `--op`/`--args` or `--batch` plus the confirmation flags `--confirmation-token`, `--issued-at`, `--user-confirmation-text`, `--user-approved`, `--approval-note` — same shape the agent's own `erp_*` tools use) — is listed with its own flags by `--help`. Exit codes: `0` ok, `1` error, `2` usage/invalid arguments (nothing sent), `3` refused by a gate (nothing sent), `4` outcome unknown or partial.
 
-```bash
-cp env.example .env     # then edit — see the annotated blocks in that file
-docker compose up -d --build
-docker logs -f <container>
-```
+## Repository layout
 
-The container name comes from `HERMES_CONTAINER_NAME`, else `HERMES_PROFILE_NAME`, else the compose project name (this folder).
+### Tracked and symlinked (edit these, in this repo)
 
-### Storage: two bind mounts, both from `.env`
+| File / dir | Purpose |
+|---|---|
+| `distribution.yaml` | Profile manifest / distribution metadata — `distribution_owned` lists exactly what `hermes profile update` is allowed to overwrite: `SOUL.md`, `skills/` (the whole tree, not just `skills/qkeee-erp/`), `cron/jobs.json`, `config.yaml`, `mcp.json` |
+| `SOUL.md` | Agent identity, voice, personality — loaded into system prompt slot #1 |
+| `config.yaml` | Model, provider, toolsets, `skills.external_dirs`, `skills.write_approval`, plus the cost-control block: `auxiliary.*` (every background task pinned to a `:free` model), `compression.threshold`, trimmed `platform_toolsets`, and `context.engine: lcm` written in by the Docker boot hooks |
+| `mcp.json` | MCP server connections (currently no servers configured; ERPNext access goes through the `qkeee-erp` plugin's `erp_*` tools) |
+| `skills/qkeee-erp/` | The `qkeee-erp-associate` skill: ERP domain know-how only, no code — mounts read-only into the live profile via `skills.external_dirs`, edited here only |
+| `plugins/qkeee-erp/` | The `qkeee-erp` gateway plugin: all ERP code, the `erp_*` tools, the identity guard, Kanban hooks, the `qkeee-erp:usage` skill and the Operator CLI (`hermes -p <profile> qkeee-erp …`). Its settings: `plugins.entries.qkeee-erp.settings` (`active_env`, `mode`) |
+| `cron/` | Scheduled jobs. Ships `qkeee-erp-job-status-poller` (agents ADR 0010, issue 23), a `no_agent` script every 5 minutes reporting open kanban-job parks/blocks — paused on install until `QKEEE_ERP_<TAG>_ADMIN_EMAIL` is set and an Operator resumes it. Also ships `lcm-corruption-check`, a `no_agent` script (`scripts/lcm_corruption_check.py`) every 12 hours — plus once at container boot via `docker/cont-init.d/0186-lcm-corruption-check` — diagnosing (and, on damage, rebuilding a candidate for) this profile's `lcm.db`, emailing/Google-Chatting `QKEEE_ERP_<TAG>_ADMIN_EMAIL`/`_OPS_CHAT_WEBHOOK` on a finding. See `skills/adminops/lcm-self-heal/` for the reactive, chat-triggered counterpart |
+| `adminops/` | Operator maintenance tools, baked into the image at `/opt/adminops/` (not run at boot). See [adminops/README.md](adminops/README.md) |
+| `profile.md` | Purpose / Owns / Should-Not-Own / safety policy / operating protocol for this agent — user-owned, not replaced on `profile update` |
 
-| Variable | Mounts at | Holds |
-|---|---|---|
-| `HERMES_DATA_DIR` | `/opt/data` (`$HERMES_HOME`) | Profiles, sessions, skills, `config.yaml`, `.env`, `qkeee-erp.env`, logs, `state.db`. Delete to reset an agent. |
-| `HERMES_CWD_DIR` | `$HERMES_CWD` (default `/opt/cwd`) | The agent's working directory — where the terminal tool starts and generated files land. Also exported as `TERMINAL_CWD`. |
+**Plugin** (`plugins/qkeee-erp/`) — runs only in the gateway process:
 
-Point these at per-profile host paths to run several agents from one compose file:
+| Path | Role |
+|---|---|
+| `qkeee_erp/core/client.py` | Shared connector — auth, discovery, RBAC pre-check, write-allowlist gate, PII redaction, audit logging |
+| `qkeee_erp/core/operations.py` | The one write pipeline and the registry of named write operations |
+| `qkeee_erp/domains/*.py` | Per-domain allowlists + operations: `hr_payroll`, `accounts`, `mis` (no write path), `sales`, `procurement`, `inventory`, `fixed_assets`, `system_admin`, `manufacturing` (BOM default-ambiguity + Work Order stock-availability checks), `notify` (task-summary email to the requester; no ERPNext write of its own) |
+| `qkeee_erp/init_bot.py` | Operator-only (`hermes qkeee-erp init-bot`): provisions the `Qkeee Bot` Role + the audit doctypes, assigns the role to the bot user, and grants its business rights — each domain's code doctypes plus its template roles' rows (`doctype_defs.DOMAIN_TEMPLATE_ROLES`, e.g. HR Manager); never delete, never a privileged doctype (agents ADR 0003). Re-provisioning converges every field against each doctype's own definition (`doctype_defs.managed_keys()`), not just type changes, so it is safe to re-run after any app upgrade or any `doctype_defs.py` field addition; each run logs one audit-log row via `log_migration_summary()` instead of a state file |
+| `qkeee_erp/env_defs.py` | Required/optional `qkeee-erp.env` key manifest — presence-only, report-only; `setup`/`init-bot` use it to name what's missing instead of failing silently |
+| `erp_tools.py`, `cli.py`, `settings.py` | The `erp_*` tools, the Operator CLI (same code path as the tools), the plugin settings |
+| `skills/usage/SKILL.md` | `qkeee-erp:usage`: the rules for calling the `erp_*` tools, loaded on demand |
 
-```
-HERMES_DATA_DIR=/work/storage/hermes/agent-profiles/dev-erp/hermes-home
-HERMES_CWD_DIR=/work/storage/hermes/agent-profiles/dev-erp/cwd
-```
+**Skill** (`skills/qkeee-erp/qkeee-erp-associate/`) — thin `SKILL.md` router, domain procedures loaded on demand, no code:
 
-Set `HERMES_UID`/`HERMES_GID` to the host owner of those directories. A mismatch leaves the cwd mount unwritable, and the agent then silently relocates to the nearest usable ancestor rather than failing — `0155-cwd-setup` warns when it detects this.
+| Path | Role |
+|---|---|
+| `references/domains/*.md` | Per-domain procedure: one per domain module above (`manufacturing.md` included), plus `doc-extraction.md` (vision-only, no code module) and `grc-audit.md` (cross-cutting statutory-audit framing, no doctype allowlist of its own — latches alongside a functional domain, not instead of it) |
+| `references/00-conventions.md` | Naming rules, GRC baseline, scope guardrail — single copy, referenced by every domain file |
+| `references/tool-cookbook.md` | Worked `erp_*` calls |
 
-`terminal.cwd` is deliberately absent from `config.yaml` (a machine-local absolute path has no business in a distribution-owned file), so `TERMINAL_CWD` is the only thing setting the working directory.
+### Runtime-only (never commit)
+
+`.env`, `auth.json`, `memories/`, `sessions/`, `state.db*`, `logs/`, `workspace/`, `plans/`, `home/`, `local/`, `*_cache/`, `tmp/` — these belong to the live profile instance and can carry secrets or grow to tens of GB. See [Profiles: Running Multiple Agents](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) for what a profile directory holds and why.
+
+### ERPNext credentials
+
+ERPNext instance credentials (`QKEEE_ERP_*`) belong to the `qkeee-erp` plugin, not the profile: `$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` (mode 600), read only in the gateway by the plugin's connector. They never reach the agent's terminal or `execute_code`, and the plugin's identity guard blocks commands that reach for the file. This keeps ERPNext secrets physically separate from any LLM-provider key in the main `.env`.
+
+- Copy `skills/qkeee-erp/qkeee-erp-associate/qkeee-erp-associate.env.example` to `$HERMES_HOME/plugin-data/qkeee-erp/qkeee-erp.env` and fill in real values out-of-band — never by having the agent read/cat this file or echo the values back. A legacy `$HERMES_HOME/qkeee-erp.env` is read until it is moved.
+- One file holds every Instance **tag**: `QKEEE_ERP_<TAG>_BASE_URL` / `_API_KEY` / `_API_SECRET` (required), plus optional per-tag extras — `env_defs.py` names the full set. The active tag and the write mode are plugin settings (`plugins.entries.qkeee-erp.settings.active_env` / `.mode`). Add a new ERPNext instance by appending another tag's trio, never by creating a second file.
+- Read audit logging is unconditional on every `query_resource()`/`get_resource()`/`run_query_report()` call — there is no debug flag to gate it.
+
+## Design notes
 
 ### Boot hooks
 
-s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmarked; this repo adds the rest:
+s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmarked; this repo adds the rest. All are idempotent and non-fatal — a failure logs a warning and boot continues.
 
 | Hook | Does |
 |---|---|
@@ -305,7 +345,9 @@ s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmark
 | `0198-erp-skills-readonly` | Makes `skills/qkeee-erp` root-owned, so the terminal sidecar's file sync-back cannot change the ERP code the gateway plugin imports |
 | `02-reconcile-profiles` | *(base)* creates the s6 gateway slots from each profile's `desired_state` |
 
-All are idempotent and non-fatal — a failure logs a warning and boot continues.
+The compose `command` is `["sleep", "infinity"]`, **not** `gateway run`. In an s6 container `hermes gateway run` does not run a foreground gateway: it redirects to `gateway start` on the `gateway-default` slot and then sleeps anyway, which would start the *default* profile's gateway and fight `0195-gateway-state`. The gateway that should run is started by `02-reconcile-profiles`; the CMD only keeps `/init` alive.
+
+`terminal.cwd` is deliberately absent from `config.yaml` (a machine-local absolute path has no business in a distribution-owned file), so `TERMINAL_CWD` is the only thing setting the working directory.
 
 ### Terminal sidecar
 
@@ -318,22 +360,13 @@ The agent's terminal, file tools (`read_file`, `write_file`, `patch`, `search_fi
 | Host key | `terminal-hostkeys` volume, made on the sidecar's first start; the gateway pins it in `/opt/data/.ssh/known_hosts` |
 | Sidecar home | `terminal-home` volume at `/opt/data` *inside the sidecar*: Hermes syncs the skills tree (and any skill-declared credential file, e.g. Google Workspace tokens) into `~/.hermes` there |
 
-When a session's terminal closes, Hermes copies changed skill files from the sidecar back into the gateway's `skills/`. `0198-erp-skills-readonly` makes `skills/qkeee-erp` root-owned so that copy fails for the ERP code the gateway plugin imports. The failure stops that sync-back pass with a warning in the gateway log, so other changed skill files in the same pass may not come back either. Still synced to the sidecar: skill-declared credential files (e.g. Google Workspace tokens) and the `cache/` tree (uploaded documents and large tool results, from every session). The `local` backend exposed these too; the sidecar does not narrow them yet.
-
-The sidecar's sshd accepts key auth only, allows no forwarding, and has no `AcceptEnv`, so skill env passthrough does not reach it. Each terminal call pays a small ssh round trip over a ControlMaster connection.
-
-- Operator ERP commands run in the gateway container, never in the sidecar: `docker compose exec -u hermes hermes hermes -p <profile> qkeee-erp <command>` (`--help` lists them). ERP reads and writes need `--requested-by <email>`; they are not for the agent.
-- After deleting the `terminal-hostkeys` volume the sidecar has a new host key and the gateway refuses it. Clear the pin: `docker compose exec -u hermes hermes ssh-keygen -R terminal -f /opt/data/.ssh/known_hosts`.
-- A deployment without the sidecar must set `terminal.backend: local` in the profile `config.yaml`; otherwise every terminal call returns a `degraded` result. `local` gives the agent read access to everything in `/opt/data`.
-- An existing install keeps its `config.yaml` on update: copy the `terminal:` block from this repo's `config.yaml` into it by hand.
-
-The compose `command` is `["sleep", "infinity"]`, **not** `gateway run`. In an s6 container `hermes gateway run` does not run a foreground gateway: it redirects to `gateway start` on the `gateway-default` slot and then sleeps anyway, which starts the *default* profile's gateway and fights `0195-gateway-state`. The gateway that should run is started by `02-reconcile-profiles`; the CMD only keeps `/init` alive.
+When a session's terminal closes, Hermes copies changed skill files from the sidecar back into the gateway's `skills/`. `0198-erp-skills-readonly` makes `skills/qkeee-erp` root-owned so that copy fails for the ERP code the gateway plugin imports; that failure stops the sync-back pass with a warning, so other changed skill files in the same pass may not come back either. Still synced to the sidecar: skill-declared credential files (e.g. Google Workspace tokens) and the `cache/` tree (uploaded documents and large tool results, from every session). The sidecar's sshd accepts key auth only, allows no forwarding, and has no `AcceptEnv`, so skill env passthrough does not reach it. Each terminal call pays a small ssh round trip over a ControlMaster connection.
 
 ### Model routing: jev
 
 [`hermes-jev-skills`](https://github.com/kerpopule/hermes-jev-skills) is baked in at `/opt/jev-skills` (pin with `--build-arg JEV_REF=<sha>`). jev is a decision model: it classifies each turn's difficulty and specialty, then picks the worker model from pools in `<profile>/jev/routing.json`.
 
-**Two different keys, easy to conflate.** jev itself (the classifier) needs its own provider key; the models it routes *to* use your normal provider keys. TypeSafe is the default and wins whenever several keys exist, so a bare `OPENROUTER_API_KEY` in the environment is deliberately ignored. For an OpenRouter-only install:
+jev itself (the classifier) needs its own provider key; the models it routes *to* use your normal provider keys — these are two different keys. TypeSafe is the default and wins whenever several keys exist, so a bare `OPENROUTER_API_KEY` in the environment is deliberately ignored. For an OpenRouter-only install:
 
 ```bash
 docker compose exec hermes /opt/data/bin/jev setup-key --provider openrouter
@@ -341,13 +374,13 @@ docker compose exec hermes /opt/data/bin/jev setup-key --provider openrouter
 JEV_PROVIDER=openrouter
 ```
 
-Verify with `jev doctor` — `key.provider` should name your provider, and `models list` should be non-empty. Note that `docker exec` inherits `HERMES_HOME=/opt/data`, i.e. the **default** profile, so scope it explicitly:
+Verify with `jev doctor` — `key.provider` should name your provider, and `models list` should be non-empty. `docker exec` inherits `HERMES_HOME=/opt/data`, i.e. the **default** profile, so scope it explicitly:
 
 ```bash
 docker exec -e HERMES_HOME=/opt/data/profiles/dev-erp <container> /opt/data/bin/jev doctor
 ```
 
-Pools ship in [`docker/defaults/jev/routing.json`](./docker/defaults/jev/routing.json), seeded on first boot and never overwritten afterwards. They are validated against the live catalog: price monotonic per specialty (simple ≤ medium ≤ hard), no "dead" pool whose lead matches its tier's `general` lead, and every member of a vision pool actually vision-capable. `jev doctor` re-checks all of this and reports `price_order` plus `dead_specialty_cells` — **re-run it after any pool edit**, because a stale pool inverts silently. The shipped default once led the `hard` tier with an `anthropic:` prefix absent from the OpenRouter catalog (those models are `openrouter:anthropic/claude-*`), so every hard pool fell through to a $0.11 model and routing *down* to medium cost 25× more than hard.
+Pools ship in [`docker/defaults/jev/routing.json`](./docker/defaults/jev/routing.json), seeded on first boot and never overwritten afterwards. They are validated against the live catalog: price monotonic per specialty (simple ≤ medium ≤ hard), no "dead" pool whose lead matches its tier's `general` lead, and every member of a vision pool actually vision-capable. `jev doctor` re-checks all of this and reports `price_order` plus `dead_specialty_cells` — re-run it after any pool edit, since a stale pool inverts silently.
 
 | Variable | Effect |
 |---|---|
@@ -362,20 +395,15 @@ Pools ship in [`docker/defaults/jev/routing.json`](./docker/defaults/jev/routing
 
 [`hermes-lcm`](https://github.com/stephenschoettler/hermes-lcm) is baked in at `/opt/hermes-lcm` (pin with `--build-arg LCM_REF=<sha>`) and enabled per profile by `018-hermes-lcm`, which links it into `<profile>/plugins/` and sets `context.engine: lcm`. It is enabled with `--no-allow-tool-override`, so it cannot replace built-in tools. `HERMES_LCM_ENABLE=0` skips it.
 
-LCM supersedes manual context tuning for long-running sessions — but `compression.threshold: 0.30` in `config.yaml` still matters as the backstop, and it only works if the auxiliary lane is alive (see **Cost controls** below).
+LCM supersedes manual context tuning for long-running sessions — but `compression.threshold: 0.30` in `config.yaml` still matters as the backstop, and it only works if the auxiliary lane is alive (see [Cost controls](#cost-controls)).
 
-`LCM_ENABLE_SLASH_COMMAND=1` (compose default) registers `/lcm` (`/lcm doctor`, `/lcm doctor repair apply`, `/lcm backup`); the plugin hides it otherwise. If `lcm.db` gets page-level corruption that `/lcm doctor repair apply` cannot fix (`database disk image is malformed` on every compaction), follow [adminops/lcm-db-recover.md](adminops/lcm-db-recover.md).
+`LCM_ENABLE_SLASH_COMMAND=1` (compose default) registers `/lcm` (`/lcm doctor`, `/lcm doctor repair apply`, `/lcm backup`); the plugin hides it otherwise.
 
 ### Skill lockdown
 
-A new profile would otherwise inherit the base image's entire bundled skill library (~47 skills) on top of the ~25 this distribution ships, all competing for the model's attention on every skill-selection pass. `0197-skills-lockdown` drives both levers Hermes exposes, because neither suffices alone:
+A new profile would otherwise inherit the base image's entire bundled skill library on top of the one this distribution ships, all competing for the model's attention on every skill-selection pass. `0197-skills-lockdown` drives both levers Hermes exposes, because neither suffices alone: the `.no-bundled-skills` marker stops *future* seeding but deletes nothing, and `skills.disabled` hides a skill but is a **denylist** — there is no allowlist key — so it must be recomputed from what is actually installed.
 
-- the `.no-bundled-skills` marker stops *future* seeding but deletes nothing;
-- `skills.disabled` hides a skill but is a **denylist** — there is no allowlist key — so it must be recomputed from what is actually installed.
-
-It runs every boot, which is what makes it survive `HERMES_PROFILE_AUTO_UPDATE=1` rewriting `config.yaml`. Skills that `017`/`018` link in from outside the profile stay enabled automatically.
-
-Pruning needs `016`'s `.distribution-skills` record: without it a bundled skill seeded into the tree is indistinguishable from one this distribution ships, and the bundled manifest baselines any distribution skill byte-identical to its bundled namesake — so the hook denylists but refuses to delete.
+It runs every boot, which is what makes it survive `HERMES_PROFILE_AUTO_UPDATE=1` rewriting `config.yaml`. Skills that `017`/`018` link in from outside the profile stay enabled automatically. Pruning needs `016`'s `.distribution-skills` record: without it a bundled skill seeded into the tree is indistinguishable from one this distribution ships, and the bundled manifest baselines any distribution skill byte-identical to its bundled namesake — so the hook denylists but refuses to delete.
 
 | Variable | Effect |
 |---|---|
@@ -388,7 +416,7 @@ Check the result with `docker exec <container> <profile-alias> skills list`.
 
 ### Dashboard
 
-The dashboard binds `0.0.0.0` inside the container, and a non-loopback bind **always** requires a registered auth provider — without one the service exits, s6 restarts it, and the same refusal repeats forever. Set a username and either a password or a hash:
+The dashboard binds `0.0.0.0` inside the container, and a non-loopback bind **always** requires a registered auth provider — without one the service exits, s6 restarts it, and the same refusal repeats forever (see [Common issues](#common-issues)). Set a username and either a password or a hash:
 
 ```
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
@@ -402,7 +430,7 @@ docker compose exec hermes /opt/hermes/.venv/bin/python -c \
   "from plugins.dashboard_auth.basic import hash_password; print(hash_password('your-password'))"
 ```
 
-The env vars are the reliable surface: they outrank `config.yaml` and are read whichever profile is active. `config.yaml` is **not** equivalent — the dashboard service runs against `/opt/data` (the default profile), so credentials in this profile's `config.yaml` are invisible to it. `0196-dashboard-auth` mirrors them across for you and persists a signing secret so logins survive a dashboard restart. When the gate would engage with no provider, it disables the dashboard for that boot and prints the fix once instead of crash-looping (`HERMES_DASHBOARD_AUTOGUARD=0` to opt out). The gateway is unaffected either way.
+The env vars are the reliable surface: they outrank `config.yaml` and are read whichever profile is active. `config.yaml` is **not** equivalent — the dashboard service runs against `/opt/data` (the default profile), so credentials in this profile's `config.yaml` are invisible to it. `0196-dashboard-auth` mirrors them across for you and persists a signing secret so logins survive a dashboard restart.
 
 There is no unauthenticated public-dashboard option. For local-only use set `HERMES_DASHBOARD_HOST=127.0.0.1` and reach it over an SSH tunnel; a non-loopback `HERMES_DASHBOARD_PUBLIC_URL` engages the gate even on a loopback bind.
 
@@ -415,32 +443,19 @@ There is no unauthenticated public-dashboard option. For local-only use set `HER
 | `HERMES_DASHBOARD_OAUTH_CLIENT_ID` | OAuth instead of a password (`hermes dashboard register`). |
 | `HERMES_DASHBOARD_PUBLIC_URL` | External URL behind a reverse proxy. |
 | `HERMES_DASHBOARD_MIRROR` | `0` stops `0196` copying `dashboard.basic_auth` from this profile into `/opt/data/config.yaml`. |
-
-### Private source, auto-update, promotion
-
-| Variable | Effect |
-|---|---|
-| `HERMES_PROFILE_SOURCE` | Git URL to install from. Empty **string** skips the install entirely. |
-| `HERMES_PROFILE_LOCAL_PATH` | In-container path of a mounted clone (must hold `distribution.yaml` at its root); takes precedence over the URL. |
-| `HERMES_PROFILE_BRANCH` | Branch of the git source; empty = default branch; ignored with `HERMES_PROFILE_LOCAL_PATH`. Hermes cannot clone a branch, so `016` shallow-clones it into `$HERMES_HOME/.profile-src/<name>` and installs from there. If the branch cannot be fetched, nothing is installed or updated. |
-| `HERMES_PROFILE_GIT_TOKEN` / `_TOKEN_FILE` | HTTPS auth, sent as an `Authorization` header for the source's host only — never written to disk or into the URL. |
-| `HERMES_PROFILE_SSH_KEY_FILE` | For `git@host:org/repo` sources. |
-| `HERMES_PROFILE_AUTO_UPDATE` | `1` runs `hermes profile update` every boot. User data is preserved; distribution-owned files are overwritten. Before the update, `016` sets the profile's recorded source to the configured one (`_SOURCE`, `_LOCAL_PATH` or `_BRANCH`), so a changed source takes effect. |
-| `GATEWAY_PROMOTE_ENABLE` / `_PROFILE` | First boot only: which profile `02-reconcile-profiles` starts. `0` leaves `default` running. |
+| `HERMES_DASHBOARD_AUTOGUARD` | `0` opts out of the autoguard that disables the dashboard for a boot (and prints the fix once) instead of crash-looping when the gate would engage with no provider. The gateway is unaffected either way. |
 
 ### Cost controls
 
-Worth knowing before tuning, because two of these failed silently in earlier builds:
-
 - **`auxiliary.*`** — every background task (compression, curator, `background_review`, classifiers, the aux vision lane) is pinned to a `:free` OpenRouter model, with `auxiliary.free_only: true` kept as the guard. That guard is load-bearing in an unobvious way: each block defaults to inheriting the *main* model, so `free_only` rejects the whole lane rather than just a fallback. Leaving a block unpinned means it fails loudly in the log instead of quietly billing main-model rates.
-- **`compression.threshold: 0.30`** — lowered from 0.50 so compaction fires before a turn's tool history balloons. Dead config unless the auxiliary lane above actually resolves.
+- **`compression.threshold: 0.30`** — fires compaction well before a turn's tool history balloons. Dead config unless the auxiliary lane above actually resolves.
 - **`platform_toolsets`** — trimmed from the stock set; every enabled toolset's schema is sent on every API call. `browser`/`computer_use`/`image_gen`/`tts` dropped, `vision` kept for doc extraction.
-- **`_config_version`** must track the base image's schema default. When it lags, `migrate_config()` rewrites `config.yaml` through a PyYAML dump and strips every comment from it — and since the file is distribution-owned, that recurs after each update. Re-verify each migration step's precondition before bumping.
+- **`_config_version`** must track the base image's schema default — see [Common issues](#common-issues) for what happens when it lags.
 
 ## Safety & governance
 
 - **Skill write approval:** `skills.write_approval: true` in `config.yaml` stages every agent-initiated skill write (create/edit/patch/delete) under `~/.hermes/pending/skills/` for approve/deny review via `/skills pending`, `/skills diff`, `/skills approve`, `/skills reject` — nothing lands unreviewed. See [Security | Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/security).
-- **Skill source separation:** `qkeee-erp-associate` (this repo, shipped/pinned) mounts via `skills.external_dirs` (read-only) and should be marked externally-owned so Hermes' autonomous background-review pass can't silently patch its audit/RBAC/GRC logic. The satellite `qkeee-erp-learned/<env-tag>` skills it writes via `skill_manage` (per-instance environment notes — versions, custom doctypes, non-ERPNext API notes) live in the profile's normal local/learned skill space and stay open to that same background review, since letting the agent refine its own instance notes is the point. See `qkeee-erp-associate/references/00-conventions.md` and [Skills System | Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills).
+- **Skill source separation:** `qkeee-erp-associate` (this repo, shipped/pinned) mounts via `skills.external_dirs` (read-only) and is marked externally-owned so Hermes' autonomous background-review pass can't silently patch its audit/RBAC/GRC logic. The satellite `qkeee-erp-learned/<env-tag>` skills it writes via `skill_manage` (per-instance environment notes — versions, custom doctypes, non-ERPNext API notes) live in the profile's normal local/learned skill space and stay open to that same background review, since letting the agent refine its own instance notes is the point. See `qkeee-erp-associate/references/00-conventions.md` and [Skills System | Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills).
 - **Save-draft-then-review-then-submit, always:** every docstatus-bearing document requires a review-before-submit step with explicit human confirmation, defined in `profile.md` — and code-enforced for submit/cancel via a fresh confirmation token, not prompt discipline alone (see `references/00-conventions.md`'s Non-negotiable 5).
 - **No auth fallbacks:** token auth (`QKEEE_ERP_*` env vars) only — no session-cookie/password workarounds that drop audit attribution.
 - **ERPNext access is the plugin's:** the agent reaches ERPNext only through the `qkeee-erp` plugin's `erp_*` tools, which run in the gateway and take the requester from the gateway session. Calling rules ship with the plugin as `qkeee-erp:usage`; the Operator CLI runs the same handlers. See `plugins/qkeee-erp/__init__.py`.
@@ -449,7 +464,6 @@ Worth knowing before tuning, because two of these failed silently in earlier bui
 
 ## Open items
 
-There are many openitems, lacunas to be worked upon, below is just a short list from top of our mind -
 - **`requested_by` identity:** bound to the gateway session's sender for the agent (no config/env-var default, by design — see `01-connectivity.md`); an Operator CLI run names it with `--requested-by`, which the Requester Gate checks but cannot prove is the person at the keyboard.
 - **ERPNext/Frappe MCP tooling:** pending a comprehensive MCP adapter for Frappe/ERPNext — REST connector (the `qkeee-erp` plugin) is the interim approach.
 - **Other ERPs:** extend beyond ERPNext with connector/client handlers for other popular ERPs.
@@ -457,6 +471,8 @@ There are many openitems, lacunas to be worked upon, below is just a short list 
 - **Dynamic LLM selection:** delivered under Docker by jev (see [Model routing](#model-routing-jev)) — per-turn tier and specialty classification instead of one fixed `model.default`. Remaining gaps: it is Docker-only (a host CLI install still runs a single model), `escalation` is off so a misjudged "simple" turn cannot climb, and the pools need re-validating against the catalog whenever models are added or retired.
 - **Test coverage:** comprehensive testing across skills and connector.
 - **Skill/prompt tightening:** make skill instructions and prompts more crisp and robust.
+- **`UNSCOPED_DENY` scope:** manufacturing doctypes are currently excluded from `operations.py`'s unscoped-write denylist for dev testing — revisit/restore before pointing this profile at anything but a dev/demo instance.
+- **Kanban board auto-decomposer:** still splits a multi-step card on its own rather than honoring the planner's atomic decomposition (`agents` repo `.scratch/qkeee-erp-kanban-execution-steering/issues/01-*`) — see [Kanban-dispatched ERPNext work](#kanban-dispatched-erpnext-work).
 
 ## Reference
 
