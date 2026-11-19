@@ -13,10 +13,13 @@ confirmation token -> RBAC -> audit -> send.
 
 # Import every domain module for its side effect: registering its allowlist
 # and its operations. doc_extraction has no write path.
-# notify is not a business domain (no generic op): its one operation logs
-# the task summary email.
+# notify and attachments are not business domains (no generic op, no
+# ALLOWED_WRITE_DOCTYPES of their own): notify's one operation logs the task
+# summary email; attachments' one operation attaches a file to a record in
+# any domain, gated on that record's own doctype instead.
 from .domains import (  # noqa: F401
     accounts,
+    attachments,
     fixed_assets,
     hr_payroll,
     inventory,

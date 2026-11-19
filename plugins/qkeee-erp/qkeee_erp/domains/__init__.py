@@ -11,4 +11,9 @@ write function of its own.
 
 `doc_extraction.py` is absent — that domain has no connector at all, no
 doctypes to write.
+
+`notify.py` and `attachments.py` are not in the fixed enum above: neither
+is a business domain. Each registers one bespoke RPC operation gated on
+the doctype it actually touches (a record's own doctype, or Communication
+for an email log) rather than a domain-owned ALLOWED_WRITE_DOCTYPES list.
 """

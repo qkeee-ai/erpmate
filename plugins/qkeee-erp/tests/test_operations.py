@@ -79,6 +79,7 @@ TAMPER = {
     "system_admin.permission_remove": "reason", "system_admin.permission_reset": "reason",
     "notify.summary_email": "title", "notify.share_records": "title",
     "notify.job_approval_request": "job_id", "notify.job_status_update": "job_id",
+    "files.attach": "filename",
 }
 NO_EXAMPLE = {"mis.generic"}  # refuses every write — see OwnershipAndUnscopedTests
 

@@ -216,6 +216,15 @@ erp_execute_write(phase="render", op="notify.share_records",
                         "recipients": ["nikhil.sharma@qkeee.in", "sanjay.jain@qkeee.in"],
                         "note": "All Items on demo_erp."})
 
+# Attaching a file to an existing record (agents issue 06: there is no
+# per-domain write for this — `files.attach` is the one operation for it,
+# whatever doctype the target record is). filedata is base64-encoded file
+# content; read it as the requester's own saved File rows
+# (attached_to_doctype/attached_to_name via erp_query) to confirm it landed.
+erp_execute_write(phase="render", op="files.attach",
+                  args={"doctype": "Purchase Invoice", "docname": "ACC-PINV-2026-00001",
+                        "filename": "invoice-source.pdf", "filedata": "<base64 content>"})
+
 # Starting a kanban job (agents ADR 0008, issue 07): `batches` (plural —
 # a list of batches, each a list of {op, args}), not `batch`. One shot,
 # no execute step of its own: the plan is stored (job_approval.create)
