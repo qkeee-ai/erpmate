@@ -684,7 +684,13 @@ def _verify_own_write_read(send_cfg: dict, audit_cfg: dict, req: PreparedRequest
     this is meant to be SHOWN to the agent, so it gets its own distinct, labelled Audit Log Read row
     — never `internal=True`, which would make it indistinguishable from the gate's own plumbing
     checks. A failed read (or a failed audit insert) never fails the write: returns None, and the
-    audit insert is itself best-effort."""
+    audit insert is itself best-effort.
+
+    This function does NOT scope itself to create/update — it trusts `req`/`created_name`
+    completely and skips the requester gate unconditionally. Its one caller, `_attach_verified_write`,
+    is what makes this safe (real `req`/`created` from the write that just executed, action-gated to
+    create/update). A new caller — e.g. wiring this into submit/cancel/delete — must bring its own
+    equivalent guard; this function will not stop you."""
     name = created_name or req.name or req.audit_reference
     if not name:
         return None
