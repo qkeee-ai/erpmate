@@ -1087,5 +1087,121 @@ class CreateNameTests(unittest.TestCase):
         self.assertEqual((req.name, req.body), ("General", {"a": 1}))
 
 
+# ---------------------------------------------------------------------------
+# Bot self-verification read-back (issue 09, D4): a write's own `post` hook
+# may read back exactly the record it just touched with the bot's own
+# credential — narrowly scoped, never a general requester-RBAC bypass.
+# ---------------------------------------------------------------------------
+
+class WriteVerificationTests(unittest.TestCase):
+
+    def test_verify_own_write_read_logs_a_distinct_audit_row(self):
+        req = operations.PreparedRequest(transport="resource", doctype="Payment Entry",
+                                         action="create", name="PAY-1")
+        ctx = testsupport.ctx()
+        with patch.object(core_client, "_request",
+                          return_value={"data": {"name": "PAY-1", "docstatus": 0}}) as mock_request, \
+             patch.object(core_client, "_log_read") as mock_log_read:
+            data = operations._verify_own_write_read(CFG, CFG, req, ctx, None)
+        self.assertEqual(data, {"name": "PAY-1", "docstatus": 0})
+        self.assertIn("/api/resource/Payment%20Entry/PAY-1", mock_request.call_args.args[2])
+        mock_log_read.assert_called_once()
+        _, kwargs = mock_log_read.call_args
+        self.assertEqual(kwargs["prompt_summary"], "[bot self-verification of its own write]")
+
+    def test_verify_own_write_read_never_raises_on_a_failed_read(self):
+        req = operations.PreparedRequest(transport="resource", doctype="Payment Entry",
+                                         action="create", name="PAY-1")
+        with patch.object(core_client, "_request", side_effect=core_client.ConnectorError("boom")):
+            self.assertIsNone(operations._verify_own_write_read(CFG, CFG, req, testsupport.ctx(), None))
+
+    def test_verify_own_write_read_never_raises_on_a_failed_audit_insert(self):
+        req = operations.PreparedRequest(transport="resource", doctype="Payment Entry",
+                                         action="create", name="PAY-1")
+        with patch.object(core_client, "_request", return_value={"data": {"name": "PAY-1"}}), \
+             patch.object(core_client, "_log_read", side_effect=RuntimeError("audit down")):
+            data = operations._verify_own_write_read(CFG, CFG, req, testsupport.ctx(), None)
+        self.assertEqual(data, {"name": "PAY-1"})
+
+    def test_verify_own_write_read_targets_only_this_write_no_caller_choice(self):
+        """No argument names a doctype/record: created_name, then req.name, then
+        req.audit_reference — never anything the caller could substitute."""
+        req = operations.PreparedRequest(transport="rpc", doctype="Payment Entry", action="attach",
+                                         rpc_path="/x", audit_action="Create", audit_reference="PAY-2")
+        with patch.object(core_client, "_request",
+                          return_value={"data": {"name": "PAY-2"}}) as mock_request, \
+             patch.object(core_client, "_log_read"):
+            operations._verify_own_write_read(CFG, CFG, req, testsupport.ctx(), None)
+        self.assertIn("PAY-2", mock_request.call_args.args[2])
+
+    def test_verify_own_write_read_with_nothing_to_name_the_record_returns_none(self):
+        req = operations.PreparedRequest(transport="rpc", doctype="Payment Entry", action="attach",
+                                         rpc_path="/x", audit_action="Create")
+        with patch.object(core_client, "_request") as mock_request:
+            self.assertIsNone(operations._verify_own_write_read(CFG, CFG, req, testsupport.ctx(), None))
+        mock_request.assert_not_called()
+
+    def test_post_hooks_verify_write_derives_name_from_created_over_req_name(self):
+        op = operations.get_operation("accounts.generic")
+        req = operations.PreparedRequest(transport="resource", doctype="Payment Entry",
+                                         action="create", name=None)
+        hooks = operations.PostHooks(op, req, testsupport.ctx(), "PAY-3")
+        with patch.object(core_client, "get_env_config", return_value=CFG), \
+             patch.object(core_client, "_request",
+                          return_value={"data": {"name": "PAY-3"}}) as mock_request, \
+             patch.object(core_client, "_log_read"):
+            data = hooks.verify_write()
+        self.assertEqual(data, {"name": "PAY-3"})
+        self.assertIn("PAY-3", mock_request.call_args.args[2])
+
+    def test_accounts_generic_create_attaches_verified_record(self):
+        """auto_verify_write=True on accounts.generic (issue 09's actual domain): a create
+        attaches _verified_record from a SEPARATE bot-credentialed read, distinct from the
+        create's own _do_mutate response."""
+        with connector():
+            full_args, ctx, _ = testsupport.render(
+                "accounts.generic", {"doctype": "Payment Entry", "action": "create",
+                                     "payload": {"party": "Acme"}})
+        with connector() as m:
+            m["_request"].return_value = {"data": {"name": "NEW-1", "payment_entry_references": [
+                {"reference_doctype": "Sales Invoice", "reference_name": "SI-1"}]}}
+            result = operations.run_operation("accounts.generic", full_args, ctx)
+        self.assertEqual(result["_verified_record"]["payment_entry_references"],
+                         [{"reference_doctype": "Sales Invoice", "reference_name": "SI-1"}])
+        # The create itself went through the separately-mocked _do_mutate; this GET is the
+        # verification read-back (later calls are the Read audit row's own real insert+submit).
+        first_call = m["_request"].call_args_list[0]
+        self.assertEqual(first_call.args[1:3], ("GET", "/api/resource/Payment%20Entry/NEW-1"))
+
+    def test_accounts_generic_submit_does_not_attach_verified_record(self):
+        """Scoped to create/update: submit/cancel/delete already have _read_back_state's
+        docstatus check and don't need a second bot-credentialed read."""
+        with connector():
+            full_args, ctx, _ = testsupport.render(
+                "accounts.generic", {"doctype": "Journal Entry", "action": "submit", "name": "X"})
+        with connector() as m:
+            result = operations.run_operation("accounts.generic", full_args, ctx)
+        self.assertNotIn("_verified_record", result)
+
+    def test_other_domains_do_not_auto_verify_by_default(self):
+        with connector():
+            full_args, ctx, _ = testsupport.render(
+                "sales.generic", {"doctype": "Sales Order", "action": "create", "payload": {"a": 1}})
+        with connector() as m:
+            result = operations.run_operation("sales.generic", full_args, ctx)
+        self.assertNotIn("_verified_record", result)
+
+    def test_accounts_generic_create_still_succeeds_when_verification_read_fails(self):
+        with connector():
+            full_args, ctx, _ = testsupport.render(
+                "accounts.generic", {"doctype": "Payment Entry", "action": "create",
+                                     "payload": {"party": "Acme"}})
+        with connector() as m:
+            m["_request"].side_effect = core_client.ConnectorError("boom")
+            result = operations.run_operation("accounts.generic", full_args, ctx)
+        self.assertEqual(result["_audit_log_status"], "ok")
+        self.assertNotIn("_verified_record", result)
+
+
 if __name__ == "__main__":
     unittest.main()

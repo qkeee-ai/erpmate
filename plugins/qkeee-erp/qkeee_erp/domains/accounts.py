@@ -31,4 +31,15 @@ core_client.register_domain_allowlist(DOMAIN_NAME, ALLOWED_WRITE_DOCTYPES)
 # submit/cancel/delete need a rendered confirmation token + the user's
 # confirmation code, and `expected_modified` (the record must not have
 # changed since it was confirmed). See core/operations.py.
-operations.generic_operation(DOMAIN_NAME, example_args={"doctype": "Journal Entry", "action": "submit", "name": "ACC-JV-2026-00001"})
+#
+# auto_verify_write=True (issue 09, D4): a Payment Entry create/update
+# attaches a bot-verified read-back (result["_verified_record"]) — the
+# write's own parent record, including its child-table rows (e.g. Payment
+# Entry Reference), read with the bot's own credential. Payment Entry
+# Reference has its own doctype permissions distinct from its parent's;
+# the triggering incident was a separate, requester-gated read of that
+# child doctype failing even though the parent write — and this bundled
+# read-back of it — succeeded. Scoped to this domain only: the other
+# domains haven't shown this gap and get no extra read cost by default.
+operations.generic_operation(DOMAIN_NAME, auto_verify_write=True,
+                             example_args={"doctype": "Journal Entry", "action": "submit", "name": "ACC-JV-2026-00001"})

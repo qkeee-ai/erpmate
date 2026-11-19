@@ -611,6 +611,19 @@ class PostHooks:
     def run(self, op_key: str, args: dict) -> dict:
         return run_operation(op_key, args, self._ctx.without_confirmation())
 
+    def verify_write(self) -> Optional[dict]:
+        """Read back, with the bot's own credential, exactly the record this operation just
+        wrote — no arguments, because there is nothing to parameterize: the target is always
+        `self._req`/`self._created`, never a caller-supplied doctype/name. Issue 09 (agents
+        qkeee-erp-email-channel-reliability, D4): closes the case where the requester's own RBAC
+        blocks reading back a write to a doctype only the bot can read, without opening a general
+        "bot can read anything" path. None on any failure — never raises, never fails the write
+        this ran after."""
+        audit_cfg = _c.get_env_config(self._ctx.tag)
+        send_cfg = (audit_cfg if self._op.credential == "bot"
+                   else _c.get_env_config(self._ctx.tag, credential=self._op.credential))
+        return _verify_own_write_read(send_cfg, audit_cfg, self._req, self._ctx, self._created)
+
     def compensate_create(self, reason: str) -> dict:
         """Delete the record THIS operation just created — nothing else.
         RBAC (delete permission) and audit still apply; no token, since
@@ -659,6 +672,37 @@ def _read_back_state(cfg: dict, req: PreparedRequest) -> Optional[dict]:
     if not isinstance(data, dict) or "docstatus" not in data:
         return None
     return {k: data[k] for k in _READ_BACK_FIELDS if k in data}
+
+
+def _verify_own_write_read(send_cfg: dict, audit_cfg: dict, req: PreparedRequest, ctx: WriteContext,
+                           created_name: Optional[str]) -> Optional[dict]:
+    """Bot-credentialed read-back of the record THIS write just touched — the narrow,
+    separately-scoped case issue 09 asks for (agents qkeee-erp-email-channel-reliability, D4): the
+    bot verifies its own write with its own read, never a general permission bypass. Structurally
+    cannot read anything but what `req`/`created_name` name — there is no doctype/name argument a
+    caller could substitute. Unlike `_read_back_state` (silent internal plumbing, docstatus-only),
+    this is meant to be SHOWN to the agent, so it gets its own distinct, labelled Audit Log Read row
+    — never `internal=True`, which would make it indistinguishable from the gate's own plumbing
+    checks. A failed read (or a failed audit insert) never fails the write: returns None, and the
+    audit insert is itself best-effort."""
+    name = created_name or req.name or req.audit_reference
+    if not name:
+        return None
+    path = f"/api/resource/{urllib.parse.quote(req.doctype)}/{urllib.parse.quote(name)}"
+    try:
+        data = (_c._request(send_cfg, "GET", path) or {}).get("data")
+    except Exception:  # noqa: BLE001 — verification must never fail the write
+        return None
+    if not isinstance(data, dict):
+        return None
+    data = _c._strip_noise(data)
+    try:
+        _c._log_read(audit_cfg, req.doctype, name, ctx.requested_by, ctx.session_id, ctx.domain_code,
+                     ctx.channel, ctx.channel_metadata, response_payload={"data": data},
+                     prompt_summary="[bot self-verification of its own write]")
+    except Exception:  # noqa: BLE001 — the audit trail is best-effort, never a gate on the result
+        pass
+    return data
 
 
 def _send(op: Operation, req: PreparedRequest, ctx: WriteContext, *, user_approved: bool,
@@ -1942,10 +1986,31 @@ def check_not_modified_since_render(req: PreparedRequest, args: dict, ctx: Write
         )
 
 
+def _attach_verified_write(result, req, args, ctx, hooks):
+    """Default `post` behavior under `auto_verify_write=True`: a create/update attaches a
+    bot-verified read-back of the record it just wrote (issue 09, D4) — never fails the write."""
+    if isinstance(result, dict) and req.action in ("create", "update"):
+        verified = hooks.verify_write()
+        if verified is not None:
+            result["_verified_record"] = verified
+    return result
+
+
+def _compose_post(user_post, auto_verify_write):
+    if not auto_verify_write:
+        return user_post
+    if user_post is None:
+        return _attach_verified_write
+
+    def combined(result, req, args, ctx, hooks):
+        return _attach_verified_write(user_post(result, req, args, ctx, hooks), req, args, ctx, hooks)
+    return combined
+
+
 def generic_operation(domain: Optional[str], *, token_actions=FINALIZING_ACTIONS, refuse=(),
                       preconditions=(), post=None, prepare=None, enrich=None,
                       extra_args_help=None, summary=None, credential: str = "bot",
-                      example_args: dict = None) -> Operation:
+                      example_args: dict = None, auto_verify_write: bool = False) -> Operation:
     key = f"{domain}.generic" if domain else "unscoped.generic"
     return register_operation(Operation(
         key=key, domain=domain,
@@ -1957,7 +2022,8 @@ def generic_operation(domain: Optional[str], *, token_actions=FINALIZING_ACTIONS
         allowlist_domain=domain if domain else None,
         generic=True, refuse=tuple(refuse),
         preconditions=(check_not_modified_since_render,) + tuple(preconditions),
-        render_defaults=render_expected_modified, post=post, enrich=enrich or enrich_generic,
+        render_defaults=render_expected_modified, post=_compose_post(post, auto_verify_write),
+        enrich=enrich or enrich_generic,
         args_help=dict(GENERIC_ARGS_HELP, **(extra_args_help or {})),
         example_args=dict(example_args or {}),
     ))
