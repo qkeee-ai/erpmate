@@ -25,9 +25,18 @@ Uses `frappe.client.attach_file` (plain JSON RPC, base64 `filedata`), not
 the REST multipart `/api/method/upload_file` endpoint: `core/client.py`'s
 `_request` only ever sends `application/json` bodies, and adding multipart
 support for this one op would be a materially bigger change than the ticket
-asked for. Verify `frappe.client.attach_file` is still whitelisted on the
-target ERPNext version before relying on this live (noted as an open live
-check, same as every other write op here).
+asked for. Body keys match `frappe.client.attach_file`'s real signature,
+read from frappe/frappe `develop` branch `client.py` (MIT licensed) 2026-11-19:
+``attach_file(filename, filedata, doctype, docname, folder, decode_base64,
+is_private, docfield)`` — NOT the internal File-doc field names (`file_name`,
+`attached_to_doctype`, `content`, `decode`, ...) that function builds
+internally; sending those instead of the RPC's own parameter names would
+silently fail at the wrong layer. The function itself checks "write" on
+`doctype`/`docname` before attaching (`frappe.get_lazy_doc(..., check_permission="write")`),
+confirming `rbac_ptype="write"` below. Verify this RPC is still whitelisted
+on the target ERPNext version before relying on this live (noted as an open
+live check, same as every other write op here) — the parameter names
+themselves are confirmed against upstream source, not guessed.
 """
 
 from ..core import operations
@@ -51,8 +60,8 @@ def _attach_prepare(args, ctx):
         raise core_client.ConnectorError(
             f"filedata: at most {_MAX_FILEDATA_CHARS} base64 characters (~11 MB raw); this file is "
             f"too large to attach through this operation.")
-    body = {"dt": args["doctype"], "dn": args["docname"], "fname": args["filename"],
-            "fcontent": args["filedata"], "decode_base64": 1,
+    body = {"filename": args["filename"], "filedata": args["filedata"], "doctype": args["doctype"],
+            "docname": args["docname"], "decode_base64": 1,
             "is_private": int(bool(args.get("is_private", 1)))}
     if args.get("folder"):
         body["folder"] = args["folder"]
