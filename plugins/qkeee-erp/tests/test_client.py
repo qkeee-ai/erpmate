@@ -2160,5 +2160,66 @@ class GetUserRolesAuditLoggingTests(unittest.TestCase):
                                              credential="admin")
 
 
+class RequestRegistryFacadeTests(unittest.TestCase):
+    """client.request_open/lookup/link/status (agents issue 02): the one
+    encapsulation boundary over core/request_registry.py, mirroring how
+    resolve_requested_by() wraps kanban_origin — never called directly
+    from erp_tools.py."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = patch.dict("os.environ", {"HERMES_HOME": tmp.name})
+        home.start()
+        self.addCleanup(home.stop)
+
+    LINK_A = {"platform": "email", "chat_id": "nikhil@org.com", "thread_id": None, "session_id": "s1"}
+    LINK_B = {"platform": "google_chat", "chat_id": "spaces/A", "thread_id": "threads/T",
+             "session_id": "s2"}
+
+    def test_sender_email_is_lowercased_on_open(self):
+        row = ec.request_open("Nikhil@Org.com", "topic", self.LINK_A)
+        self.assertEqual(row["sender_email"], "nikhil@org.com")
+
+    def test_lookup_matches_regardless_of_the_callers_casing(self):
+        ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        self.assertEqual(len(ec.request_lookup("NIKHIL@ORG.COM")), 1)
+
+    def test_request_id_is_a_full_uuid4_not_truncated(self):
+        import uuid
+        row = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        self.assertTrue(uuid.UUID(row["request_id"].removeprefix("REQ-")))
+
+    def test_link_matches_a_differently_cased_owner_email(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        linked = ec.request_link(opened["request_id"], "Nikhil@Org.com", self.LINK_B)
+        self.assertEqual(len(linked["linked_sessions"]), 2)
+
+    def test_link_to_another_owners_request_is_a_gate_refusal(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        with self.assertRaises(ec.RequestOwnershipError):
+            ec.request_link(opened["request_id"], "priya@org.com", self.LINK_B)
+
+    def test_link_to_an_unknown_request_is_invalid_arguments(self):
+        with self.assertRaises(ec.InvalidArgumentsError):
+            ec.request_link("REQ-NOPE", "nikhil@org.com", self.LINK_B)
+
+    def test_status_sets_agent_status_for_the_owner(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        updated = ec.request_status(opened["request_id"], "nikhil@org.com", agent_status="done")
+        self.assertEqual(updated["agent_status"], "done")
+
+    def test_status_on_another_owners_request_is_a_gate_refusal(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        with self.assertRaises(ec.RequestOwnershipError):
+            ec.request_status(opened["request_id"], "priya@org.com", agent_status="done")
+
+    def test_status_with_an_invalid_agent_status_is_invalid_arguments(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        with self.assertRaises(ec.InvalidArgumentsError):
+            ec.request_status(opened["request_id"], "nikhil@org.com", agent_status="finished")
+
+
 if __name__ == "__main__":
     unittest.main()

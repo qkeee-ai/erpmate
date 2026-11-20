@@ -5,7 +5,7 @@ requester origin, and a guard against identity override
 - qkeee_erp/: the ERP library (connector, write pipeline, domains,
   discovery, provisioning). Runs only in the gateway process.
 - erp_tools.py: erp_query, erp_get, erp_report, erp_discover,
-  erp_execute_write.
+  erp_execute_write, erp_request.
 - kanban_hooks.py: kanban_create from a chat turn starts in triage; every
   created task records its requester origin (qkeee_erp/core/kanban_origin.py).
 - identity_guard.py: blocks terminal / execute_code calls that override

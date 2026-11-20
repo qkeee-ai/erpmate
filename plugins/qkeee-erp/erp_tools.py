@@ -14,10 +14,15 @@ core/operations.py, discover.py).
 - The ERPNext credentials are read by client.py in this process, from
   `<HERMES_HOME>/plugin-data/qkeee-erp/qkeee-erp.env`.
 
-Five tools: erp_query, erp_get, erp_report, erp_discover (health, whoami,
-roles and live metadata) and erp_execute_write (list_ops, render,
-execute). Writes are only in erp_execute_write, so a platform toolset or a
-hook can target them by name.
+Six tools: erp_query, erp_get, erp_report, erp_discover (health, whoami,
+roles and live metadata), erp_execute_write (list_ops, render, execute) and
+erp_request. Writes are only in erp_execute_write, so a platform toolset or
+a hook can target them by name.
+
+erp_request tracks a cross-channel Request Registry (agents issue 02): it
+is gateway-side bookkeeping, not an ERPNext read or write, so it is exempt
+from `mode` and does not take `tag` — but it still binds only to the
+gateway session's sender email, same as every other tool here.
 """
 
 import json
@@ -177,6 +182,42 @@ SCHEMAS = {
                                         "the fields the payload set, and child tables as row "
                                         "counts."}},
         required=("phase",)),
+    "erp_request": {
+        "name": "erp_request",
+        "description": (
+            "Cross-channel Request Registry (agents issue 02): track one of this Requester's "
+            "distinct asks across channels, by their session email. open: start tracking a new "
+            "ask; say both the returned topic and request_id to the user at least once, so they "
+            "can recognise it if they continue from another channel. lookup: this Requester's "
+            "other open asks (any channel) — a plain list, NOT auto-matched to the current turn; "
+            "ask the Requester which one (if any) this continues, or that it's new, before "
+            "calling link or open. link: attach the CURRENT session to an existing request_id, "
+            "only after the Requester confirmed it. status: set agent_status (your own belief) "
+            "and/or requester_confirmed (only after the Requester actually answered your own "
+            "confirm-check — never set it on their behalf). " + _NO_REQUESTER_NOTE),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["open", "lookup", "link", "status"]},
+                "topic": {"type": "string", "description": "open: short human label for the ask, "
+                                                            "e.g. 'GST report — Oct 2026'."},
+                "anchor_doctype": {"type": "string", "description": "open: the ERPNext DocType "
+                                                                     "this ask is about, when one "
+                                                                     "exists (omit for a read-only "
+                                                                     "ask like an MIS/GST report)."},
+                "anchor_name": {"type": "string", "description": "open: that record's name, when "
+                                                                  "anchor_doctype is given."},
+                "request_id": {"type": "string", "description": "link, status: the request to act "
+                                                                 "on."},
+                "agent_status": {"type": "string", "enum": ["open", "in_progress", "done"],
+                                 "description": "status: your own belief about this request."},
+                "requester_confirmed": {"type": "string", "enum": ["confirmed", "disputed"],
+                                        "description": "status: set only after the Requester "
+                                                       "answered your confirm-check."},
+            },
+            "required": ["action"], "additionalProperties": False,
+        },
+    },
 }
 
 # An erp_query result above this many bytes carries a note (HRMS demo run
@@ -240,6 +281,7 @@ class ErpTools:
         self._handlers = {
             "erp_query": self._query, "erp_get": self._get, "erp_report": self._report,
             "erp_discover": self._discover, "erp_execute_write": self._execute_write,
+            "erp_request": self._request,
         }
 
     def handler(self, name):
@@ -306,6 +348,17 @@ class ErpTools:
                     channel=env("HERMES_SESSION_PLATFORM") or ("kanban" if meta["kanban_task"] else None),
                     channel_metadata={k: v for k, v in meta.items() if v} or None,
                     prompt_summary=args.get("prompt_summary"), latest_prompt=args.get("latest_prompt"))
+
+    def _session_link(self, args) -> dict:
+        """This turn's (platform, chat_id, thread_id, session_id) — the
+        Request Registry's cross-channel link, derived from the same
+        `_audit(args)` every other handler already builds. Never a tool
+        argument: the same reason the requester isn't one (a forged link
+        would mislink another Requester's request)."""
+        audit = self._audit(args)
+        meta = audit.get("channel_metadata") or {}
+        return {"platform": audit.get("channel"), "chat_id": meta.get("chat_id"),
+                "thread_id": meta.get("thread_id"), "session_id": audit.get("session_id")}
 
     @staticmethod
     def _need(args, *keys):
@@ -532,3 +585,41 @@ class ErpTools:
                             f"succeeded but is NOT reliably in the audit trail. Tell the user; do not "
                             f"report a plain success.")
         return _ok(result, warnings=warnings) if warnings else _ok(result)
+
+    # -- cross-channel request tracking (agents issue 02) --------------------
+    #
+    # Thin here on purpose: every CRUD call goes through client.py
+    # (request_open/lookup/link/status), the same encapsulation boundary
+    # every other core/ store (e.g. kanban_origin) is reached through —
+    # this class only translates tool args and shapes the result.
+
+    def _request(self, args):
+        action = args.get("action")
+        requester = self._requester()
+        if action == "open":
+            self._need(args, "topic")
+            row = client.request_open(requester, args["topic"], self._session_link(args),
+                                      anchor_doctype=args.get("anchor_doctype"),
+                                      anchor_name=args.get("anchor_name"))
+            row["_note"] = ("Say both `topic` and `request_id` to the user at least once, so they "
+                            "can recognise this request if they continue it from another channel.")
+            return _ok(row)
+        if action == "lookup":
+            rows = client.request_lookup(requester)
+            out = {"requests": rows}
+            if rows:
+                out["_note"] = ("Not auto-linked to this turn. Ask the Requester which one (if "
+                                "any) this continues, or that it's new, before calling link or "
+                                "open.")
+            return _ok(out)
+        if action == "link":
+            self._need(args, "request_id")
+            return _ok(client.request_link(args["request_id"], requester, self._session_link(args)))
+        if action == "status":
+            self._need(args, "request_id")
+            if not args.get("agent_status") and not args.get("requester_confirmed"):
+                raise client.ConnectorError("status needs agent_status and/or requester_confirmed.")
+            return _ok(client.request_status(args["request_id"], requester,
+                                             agent_status=args.get("agent_status"),
+                                             requester_confirmed=args.get("requester_confirmed")))
+        raise client.ConnectorError(f"unknown erp_request action {action!r}")

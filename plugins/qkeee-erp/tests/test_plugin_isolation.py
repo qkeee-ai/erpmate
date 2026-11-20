@@ -341,7 +341,7 @@ class RegisterTests(IsolationTestCase):
     def test_tools_when_isolated(self):
         self.ready()
         setup.run(self.env())
-        self.assertEqual(len(self.register().tools), 5)
+        self.assertEqual(len(self.register().tools), 6)
 
     def test_no_tools_after_a_terminal_change(self):
         self.ready()

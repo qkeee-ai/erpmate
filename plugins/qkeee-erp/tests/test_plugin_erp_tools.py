@@ -4,6 +4,7 @@ never from a tool argument; mode comes from the plugin settings."""
 
 import json
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,8 @@ from qkeee_erp_plugin.qkeee_erp.core import client, operations
 SENDER = {"HERMES_SESSION_PLATFORM": "google_chat", "HERMES_SESSION_USER_ID": "nikhil@org.com",
           "HERMES_SESSION_ID": "sess-1", "HERMES_SESSION_CHAT_ID": "spaces/A",
           "HERMES_SESSION_THREAD_ID": "threads/T"}
+PRIYA = {"HERMES_SESSION_PLATFORM": "email", "HERMES_SESSION_USER_ID": "priya@org.com",
+         "HERMES_SESSION_ID": "sess-2", "HERMES_SESSION_CHAT_ID": "priya@org.com"}
 
 
 def reader(values):
@@ -42,9 +45,10 @@ class SchemaTests(unittest.TestCase):
                 self.assertFalse({"requested_by", "requester", "user_id"} & set(props))
                 self.assertNotIn("mode", props)
 
-    def test_the_five_tools(self):
+    def test_the_six_tools(self):
         self.assertEqual(set(erp_tools.SCHEMAS),
-                         {"erp_query", "erp_get", "erp_report", "erp_discover", "erp_execute_write"})
+                         {"erp_query", "erp_get", "erp_report", "erp_discover", "erp_execute_write",
+                          "erp_request"})
 
 
 class ReadToolTests(ToolTestCase):
@@ -365,6 +369,94 @@ class JobToolTests(ToolTestCase):
             out = self.call(self.tools(SENDER), "erp_execute_write",
                             {"phase": "confirm_job", "job_id": "JOB-1", "reply_text": "AB12CD"})
         self.assertTrue(out["ok"])
+
+
+class RequestToolTests(ToolTestCase):
+    """erp_request: the cross-channel Request Registry (agents issue 02)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = patch.dict(os.environ, {"HERMES_HOME": tmp.name})
+        home.start()
+        self.addCleanup(home.stop)
+
+    def test_open_binds_the_session_sender_and_returns_topic_and_id(self):
+        out = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "GST report"})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["result"]["sender_email"], "nikhil@org.com")
+        self.assertEqual(out["result"]["topic"], "GST report")
+        self.assertTrue(out["result"]["request_id"].startswith("REQ-"))
+
+    def test_open_needs_a_topic(self):
+        out = self.call(self.tools(SENDER), "erp_request", {"action": "open"})
+        self.assertFalse(out["ok"])
+
+    def test_open_with_no_session_sender_is_refused(self):
+        out = self.call(self.tools({"HERMES_SESSION_PLATFORM": "cli"}), "erp_request",
+                        {"action": "open", "topic": "x"})
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["refused"])
+
+    def test_lookup_lists_this_senders_open_requests(self):
+        tools = self.tools(SENDER)
+        self.call(tools, "erp_request", {"action": "open", "topic": "first"})
+        out = self.call(tools, "erp_request", {"action": "lookup"})
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["result"]["requests"]), 1)
+        self.assertIn("_note", out["result"])
+
+    def test_lookup_never_sees_another_senders_requests(self):
+        self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "nikhil's ask"})
+        out = self.call(self.tools(PRIYA), "erp_request", {"action": "lookup"})
+        self.assertEqual(out["result"]["requests"], [])
+        self.assertNotIn("_note", out["result"])
+
+    def test_link_attaches_a_second_channel_to_the_same_request(self):
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        request_id = opened["result"]["request_id"]
+        chat_session = dict(SENDER, HERMES_SESSION_PLATFORM="email",
+                            HERMES_SESSION_CHAT_ID="nikhil@org.com", HERMES_SESSION_THREAD_ID="",
+                            HERMES_SESSION_ID="sess-3")
+        out = self.call(self.tools(chat_session), "erp_request", {"action": "link", "request_id": request_id})
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["result"]["linked_sessions"]), 2)
+
+    def test_link_to_another_senders_request_is_refused(self):
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(self.tools(PRIYA), "erp_request",
+                        {"action": "link", "request_id": opened["result"]["request_id"]})
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["refused"])
+
+    def test_link_to_unknown_request_is_an_error_not_a_crash(self):
+        out = self.call(self.tools(SENDER), "erp_request", {"action": "link", "request_id": "REQ-NOPE"})
+        self.assertFalse(out["ok"])
+
+    def test_status_sets_agent_status(self):
+        tools = self.tools(SENDER)
+        opened = self.call(tools, "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(tools, "erp_request",
+                        {"action": "status", "request_id": opened["result"]["request_id"],
+                         "agent_status": "done"})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["result"]["agent_status"], "done")
+        self.assertIsNotNone(out["result"]["closed_at"])
+
+    def test_status_needs_at_least_one_field(self):
+        tools = self.tools(SENDER)
+        opened = self.call(tools, "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(tools, "erp_request",
+                        {"action": "status", "request_id": opened["result"]["request_id"]})
+        self.assertFalse(out["ok"])
+
+    def test_status_on_another_senders_request_is_refused(self):
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(self.tools(PRIYA), "erp_request",
+                        {"action": "status", "request_id": opened["result"]["request_id"],
+                         "agent_status": "done"})
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["refused"])
 
 
 if __name__ == "__main__":

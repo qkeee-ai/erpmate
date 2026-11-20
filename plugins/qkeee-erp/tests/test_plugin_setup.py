@@ -658,7 +658,7 @@ class RegisterContractTests(SetupTestCase):
         self.assertEqual(before.tools, [])
         setup.run(self.env(), apply_profile_fixes=True)
         after = self.register()
-        self.assertEqual(len(after.tools), 5)
+        self.assertEqual(len(after.tools), 6)
         for ctx in (before, after):
             self.assertEqual(sorted(h for h, _ in ctx.hooks),
                              ["post_tool_call", "pre_tool_call", "pre_tool_call"])

@@ -108,6 +108,7 @@ import http.client
 import json
 import os
 import re
+import sqlite3
 import sys
 import urllib.error
 import urllib.parse
@@ -116,7 +117,7 @@ from datetime import datetime, timezone
 
 from .confirm_token import (ENVIRONMENT_NON_PRODUCTION, ENVIRONMENT_PRODUCTION, TOKEN_TTL_SECONDS,
                             compute_token, confirmation_code, expires_at, is_fresh)
-from . import kanban_origin
+from . import kanban_origin, request_registry
 
 # Default attribution label for audit Comments when no domain-specific
 # label is supplied — see _do_mutate()'s `skill_label` param.
@@ -505,6 +506,13 @@ class PrivilegedBotAccountError(ConnectorError):
     be trusted") and gets one exception type, not two. Provision a
     genuinely narrow-role dedicated bot account instead (see init_bot.py
     / 00-conventions.md's bot-account requirement)."""
+
+
+class RequestOwnershipError(GateRefusal):
+    """Raised when a Request Registry `request_id` (agents issue 02) is
+    linked or updated by a session whose sender email does not own it —
+    same fail-closed stance as the RBAC gate: a guessed or leaked id must
+    not let one Requester read or mutate another's tracked request."""
 
 
 def _tag_env_var(tag: str, suffix: str) -> str:
@@ -1437,6 +1445,74 @@ def _hermes_home() -> str:
     """The installed home reader's value, else HERMES_HOME, else cwd."""
     home = _hermes_home_reader() if _hermes_home_reader is not None else None
     return home or os.environ.get("HERMES_HOME") or os.getcwd()
+
+
+def _request_registry_store_path() -> str:
+    """`request_registry.db` path for this process's Hermes home."""
+    return request_registry.default_store_path(_hermes_home())
+
+
+def _request_registry_call(fn, *args, **kwargs):
+    """Run one `request_registry` call, translating a store-level
+    `sqlite3.Error` (lock, corruption) into the same `ConnectorError` every
+    other tool failure here becomes, instead of an uncaught crash."""
+    try:
+        return fn(_request_registry_store_path(), *args, **kwargs)
+    except sqlite3.Error as e:
+        raise ConnectorError(f"request registry store error: {e}")
+
+
+def request_open(sender_email: str, topic: str, session_link: dict, *,
+                 anchor_doctype: str = None, anchor_name: str = None) -> dict:
+    """Start tracking a new cross-channel Request (agents issue 02),
+    keyed on the lowercased session sender email — the same identity key
+    every channel's `user_id` already resolves to (see issue 02's design
+    note: no new mapping table)."""
+    return _request_registry_call(request_registry.open_request, sender_email.lower(), topic,
+                                  session_link, anchor_doctype=anchor_doctype, anchor_name=anchor_name)
+
+
+def request_lookup(sender_email: str) -> list:
+    """This sender's other open Requests (any channel) — a surfacing list,
+    never auto-matched to the current turn (issue 02 decision 2)."""
+    return _request_registry_call(request_registry.open_for_sender, sender_email.lower())
+
+
+def _owned_request(store_path: str, request_id: str, sender_email: str) -> dict:
+    """*request_id*'s row, after checking it belongs to *sender_email*.
+    Raises InvalidArgumentsError when the id doesn't exist, RequestOwnershipError
+    when it belongs to someone else — fail-closed, same stance as the RBAC gate."""
+    row = request_registry.get_request(store_path, request_id)
+    if row is None:
+        raise InvalidArgumentsError(f"no request {request_id!r} to act on.")
+    if row["sender_email"] != sender_email.lower():
+        raise RequestOwnershipError(
+            f"Refusing: request {request_id} belongs to a different Requester. Nothing was "
+            f"linked or updated.")
+    return row
+
+
+def request_link(request_id: str, sender_email: str, session_link: dict) -> dict:
+    """Attach *session_link* to *request_id*, after checking *sender_email*
+    (lowercased) owns it."""
+    def _do(store_path):
+        _owned_request(store_path, request_id, sender_email)
+        return request_registry.link_session(store_path, request_id, session_link)
+    return _request_registry_call(_do)
+
+
+def request_status(request_id: str, sender_email: str, *, agent_status: str = None,
+                   requester_confirmed: str = None) -> dict:
+    """Set `agent_status` and/or `requester_confirmed` on *request_id*, after
+    checking *sender_email* (lowercased) owns it."""
+    def _do(store_path):
+        _owned_request(store_path, request_id, sender_email)
+        try:
+            return request_registry.update_status(store_path, request_id, agent_status=agent_status,
+                                                   requester_confirmed=requester_confirmed)
+        except ValueError as e:
+            raise InvalidArgumentsError(str(e))
+    return _request_registry_call(_do)
 
 
 def _qkeee_env_file_path() -> str:

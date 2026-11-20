@@ -17,6 +17,7 @@ every agent that has the tools.
 | `erp_report` | Run a built-in query report. |
 | `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight`, `promotion_plan`, `bot_permissions`. |
 | `erp_execute_write` | `list_ops`, `render`, `execute` (one `op`, or a `batch`). The only write path. |
+| `erp_request` | `open`, `lookup`, `link`, `status`. Tracks one of the Requester's distinct asks across channels — gateway bookkeeping, not an ERPNext call. |
 
 ## 1. Never reach ERPNext another way
 
@@ -154,3 +155,33 @@ it again. A refusal that says "no email was sent" means nothing went out.
   failed or not attempted.
 - `warnings` on a successful write (for example an audit-log problem):
   tell the user. Do not report a plain success.
+
+## 9. Track a request across channels
+
+The Requester may raise or continue the same ask from more than one
+channel (email, chat). Each channel's session is separate; `erp_request`
+is what links them, by the Requester's email.
+
+- At the start of a new ask (not a continuation you already recognise),
+  call `erp_request` `action=open` with a short `topic` (e.g. "GST report
+  — Oct 2026"), and `anchor_doctype`/`anchor_name` when the ask is about
+  one ERPNext record — omit both for a read-only ask (a report, a
+  question) that has none.
+- Say the returned `topic` and `request_id` to the user at least once
+  ("tracking this as REQ-7F3A2C1D, GST report Oct"), so they recognise it
+  if they continue from another channel. You may also refer to them again
+  later in the conversation, as a running confirmation you still have the
+  right thread.
+- When you suspect this message continues something already open on
+  another channel (same Requester, a similar ask), call `action=lookup`
+  first. It lists this Requester's other open requests — **never
+  auto-matched to this turn.** Ask the Requester which one (if any) this
+  continues, or that it's a new ask. Only after they answer, either call
+  `action=link` with that `request_id` (continuing it), or `action=open`
+  (new).
+- When you judge the ask is done, call `action=status` with
+  `agent_status="done"`. Set `requester_confirmed="confirmed"` or
+  `"disputed"` only after the Requester actually answered a confirm-check
+  you asked them — never assert it on their behalf.
+- A `refused` result on `link` or `status` means the `request_id` belongs
+  to a different Requester. Report it; do not retry with another id.
