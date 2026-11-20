@@ -19,10 +19,11 @@ roles and live metadata), erp_execute_write (list_ops, render, execute) and
 erp_request. Writes are only in erp_execute_write, so a platform toolset or
 a hook can target them by name.
 
-erp_request tracks a cross-channel Request Registry (agents issue 02): it
-is gateway-side bookkeeping, not an ERPNext read or write, so it is exempt
-from `mode` and does not take `tag` — but it still binds only to the
-gateway session's sender email, same as every other tool here.
+erp_request tracks a Request Registry across channels (agents issue 02)
+and participants (issue 03): it is gateway-side bookkeeping, not an
+ERPNext read or write, so it is exempt from `mode` and does not take
+`tag` — but it still binds only to the gateway session's sender email,
+same as every other tool here.
 """
 
 import json
@@ -185,20 +186,27 @@ SCHEMAS = {
     "erp_request": {
         "name": "erp_request",
         "description": (
-            "Cross-channel Request Registry (agents issue 02): track one of this Requester's "
-            "distinct asks across channels, by their session email. open: start tracking a new "
-            "ask; say both the returned topic and request_id to the user at least once, so they "
-            "can recognise it if they continue from another channel. lookup: this Requester's "
-            "other open asks (any channel) — a plain list, NOT auto-matched to the current turn; "
-            "ask the Requester which one (if any) this continues, or that it's new, before "
-            "calling link or open. link: attach the CURRENT session to an existing request_id, "
-            "only after the Requester confirmed it. status: set agent_status (your own belief) "
-            "and/or requester_confirmed (only after the Requester actually answered your own "
-            "confirm-check — never set it on their behalf). " + _NO_REQUESTER_NOTE),
+            "Cross-channel Request Registry (agents issues 02/03): track one distinct ask across "
+            "channels and across participants. Every result carries your_role for this ask: "
+            "\"requester\" (you opened it) or \"input_provider\" (someone else did). open: start "
+            "tracking a new ask; say both the returned topic and request_id to whoever you're "
+            "talking to at least once, so they recognise it if they continue it from another "
+            "channel. lookup: YOUR OWN other open asks (any channel) — a plain list, NOT "
+            "auto-matched to the current turn. in_thread: open ask(s) already linked to THIS "
+            "room (this chat/thread), opened by someone else — how a second person in the same "
+            "Google Chat thread finds the first person's ask (email has no thread-sharing yet, "
+            "so this returns nothing there). For lookup and in_thread: ask whoever you're "
+            "talking to which one (if any) this continues, or that it's new, before calling link "
+            "or open — never assume. link: attach the CURRENT session to an existing request_id "
+            "once confirmed — open to any sender (an input-provider joining someone else's ask is "
+            "expected; only the Requester's own write actions are gated). status: Requester-only "
+            "— set agent_status (your own belief) and/or requester_confirmed (only after the "
+            "Requester actually answered your own confirm-check — never set it on their behalf); "
+            "refused if the caller is not this request's Requester. " + _NO_REQUESTER_NOTE),
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["open", "lookup", "link", "status"]},
+                "action": {"type": "string", "enum": ["open", "lookup", "in_thread", "link", "status"]},
                 "topic": {"type": "string", "description": "open: short human label for the ask, "
                                                             "e.g. 'GST report — Oct 2026'."},
                 "anchor_doctype": {"type": "string", "description": "open: the ERPNext DocType "
@@ -214,6 +222,12 @@ SCHEMAS = {
                 "requester_confirmed": {"type": "string", "enum": ["confirmed", "disputed"],
                                         "description": "status: set only after the Requester "
                                                        "answered your confirm-check."},
+                "note": {"type": "string", "description": "open, link, status: one line on why — "
+                                                          "the forensic trail for this action "
+                                                          "(e.g. the Requester's own words "
+                                                          "confirming done). Optional, but write "
+                                                          "one whenever there's a real answer "
+                                                          "behind the action, not a guess."},
             },
             "required": ["action"], "additionalProperties": False,
         },
@@ -586,7 +600,7 @@ class ErpTools:
                             f"report a plain success.")
         return _ok(result, warnings=warnings) if warnings else _ok(result)
 
-    # -- cross-channel request tracking (agents issue 02) --------------------
+    # -- cross-channel, cross-participant request tracking (agents issues 02/03) --
     #
     # Thin here on purpose: every CRUD call goes through client.py
     # (request_open/lookup/link/status), the same encapsulation boundary
@@ -600,7 +614,7 @@ class ErpTools:
             self._need(args, "topic")
             row = client.request_open(requester, args["topic"], self._session_link(args),
                                       anchor_doctype=args.get("anchor_doctype"),
-                                      anchor_name=args.get("anchor_name"))
+                                      anchor_name=args.get("anchor_name"), note=args.get("note"))
             row["_note"] = ("Say both `topic` and `request_id` to the user at least once, so they "
                             "can recognise this request if they continue it from another channel.")
             return _ok(row)
@@ -612,14 +626,26 @@ class ErpTools:
                                 "any) this continues, or that it's new, before calling link or "
                                 "open.")
             return _ok(out)
+        if action == "in_thread":
+            link = self._session_link(args)
+            rows = client.request_in_session(requester, link["platform"], link["chat_id"],
+                                             link["thread_id"])
+            out = {"requests": rows}
+            if rows:
+                out["_note"] = ("Not auto-joined. Ask whoever you're talking to which one (if "
+                                "any) this continues, or that it's new, before calling link or "
+                                "open.")
+            return _ok(out)
         if action == "link":
             self._need(args, "request_id")
-            return _ok(client.request_link(args["request_id"], requester, self._session_link(args)))
+            return _ok(client.request_link(args["request_id"], requester, self._session_link(args),
+                                           note=args.get("note")))
         if action == "status":
             self._need(args, "request_id")
             if not args.get("agent_status") and not args.get("requester_confirmed"):
                 raise client.ConnectorError("status needs agent_status and/or requester_confirmed.")
             return _ok(client.request_status(args["request_id"], requester,
                                              agent_status=args.get("agent_status"),
-                                             requester_confirmed=args.get("requester_confirmed")))
+                                             requester_confirmed=args.get("requester_confirmed"),
+                                             note=args.get("note")))
         raise client.ConnectorError(f"unknown erp_request action {action!r}")

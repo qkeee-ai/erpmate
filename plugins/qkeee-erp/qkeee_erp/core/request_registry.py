@@ -17,6 +17,15 @@ Requester confirm before calling `link_session()`. An ERPNext record
 anchor (doctype + name) is optional — a read-only ask (an MIS/GST report)
 never gets one.
 
+Issue 03 (requester-vs-input-provider): `open_in_session()` is the other
+lookup direction — requests already linked to a (platform, chat_id,
+thread_id) room, regardless of sender. There is no separate "participant"
+table: a request's Requester is always just its `sender_email`; anyone
+else whose session resolves to the same `request_id` (via `open_in_session()`
+on a shared Chat thread, or a future email Message-ID index) is an
+input-provider for that request's lifetime — a role derived at read time,
+never stored.
+
 Stdlib only, like the rest of core/.
 """
 
@@ -46,6 +55,10 @@ _SCHEMA = (
     " platform TEXT, chat_id TEXT, thread_id TEXT, session_id TEXT,"
     " linked_at INTEGER NOT NULL,"
     " PRIMARY KEY (request_id, platform, chat_id, thread_id));"
+    "CREATE TABLE IF NOT EXISTS request_event ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " request_id TEXT NOT NULL, action TEXT NOT NULL, sender_email TEXT NOT NULL,"
+    " note TEXT, created_at INTEGER NOT NULL);"
 )
 
 
@@ -186,5 +199,54 @@ def open_for_sender(store_path: str, sender_email: str, limit: int = 10) -> list
             "SELECT request_id FROM request WHERE sender_email = ? AND agent_status != 'done' "
             "ORDER BY updated_at DESC LIMIT ?", (sender_email, int(limit))).fetchall()
         return [_row(conn, r["request_id"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def open_in_session(store_path: str, platform: str, chat_id: str, thread_id: str = None,
+                    limit: int = 10) -> list:
+    """Open/in_progress requests already linked to this exact (platform,
+    chat_id, thread_id) room — regardless of WHO sent this call's turn
+    (agents issue 03: a Google Chat space/thread already shares one
+    session across participants, so this is how a second person's turn
+    finds a request the first person already opened there). Never auto-
+    acted on by the caller — same surfacing-only contract as
+    `open_for_sender()`.
+
+    Requires a real `thread_id` on both sides — deliberately does NOT
+    match two requests that both happen to have no `thread_id` (adversarial
+    review, issue 03: a busy Google Chat space with threading turned OFF
+    gives every message in it `thread_id=None`, so matching on "both
+    null" would surface every unrelated conversation in that space to
+    anyone posting there — a cross-conversation leak, not a feature).
+    Email's `chat_id` is already the sender's own address (never shared
+    across people) so this exclusion costs it nothing it could use anyway."""
+    if not platform or not chat_id or not thread_id or not os.path.exists(store_path):
+        return []
+    conn = _connect(store_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT rs.request_id FROM request_session rs JOIN request r "
+            "ON r.request_id = rs.request_id WHERE rs.platform = ? AND rs.chat_id = ? "
+            "AND rs.thread_id = ? AND r.agent_status != 'done' ORDER BY r.updated_at DESC LIMIT ?",
+            (platform, chat_id, thread_id, int(limit))).fetchall()
+        return [_row(conn, r["request_id"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def log_event(store_path: str, request_id: str, action: str, sender_email: str,
+             note: str = None) -> None:
+    """Append-only forensic trail (adversarial review, issue 03: `erp_request`
+    changes state with no record anywhere of who did it or why, unlike
+    every ERPNext write tool's audit log). One row per `open`/`link`/
+    `status` call — never read back by any lookup here; a later report
+    (issue 11) or an incident review queries this table directly."""
+    conn = _connect(store_path)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO request_event (request_id, action, sender_email, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)", (request_id, action, sender_email, note, _now()))
     finally:
         conn.close()

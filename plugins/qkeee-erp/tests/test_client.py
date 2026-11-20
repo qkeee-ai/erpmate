@@ -2196,10 +2196,27 @@ class RequestRegistryFacadeTests(unittest.TestCase):
         linked = ec.request_link(opened["request_id"], "Nikhil@Org.com", self.LINK_B)
         self.assertEqual(len(linked["linked_sessions"]), 2)
 
-    def test_link_to_another_owners_request_is_a_gate_refusal(self):
+    def test_link_from_another_sender_is_allowed_and_tagged_input_provider(self):
+        # Issue 03: unlike request_status() below, request_link() has no
+        # ownership check — an input-provider joining someone else's ask
+        # is the intended use, not a violation.
         opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
-        with self.assertRaises(ec.RequestOwnershipError):
-            ec.request_link(opened["request_id"], "priya@org.com", self.LINK_B)
+        linked = ec.request_link(opened["request_id"], "priya@org.com", self.LINK_B)
+        self.assertEqual(linked["your_role"], "input_provider")
+        self.assertEqual(linked["topic"], "topic")
+
+    def test_link_from_another_sender_does_not_leak_other_sessions(self):
+        # Adversarial review: a request_id alone (overheard, not proven
+        # room membership) must not read back every other participant's
+        # platform/chat_id/session_id.
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        linked = ec.request_link(opened["request_id"], "priya@org.com", self.LINK_B)
+        self.assertNotIn("linked_sessions", linked)
+
+    def test_link_from_the_requester_still_sees_linked_sessions(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        linked = ec.request_link(opened["request_id"], "nikhil@org.com", self.LINK_B)
+        self.assertEqual(len(linked["linked_sessions"]), 2)
 
     def test_link_to_an_unknown_request_is_invalid_arguments(self):
         with self.assertRaises(ec.InvalidArgumentsError):
@@ -2219,6 +2236,48 @@ class RequestRegistryFacadeTests(unittest.TestCase):
         opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
         with self.assertRaises(ec.InvalidArgumentsError):
             ec.request_status(opened["request_id"], "nikhil@org.com", agent_status="finished")
+
+    def test_open_tags_the_opener_as_requester(self):
+        row = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        self.assertEqual(row["your_role"], "requester")
+
+    def test_lookup_tags_every_row_as_requester(self):
+        ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        rows = ec.request_lookup("nikhil@org.com")
+        self.assertEqual(rows[0]["your_role"], "requester")
+
+
+class RequestInSessionFacadeTests(unittest.TestCase):
+    """client.request_in_session (agents issue 03): the other lookup
+    direction — requests already linked to THIS room, regardless of who
+    is asking."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = patch.dict("os.environ", {"HERMES_HOME": tmp.name})
+        home.start()
+        self.addCleanup(home.stop)
+
+    CHAT_LINK = {"platform": "google_chat", "chat_id": "spaces/A", "thread_id": "threads/T",
+                "session_id": "s1"}
+
+    def test_a_different_sender_in_the_same_room_sees_it_as_input_provider(self):
+        ec.request_open("nikhil@org.com", "topic", self.CHAT_LINK)
+        rows = ec.request_in_session("priya@org.com", "google_chat", "spaces/A", "threads/T")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["your_role"], "input_provider")
+
+    def test_the_opener_sees_their_own_request_as_requester(self):
+        ec.request_open("nikhil@org.com", "topic", self.CHAT_LINK)
+        rows = ec.request_in_session("nikhil@org.com", "google_chat", "spaces/A", "threads/T")
+        self.assertEqual(rows[0]["your_role"], "requester")
+
+    def test_a_different_room_sees_nothing(self):
+        ec.request_open("nikhil@org.com", "topic", self.CHAT_LINK)
+        rows = ec.request_in_session("priya@org.com", "google_chat", "spaces/B", "threads/T")
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":

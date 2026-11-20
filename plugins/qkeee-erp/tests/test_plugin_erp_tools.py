@@ -377,9 +377,21 @@ class RequestToolTests(ToolTestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
         home = patch.dict(os.environ, {"HERMES_HOME": tmp.name})
         home.start()
         self.addCleanup(home.stop)
+
+    def _events(self, request_id):
+        import sqlite3
+        from qkeee_erp_plugin.qkeee_erp.core import request_registry
+        conn = sqlite3.connect(request_registry.default_store_path(self.home))
+        try:
+            return conn.execute(
+                "SELECT action, sender_email, note FROM request_event WHERE request_id = ? "
+                "ORDER BY id", (request_id,)).fetchall()
+        finally:
+            conn.close()
 
     def test_open_binds_the_session_sender_and_returns_topic_and_id(self):
         out = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "GST report"})
@@ -422,12 +434,28 @@ class RequestToolTests(ToolTestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(len(out["result"]["linked_sessions"]), 2)
 
-    def test_link_to_another_senders_request_is_refused(self):
+    def test_link_from_another_sender_is_allowed_as_input_provider(self):
+        # Issue 03: an input-provider joining someone else's ask is expected,
+        # not a violation — only status (below) stays Requester-only.
         opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
         out = self.call(self.tools(PRIYA), "erp_request",
                         {"action": "link", "request_id": opened["result"]["request_id"]})
-        self.assertFalse(out["ok"])
-        self.assertTrue(out["refused"])
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["result"]["your_role"], "input_provider")
+        self.assertEqual(out["result"]["topic"], "t")
+
+    def test_link_from_another_sender_does_not_leak_other_sessions(self):
+        # Adversarial review: an input-provider must not be able to read
+        # back every other participant's platform/chat_id/session_id just
+        # by linking their own, unrelated session to a known request_id.
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(self.tools(PRIYA), "erp_request",
+                        {"action": "link", "request_id": opened["result"]["request_id"]})
+        self.assertNotIn("linked_sessions", out["result"])
+
+    def test_open_tags_your_role_as_requester(self):
+        out = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        self.assertEqual(out["result"]["your_role"], "requester")
 
     def test_link_to_unknown_request_is_an_error_not_a_crash(self):
         out = self.call(self.tools(SENDER), "erp_request", {"action": "link", "request_id": "REQ-NOPE"})
@@ -457,6 +485,52 @@ class RequestToolTests(ToolTestCase):
                          "agent_status": "done"})
         self.assertFalse(out["ok"])
         self.assertTrue(out["refused"])
+
+    def test_in_thread_finds_a_request_opened_by_someone_else_in_the_same_room(self):
+        # Issue 03: two different senders, same google_chat space/thread —
+        # the substrate already shared by the gateway's own session keying.
+        self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "nikhil's ask"})
+        bob_in_same_thread = dict(SENDER, HERMES_SESSION_USER_ID="priya@org.com")
+        out = self.call(self.tools(bob_in_same_thread), "erp_request", {"action": "in_thread"})
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["result"]["requests"]), 1)
+        self.assertEqual(out["result"]["requests"][0]["your_role"], "input_provider")
+        self.assertIn("_note", out["result"])
+
+    def test_in_thread_sees_nothing_in_a_different_thread(self):
+        self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(self.tools(PRIYA), "erp_request", {"action": "in_thread"})
+        self.assertEqual(out["result"]["requests"], [])
+        self.assertNotIn("_note", out["result"])
+
+    def test_open_records_a_forensic_event(self):
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        events = self._events(opened["result"]["request_id"])
+        self.assertEqual(events, [("open", "nikhil@org.com", None)])
+
+    def test_open_with_a_note_records_it(self):
+        opened = self.call(self.tools(SENDER), "erp_request",
+                           {"action": "open", "topic": "t", "note": "raised in standup"})
+        events = self._events(opened["result"]["request_id"])
+        self.assertEqual(events[0][2], "raised in standup")
+
+    def test_link_and_status_each_record_their_own_event(self):
+        # self.tools() installs a module-global session reader (client.
+        # set_session_env_reader), so each identity needs its own fresh
+        # self.tools(...) call right before use — reusing an earlier
+        # `tools` object after switching identity re-reads the LATEST
+        # global, not the one bound when it was created.
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        request_id = opened["result"]["request_id"]
+        self.call(self.tools(PRIYA), "erp_request", {"action": "link", "request_id": request_id})
+        out = self.call(self.tools(SENDER), "erp_request",
+                        {"action": "status", "request_id": request_id, "agent_status": "done",
+                         "note": "requester confirmed by reply"})
+        self.assertTrue(out["ok"])
+        events = self._events(request_id)
+        self.assertEqual([e[0] for e in events], ["open", "link", "status"])
+        self.assertEqual(events[1][1], "priya@org.com")
+        self.assertEqual(events[2][2], "requester confirmed by reply")
 
 
 if __name__ == "__main__":

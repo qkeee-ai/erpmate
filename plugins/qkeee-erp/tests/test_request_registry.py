@@ -117,5 +117,96 @@ class OpenForSenderTests(RegistryTestCase):
         self.assertEqual(rr.open_for_sender(self.store + ".absent", ALICE), [])
 
 
+class OpenInSessionTests(RegistryTestCase):
+    """Issue 03: finding a request already open in THIS room, regardless of
+    who is asking — the lookup direction a second participant's turn uses."""
+
+    def test_finds_a_request_opened_by_someone_else_in_the_same_room(self):
+        rr.open_request(self.store, ALICE, "alice's ask", CHAT_LINK)
+        rows = rr.open_in_session(self.store, "google_chat", "spaces/A", "threads/T")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sender_email"], ALICE)
+
+    def test_a_different_thread_in_the_same_space_does_not_match(self):
+        rr.open_request(self.store, ALICE, "alice's ask", CHAT_LINK)
+        rows = rr.open_in_session(self.store, "google_chat", "spaces/A", "threads/OTHER")
+        self.assertEqual(rows, [])
+
+    def test_a_different_chat_id_does_not_match(self):
+        rr.open_request(self.store, ALICE, "alice's ask", CHAT_LINK)
+        rows = rr.open_in_session(self.store, "google_chat", "spaces/B", "threads/T")
+        self.assertEqual(rows, [])
+
+    def test_no_thread_id_on_either_side_never_matches(self):
+        # Adversarial review: matching "both null" would surface every
+        # unrelated conversation in an unthreaded group space to anyone
+        # posting there. A missing thread_id means "don't match", not
+        # "match anything else missing one".
+        rr.open_request(self.store, ALICE, "alice's ask", EMAIL_LINK)
+        rows = rr.open_in_session(self.store, "email", "alice@org.com")
+        self.assertEqual(rows, [])
+
+    def test_a_query_with_no_thread_id_matches_nothing_even_in_a_threaded_room(self):
+        rr.open_request(self.store, ALICE, "alice's ask", CHAT_LINK)
+        rows = rr.open_in_session(self.store, "google_chat", "spaces/A")
+        self.assertEqual(rows, [])
+
+    def test_done_requests_are_excluded(self):
+        row = rr.open_request(self.store, ALICE, "alice's ask", CHAT_LINK)
+        rr.update_status(self.store, row["request_id"], agent_status="done")
+        self.assertEqual(rr.open_in_session(self.store, "google_chat", "spaces/A", "threads/T"), [])
+
+    def test_a_second_session_linked_to_the_same_room_also_matches(self):
+        row = rr.open_request(self.store, ALICE, "alice's ask", EMAIL_LINK)
+        bob_link = {"platform": "google_chat", "chat_id": "spaces/A", "thread_id": "threads/T",
+                   "session_id": "s-bob"}
+        rr.link_session(self.store, row["request_id"], bob_link)
+        rows = rr.open_in_session(self.store, "google_chat", "spaces/A", "threads/T")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["request_id"], row["request_id"])
+
+    def test_missing_store_is_an_empty_list(self):
+        self.assertEqual(rr.open_in_session(self.store + ".absent", "google_chat", "spaces/A"), [])
+
+    def test_no_chat_id_is_an_empty_list(self):
+        self.assertEqual(rr.open_in_session(self.store, "google_chat", ""), [])
+
+    def test_a_different_platform_with_the_same_chat_id_and_thread_id_does_not_match(self):
+        rr.open_request(self.store, ALICE, "alice's ask", CHAT_LINK)
+        rows = rr.open_in_session(self.store, "slack", "spaces/A", "threads/T")
+        self.assertEqual(rows, [])
+
+
+class LogEventTests(RegistryTestCase):
+    """Adversarial review, issue 03: a forensic trail of who did what to a
+    request and when, since none of the lookups/mutations above leave one."""
+
+    def _events(self, request_id):
+        import sqlite3
+        conn = sqlite3.connect(self.store)
+        try:
+            return conn.execute(
+                "SELECT action, sender_email, note FROM request_event WHERE request_id = ? "
+                "ORDER BY id", (request_id,)).fetchall()
+        finally:
+            conn.close()
+
+    def test_an_event_is_recorded(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        rr.log_event(self.store, row["request_id"], "open", ALICE)
+        self.assertEqual(self._events(row["request_id"]), [("open", ALICE, None)])
+
+    def test_an_optional_note_is_recorded(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        rr.log_event(self.store, row["request_id"], "status", ALICE, note="confirmed by requester")
+        self.assertEqual(self._events(row["request_id"])[0][2], "confirmed by requester")
+
+    def test_events_accumulate_in_order(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        rr.log_event(self.store, row["request_id"], "open", ALICE)
+        rr.log_event(self.store, row["request_id"], "link", BOB)
+        self.assertEqual([e[0] for e in self._events(row["request_id"])], ["open", "link"])
+
+
 if __name__ == "__main__":
     unittest.main()

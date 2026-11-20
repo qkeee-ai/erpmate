@@ -17,7 +17,7 @@ every agent that has the tools.
 | `erp_report` | Run a built-in query report. |
 | `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight`, `promotion_plan`, `bot_permissions`. |
 | `erp_execute_write` | `list_ops`, `render`, `execute` (one `op`, or a `batch`). The only write path. |
-| `erp_request` | `open`, `lookup`, `link`, `status`. Tracks one of the Requester's distinct asks across channels — gateway bookkeeping, not an ERPNext call. |
+| `erp_request` | `open`, `lookup`, `in_thread`, `link`, `status`. Tracks one distinct ask across channels and participants — gateway bookkeeping, not an ERPNext call. |
 
 ## 1. Never reach ERPNext another way
 
@@ -156,32 +156,51 @@ it again. A refusal that says "no email was sent" means nothing went out.
 - `warnings` on a successful write (for example an audit-log problem):
   tell the user. Do not report a plain success.
 
-## 9. Track a request across channels
+## 9. Track a request across channels and participants
 
-The Requester may raise or continue the same ask from more than one
-channel (email, chat). Each channel's session is separate; `erp_request`
-is what links them, by the Requester's email.
+The Requester (whoever opened the ask) may continue it from more than
+one channel (email, chat), and other people may join the same ask from
+inside a shared thread (a Google Chat space/thread already puts everyone
+in it in your same session; email does not yet). `erp_request` tracks
+one ask across both. Every result carries `your_role` for that ask:
+`"requester"` (whoever opened it) or `"input_provider"` (anyone else).
 
 - At the start of a new ask (not a continuation you already recognise),
   call `erp_request` `action=open` with a short `topic` (e.g. "GST report
   — Oct 2026"), and `anchor_doctype`/`anchor_name` when the ask is about
   one ERPNext record — omit both for a read-only ask (a report, a
   question) that has none.
-- Say the returned `topic` and `request_id` to the user at least once
-  ("tracking this as REQ-7F3A2C1D, GST report Oct"), so they recognise it
-  if they continue from another channel. You may also refer to them again
-  later in the conversation, as a running confirmation you still have the
-  right thread.
-- When you suspect this message continues something already open on
-  another channel (same Requester, a similar ask), call `action=lookup`
-  first. It lists this Requester's other open requests — **never
-  auto-matched to this turn.** Ask the Requester which one (if any) this
-  continues, or that it's a new ask. Only after they answer, either call
-  `action=link` with that `request_id` (continuing it), or `action=open`
-  (new).
+- Say the returned `topic` and `request_id` to whoever you're talking to
+  at least once ("tracking this as REQ-7F3A2C1D..., GST report Oct"), so
+  they recognise it if they continue from another channel. You may also
+  refer to them again later in the conversation, as a running
+  confirmation you still have the right thread.
+- When you suspect this message continues something already open —
+  **same person, another channel**: call `action=lookup` (their own open
+  requests). **A different person, same thread**: call `action=in_thread`
+  (requests already linked to this room, opened by someone else). Both
+  are plain lists — **never auto-matched to this turn.** Ask whoever
+  you're talking to which one (if any) this continues, or that it's a
+  new, separate ask, before calling `action=link` (continuing it) or
+  `action=open` (new). Never guess either way — a wrongly-absorbed new
+  ask and a wrongly-refused real contribution are both real failures.
+- Anyone may `action=link` to an existing `request_id` once confirmed —
+  an input-provider joining the Requester's ask is expected, not a
+  violation. Only `action=status` is Requester-only: a `refused` result
+  there means the `request_id` belongs to a different person. Report it;
+  do not retry with another id.
 - When you judge the ask is done, call `action=status` with
   `agent_status="done"`. Set `requester_confirmed="confirmed"` or
   `"disputed"` only after the Requester actually answered a confirm-check
   you asked them — never assert it on their behalf.
-- A `refused` result on `link` or `status` means the `request_id` belongs
-  to a different Requester. Report it; do not retry with another id.
+- Pass `note` on `open`/`link`/`status` whenever there's a real answer
+  behind the action (what the Requester actually said, why you judged it
+  done) — `open`/`link`/`status` write no audit log of their own
+  otherwise, unlike every ERPNext write tool.
+- **A write's `requested_by` (whose ERPNext permissions are checked) is
+  never changed by any of this** — it is always whoever's own turn
+  triggered the write (rule 2 above), even when they're only an
+  `input_provider` on the Request. If you want the record's own content
+  to credit the original Requester (e.g. a "raised by" note), say so in
+  the write's own text/comment — that is business content, not a
+  permission change, and nothing here grants one.

@@ -1462,57 +1462,125 @@ def _request_registry_call(fn, *args, **kwargs):
         raise ConnectorError(f"request registry store error: {e}")
 
 
+def _role_for(row: dict, sender_email: str) -> dict:
+    """Tag *row* with `your_role` — "requester" when *sender_email* (any
+    case) is the row's own `sender_email`, else "input_provider". Derived
+    at read time, never stored (agents issue 03): a request's Requester is
+    always just its `sender_email`; anyone else who can see it is an
+    input-provider for its lifetime, no separate participant table.
+    `.lower()` on both sides defensively: `row["sender_email"]` is written
+    pre-lowered by `request_open()`, but this does not re-trust that from
+    a distance — a stray future direct write to the column must not
+    silently misclassify the real Requester as an input-provider."""
+    row["your_role"] = ("requester" if row["sender_email"].lower() == sender_email.lower()
+                        else "input_provider")
+    return row
+
+
+def _log_request_event(request_id: str, action: str, sender_email: str, note: str = None) -> None:
+    """Best-effort forensic trail (adversarial review, issue 03): never
+    blocks or fails the caller's actual request — a logging gap is not a
+    reason to refuse a Request Registry call that otherwise succeeded."""
+    try:
+        request_registry.log_event(_request_registry_store_path(), request_id, action,
+                                    sender_email.lower(), note=note)
+    except sqlite3.Error:
+        pass
+
+
 def request_open(sender_email: str, topic: str, session_link: dict, *,
-                 anchor_doctype: str = None, anchor_name: str = None) -> dict:
+                 anchor_doctype: str = None, anchor_name: str = None, note: str = None) -> dict:
     """Start tracking a new cross-channel Request (agents issue 02),
     keyed on the lowercased session sender email — the same identity key
     every channel's `user_id` already resolves to (see issue 02's design
     note: no new mapping table)."""
-    return _request_registry_call(request_registry.open_request, sender_email.lower(), topic,
-                                  session_link, anchor_doctype=anchor_doctype, anchor_name=anchor_name)
+    row = _request_registry_call(request_registry.open_request, sender_email.lower(), topic,
+                                 session_link, anchor_doctype=anchor_doctype, anchor_name=anchor_name)
+    _log_request_event(row["request_id"], "open", sender_email, note)
+    return _role_for(row, sender_email)
 
 
 def request_lookup(sender_email: str) -> list:
     """This sender's other open Requests (any channel) — a surfacing list,
     never auto-matched to the current turn (issue 02 decision 2)."""
-    return _request_registry_call(request_registry.open_for_sender, sender_email.lower())
+    rows = _request_registry_call(request_registry.open_for_sender, sender_email.lower())
+    return [_role_for(r, sender_email) for r in rows]
 
 
-def _owned_request(store_path: str, request_id: str, sender_email: str) -> dict:
-    """*request_id*'s row, after checking it belongs to *sender_email*.
-    Raises InvalidArgumentsError when the id doesn't exist, RequestOwnershipError
-    when it belongs to someone else — fail-closed, same stance as the RBAC gate."""
+def request_in_session(sender_email: str, platform: str, chat_id: str, thread_id: str = None) -> list:
+    """Open Requests already linked to THIS (platform, chat_id, thread_id)
+    room, regardless of who opened them (agents issue 03) — how a second
+    participant's turn in a shared Google Chat thread finds a Request the
+    first one already opened there. Never auto-acted on by the caller,
+    same surfacing-only contract as `request_lookup()`.
+
+    *sender_email* is used ONLY to compute `your_role` on the results — it
+    does not filter them, unlike `request_lookup()`'s same-named first
+    argument. Scoping comes entirely from (platform, chat_id, thread_id),
+    which the caller can only have by actually being in that room (it is
+    read from the gateway session, never a tool argument) — see
+    `open_in_session()` for why a missing `thread_id` matches nothing."""
+    rows = _request_registry_call(request_registry.open_in_session, platform, chat_id, thread_id)
+    return [_role_for(r, sender_email) for r in rows]
+
+
+def _existing_request(store_path: str, request_id: str) -> dict:
+    """*request_id*'s row, or InvalidArgumentsError when it does not exist."""
     row = request_registry.get_request(store_path, request_id)
     if row is None:
         raise InvalidArgumentsError(f"no request {request_id!r} to act on.")
-    if row["sender_email"] != sender_email.lower():
-        raise RequestOwnershipError(
-            f"Refusing: request {request_id} belongs to a different Requester. Nothing was "
-            f"linked or updated.")
     return row
 
 
-def request_link(request_id: str, sender_email: str, session_link: dict) -> dict:
-    """Attach *session_link* to *request_id*, after checking *sender_email*
-    (lowercased) owns it."""
+def request_link(request_id: str, sender_email: str, session_link: dict, note: str = None) -> dict:
+    """Attach *session_link* to *request_id*. Any Requester may link their
+    own session to any known request — that is literally how an
+    input-provider joins another Requester's ask (agents issue 03); there
+    is no ownership check here, unlike `request_status()` below. The
+    caller (erp_tools.ErpTools) must still have a human confirm first,
+    same as `request_lookup()`/`request_in_session()`'s results — this
+    function performs the link, it does not decide whether to.
+
+    For a caller who is NOT this request's Requester, `linked_sessions`
+    is stripped from the result (adversarial review, issue 03: anyone who
+    can produce a `request_id` — including by overhearing it, since
+    SKILL.md has the agent say it aloud — could otherwise read back every
+    other participant's platform/chat_id/session_id just by linking their
+    own, unrelated session to it). `topic`/`anchor_doctype`/`anchor_name`
+    stay visible: an input-provider needs them to confirm "yes, this is
+    the ask I mean" — that is this action's whole point."""
     def _do(store_path):
-        _owned_request(store_path, request_id, sender_email)
+        _existing_request(store_path, request_id)
         return request_registry.link_session(store_path, request_id, session_link)
-    return _request_registry_call(_do)
+    row = _role_for(_request_registry_call(_do), sender_email)
+    if row["your_role"] != "requester":
+        row = dict(row)
+        row.pop("linked_sessions", None)
+    _log_request_event(request_id, "link", sender_email, note)
+    return row
 
 
 def request_status(request_id: str, sender_email: str, *, agent_status: str = None,
-                   requester_confirmed: str = None) -> dict:
+                   requester_confirmed: str = None, note: str = None) -> dict:
     """Set `agent_status` and/or `requester_confirmed` on *request_id*, after
-    checking *sender_email* (lowercased) owns it."""
+    checking *sender_email* (lowercased) is its Requester — unlike
+    `request_link()`, only the Requester may change a Request's status; an
+    input-provider contributing to someone else's ask cannot close or
+    confirm it on their behalf."""
     def _do(store_path):
-        _owned_request(store_path, request_id, sender_email)
+        row = _existing_request(store_path, request_id)
+        if row["sender_email"] != sender_email.lower():
+            raise RequestOwnershipError(
+                f"Refusing: request {request_id} belongs to a different Requester. Only its "
+                f"Requester can change its status. Nothing was updated.")
         try:
             return request_registry.update_status(store_path, request_id, agent_status=agent_status,
                                                    requester_confirmed=requester_confirmed)
         except ValueError as e:
             raise InvalidArgumentsError(str(e))
-    return _request_registry_call(_do)
+    row = _role_for(_request_registry_call(_do), sender_email)
+    _log_request_event(request_id, "status", sender_email, note)
+    return row
 
 
 def _qkeee_env_file_path() -> str:
