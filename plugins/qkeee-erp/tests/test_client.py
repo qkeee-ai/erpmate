@@ -2280,5 +2280,69 @@ class RequestInSessionFacadeTests(unittest.TestCase):
         self.assertEqual(rows, [])
 
 
+class RequestFactsFacadeTests(unittest.TestCase):
+    """client.request_facts (agents issue 04): resolved task state that
+    survives an LCM context compaction, since it never lived in the
+    LLM's own context — gateway-side sqlite instead."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = patch.dict("os.environ", {"HERMES_HOME": tmp.name})
+        home.start()
+        self.addCleanup(home.stop)
+
+    LINK_A = {"platform": "email", "chat_id": "nikhil@org.com", "thread_id": None, "session_id": "s1"}
+    LINK_B = {"platform": "google_chat", "chat_id": "spaces/A", "thread_id": "threads/T",
+             "session_id": "s2"}
+
+    def test_the_requester_can_merge_facts(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        updated = ec.request_facts(opened["request_id"], "nikhil@org.com", {"supplier_id": "SUP-001"})
+        self.assertEqual(updated["facts"], {"supplier_id": "SUP-001"})
+
+    def test_a_linked_input_provider_can_merge_facts(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        ec.request_link(opened["request_id"], "priya@org.com", self.LINK_B)
+        updated = ec.request_facts(opened["request_id"], "priya@org.com", {"item_code": "ITEM-42"})
+        self.assertEqual(updated["facts"], {"item_code": "ITEM-42"})
+
+    def test_an_unlinked_sender_is_refused(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        with self.assertRaises(ec.RequestOwnershipError):
+            ec.request_facts(opened["request_id"], "priya@org.com", {"a": "b"})
+
+    def test_facts_are_redacted_from_an_input_providers_result_like_link(self):
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        ec.request_link(opened["request_id"], "priya@org.com", self.LINK_B)
+        updated = ec.request_facts(opened["request_id"], "priya@org.com", {"a": "b"})
+        self.assertNotIn("linked_sessions", updated)
+
+    def test_sharing_a_threadless_room_is_not_enough_without_linking(self):
+        # Code review: an earlier version of this gate compared (platform,
+        # chat_id, thread_id) tuples, which could not tell two different
+        # people apart on a shared-chat_id platform with threading off —
+        # reopening issue 03's cross-conversation leak against a write
+        # gate. The fix checks identity (linked_senders), not room
+        # coordinates: merely sharing a chat_id is never enough.
+        no_thread = {"platform": "google_chat", "chat_id": "spaces/A", "thread_id": None,
+                    "session_id": "s-nikhil"}
+        opened = ec.request_open("nikhil@org.com", "topic", no_thread)
+        with self.assertRaises(ec.RequestOwnershipError):
+            ec.request_facts(opened["request_id"], "priya@org.com", {"a": "b"})
+
+    def test_an_email_input_provider_with_no_thread_id_can_still_merge_facts(self):
+        # The over-correction this guards against: requiring a real
+        # thread_id to prove "already linked" would make it impossible
+        # for ANY email participant to ever pass `linked_senders`, since
+        # email's thread_id is always absent — exercised here via an
+        # input-provider (the Requester path doesn't touch that check).
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_B)
+        ec.request_link(opened["request_id"], "priya@org.com", self.LINK_A)
+        updated = ec.request_facts(opened["request_id"], "priya@org.com", {"a": "b"})
+        self.assertEqual(updated["facts"], {"a": "b"})
+
+
 if __name__ == "__main__":
     unittest.main()

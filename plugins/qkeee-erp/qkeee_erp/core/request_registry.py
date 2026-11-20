@@ -26,9 +26,18 @@ on a shared Chat thread, or a future email Message-ID index) is an
 input-provider for that request's lifetime — a role derived at read time,
 never stored.
 
+Issue 04 (compaction loses resolved state): `merge_facts()` is a small
+JSON bag of task-resolved values (a supplier id, an item code, a write
+error's known fix) on the request row itself. This store is gateway-side
+sqlite, outside the LLM's own context — an LCM context compaction cannot
+touch it. The fix for "redid finished discovery work after compaction"
+lives here, not in hermes-lcm's summary construction, which is out of
+scope for this plugin.
+
 Stdlib only, like the rest of core/.
 """
 
+import json
 import os
 import sqlite3
 import time
@@ -49,10 +58,11 @@ _SCHEMA = (
     " anchor_doctype TEXT, anchor_name TEXT,"
     " agent_status TEXT NOT NULL DEFAULT 'open',"
     " requester_confirmed TEXT,"
+    " facts TEXT,"
     " created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER);"
     "CREATE TABLE IF NOT EXISTS request_session ("
     " request_id TEXT NOT NULL,"
-    " platform TEXT, chat_id TEXT, thread_id TEXT, session_id TEXT,"
+    " platform TEXT, chat_id TEXT, thread_id TEXT, session_id TEXT, sender_email TEXT,"
     " linked_at INTEGER NOT NULL,"
     " PRIMARY KEY (request_id, platform, chat_id, thread_id));"
     "CREATE TABLE IF NOT EXISTS request_event ("
@@ -71,6 +81,10 @@ def _connect(store_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(store_path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    try:
+        conn.execute("ALTER TABLE request_session ADD COLUMN sender_email TEXT")
+    except sqlite3.OperationalError:
+        pass  # already has the column — CREATE TABLE IF NOT EXISTS skips a pre-existing file
     return conn
 
 
@@ -81,16 +95,30 @@ def _now() -> int:
     return time.time_ns() // 1000
 
 
-def _session_row(request_id: str, link: dict) -> tuple:
+def _session_row(request_id: str, link: dict, sender_email: str) -> tuple:
     link = link or {}
-    return (request_id, *(link.get(k) or None for k in SESSION_LINK_FIELDS), _now())
+    return (request_id, *(link.get(k) or None for k in SESSION_LINK_FIELDS), sender_email, _now())
 
 
 def _sessions_for(conn: sqlite3.Connection, request_id: str) -> list:
     rows = conn.execute(
-        "SELECT platform, chat_id, thread_id, session_id, linked_at FROM request_session "
-        "WHERE request_id = ? ORDER BY linked_at", (request_id,)).fetchall()
+        "SELECT platform, chat_id, thread_id, session_id, sender_email, linked_at FROM "
+        "request_session WHERE request_id = ? ORDER BY linked_at", (request_id,)).fetchall()
     return [dict(r) for r in rows]
+
+
+def linked_senders(request_row: dict) -> set:
+    """The lowercased `sender_email` of every session already linked to
+    *request_row* (its own `linked_sessions`), including whoever opened
+    it. Identity-based, not room-coordinate-based — the correct check for
+    "has this exact person already gone through a confirmed `link`,"
+    unlike matching on (platform, chat_id, thread_id) alone, which can't
+    tell two different people apart on a platform where chat_id is shared
+    (code review, issue 04: a thread_id-based version of this check
+    reopened issue 03's cross-conversation leak, then over-corrected into
+    refusing legitimate email callers, whose thread_id is always absent)."""
+    return {(s.get("sender_email") or "").lower() for s in request_row.get("linked_sessions") or ()
+           if s.get("sender_email")}
 
 
 def _row(conn: sqlite3.Connection, request_id: str):
@@ -98,6 +126,7 @@ def _row(conn: sqlite3.Connection, request_id: str):
     if not row:
         return None
     out = dict(row)
+    out["facts"] = json.loads(out["facts"]) if out["facts"] else {}
     out["linked_sessions"] = _sessions_for(conn, request_id)
     return out
 
@@ -117,12 +146,13 @@ def open_request(store_path: str, sender_email: str, topic: str, session_link: d
         with conn:
             conn.execute(
                 "INSERT INTO request (request_id, sender_email, topic, anchor_doctype, "
-                "anchor_name, agent_status, requester_confirmed, created_at, updated_at, "
-                "closed_at) VALUES (?, ?, ?, ?, ?, 'open', NULL, ?, ?, NULL)",
+                "anchor_name, agent_status, requester_confirmed, facts, created_at, updated_at, "
+                "closed_at) VALUES (?, ?, ?, ?, ?, 'open', NULL, NULL, ?, ?, NULL)",
                 (request_id, sender_email, topic, anchor_doctype, anchor_name, now, now))
             conn.execute(
                 "INSERT INTO request_session (request_id, platform, chat_id, thread_id, "
-                "session_id, linked_at) VALUES (?, ?, ?, ?, ?, ?)", _session_row(request_id, session_link))
+                "session_id, sender_email, linked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                _session_row(request_id, session_link, sender_email))
         return _row(conn, request_id)
     finally:
         conn.close()
@@ -140,10 +170,13 @@ def get_request(store_path: str, request_id: str):
         conn.close()
 
 
-def link_session(store_path: str, request_id: str, session_link: dict):
-    """Attach *session_link* to an existing request. Returns the updated row,
-    or None when *request_id* does not exist. Idempotent: linking the same
-    session twice is a no-op, not an error."""
+def link_session(store_path: str, request_id: str, session_link: dict, sender_email: str):
+    """Attach *session_link* to an existing request, recording *sender_email*
+    as whoever this session belongs to. Returns the updated row, or None
+    when *request_id* does not exist. Idempotent: linking the same
+    session twice is a no-op, not an error (the second call's sender_email
+    is not written over the first's, consistent with every other
+    first-write-wins field in this registry)."""
     conn = _connect(store_path)
     try:
         if conn.execute("SELECT 1 FROM request WHERE request_id = ?", (request_id,)).fetchone() is None:
@@ -151,7 +184,8 @@ def link_session(store_path: str, request_id: str, session_link: dict):
         with conn:
             conn.execute(
                 "INSERT OR IGNORE INTO request_session (request_id, platform, chat_id, thread_id, "
-                "session_id, linked_at) VALUES (?, ?, ?, ?, ?, ?)", _session_row(request_id, session_link))
+                "session_id, sender_email, linked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                _session_row(request_id, session_link, sender_email))
         return _row(conn, request_id)
     finally:
         conn.close()
@@ -182,6 +216,45 @@ def update_status(store_path: str, request_id: str, *, agent_status: str = None,
             if requester_confirmed is not None:
                 conn.execute("UPDATE request SET requester_confirmed = ?, updated_at = ? "
                             "WHERE request_id = ?", (requester_confirmed, now, request_id))
+        return _row(conn, request_id)
+    finally:
+        conn.close()
+
+
+def merge_facts(store_path: str, request_id: str, facts: dict) -> dict:
+    """Merge *facts* into the request's existing `facts` bag — new keys
+    added, keys in common overwritten, keys not mentioned left alone.
+    Returns the updated row, or None when *request_id* does not exist.
+
+    This is the agents issue 04 fix for "redid finished discovery work after a
+    context compaction": resolved IDs (a supplier, an item, an invoice)
+    live here, in gateway-side sqlite, not in the LLM's own context — a
+    compaction summary cannot lose them because it never held them.
+
+    Unlike this module's other writers, this one's correctness depends on
+    the value it read (the merge base) — two concurrent callers (the
+    Requester and an input-provider both resolving facts around the same
+    time, exactly issue 03's scenario) could otherwise both read the same
+    old blob and one's merge would silently overwrite the other's. `BEGIN
+    IMMEDIATE` takes the write lock before the read, not after, so the
+    second caller's transaction waits instead of racing (code review)."""
+    conn = _connect(store_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT facts FROM request WHERE request_id = ?",
+                               (request_id,)).fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            current = json.loads(row["facts"]) if row["facts"] else {}
+            current.update(facts or {})
+            conn.execute("UPDATE request SET facts = ?, updated_at = ? WHERE request_id = ?",
+                        (json.dumps(current), _now(), request_id))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         return _row(conn, request_id)
     finally:
         conn.close()

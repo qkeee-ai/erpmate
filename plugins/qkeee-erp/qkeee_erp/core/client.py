@@ -1478,7 +1478,7 @@ def _role_for(row: dict, sender_email: str) -> dict:
 
 
 def _log_request_event(request_id: str, action: str, sender_email: str, note: str = None) -> None:
-    """Best-effort forensic trail (adversarial review, issue 03): never
+    """Best-effort forensic trail (adversarial review, agents issue 03): never
     blocks or fails the caller's actual request — a logging gap is not a
     reason to refuse a Request Registry call that otherwise succeeded."""
     try:
@@ -1532,30 +1532,35 @@ def _existing_request(store_path: str, request_id: str) -> dict:
     return row
 
 
+def _redact_unless_requester(row: dict) -> dict:
+    """Strip `linked_sessions` from *row* for a non-Requester caller
+    (adversarial review, agents issue 03: anyone who can produce a `request_id`
+    — including by overhearing it, since SKILL.md has the agent say it
+    aloud — could otherwise read back every other participant's
+    platform/chat_id/session_id). `topic`/`anchor_doctype`/`anchor_name`/
+    `facts` stay visible: an input-provider needs them to confirm "yes,
+    this is the ask I mean" and to contribute — that is the whole point
+    of being allowed to link or add facts at all."""
+    if row["your_role"] == "requester":
+        return row
+    row = dict(row)
+    row.pop("linked_sessions", None)
+    return row
+
+
 def request_link(request_id: str, sender_email: str, session_link: dict, note: str = None) -> dict:
-    """Attach *session_link* to *request_id*. Any Requester may link their
-    own session to any known request — that is literally how an
+    """Attach *session_link* to *request_id*, recording *sender_email* as
+    whoever this session belongs to. Any Requester may link their own
+    session to any known request — that is literally how an
     input-provider joins another Requester's ask (agents issue 03); there
     is no ownership check here, unlike `request_status()` below. The
     caller (erp_tools.ErpTools) must still have a human confirm first,
     same as `request_lookup()`/`request_in_session()`'s results — this
-    function performs the link, it does not decide whether to.
-
-    For a caller who is NOT this request's Requester, `linked_sessions`
-    is stripped from the result (adversarial review, issue 03: anyone who
-    can produce a `request_id` — including by overhearing it, since
-    SKILL.md has the agent say it aloud — could otherwise read back every
-    other participant's platform/chat_id/session_id just by linking their
-    own, unrelated session to it). `topic`/`anchor_doctype`/`anchor_name`
-    stay visible: an input-provider needs them to confirm "yes, this is
-    the ask I mean" — that is this action's whole point."""
+    function performs the link, it does not decide whether to."""
     def _do(store_path):
         _existing_request(store_path, request_id)
-        return request_registry.link_session(store_path, request_id, session_link)
-    row = _role_for(_request_registry_call(_do), sender_email)
-    if row["your_role"] != "requester":
-        row = dict(row)
-        row.pop("linked_sessions", None)
+        return request_registry.link_session(store_path, request_id, session_link, sender_email.lower())
+    row = _redact_unless_requester(_role_for(_request_registry_call(_do), sender_email))
     _log_request_event(request_id, "link", sender_email, note)
     return row
 
@@ -1580,6 +1585,35 @@ def request_status(request_id: str, sender_email: str, *, agent_status: str = No
             raise InvalidArgumentsError(str(e))
     row = _role_for(_request_registry_call(_do), sender_email)
     _log_request_event(request_id, "status", sender_email, note)
+    return row
+
+
+def request_facts(request_id: str, sender_email: str, facts: dict, note: str = None) -> dict:
+    """Merge *facts* (resolved IDs: a supplier, an item, a known write-error
+    fix) into *request_id* — a durable bag that survives an LCM context
+    compaction because it never lived in the LLM's own context (agents
+    issue 04). Allowed for the Requester, or for anyone who has already
+    `link`ed — identity-based (`sender_email` against `linked_senders()`),
+    not a (platform, chat_id, thread_id) comparison: the latter can't
+    tell two different people apart on a platform where `chat_id` is
+    shared, and excluding a missing `thread_id` to close that gap would
+    (and in an earlier version of this function, did) also exclude every
+    legitimate email caller, whose `thread_id` is always absent (code
+    review, agents issue 04). NOT open to a bare `request_id` the way
+    `request_link()` itself is: that would let a stranger corrupt another
+    Requester's task state just by guessing or overhearing an id. Linking
+    first (a confirmed, logged step) is the proof of legitimate
+    participation this one requires."""
+    def _do(store_path):
+        row = _existing_request(store_path, request_id)
+        email = sender_email.lower()
+        if row["sender_email"] != email and email not in request_registry.linked_senders(row):
+            raise RequestOwnershipError(
+                f"Refusing: this session is not linked to request {request_id} and is not its "
+                f"Requester. Call action=link first, once confirmed. Nothing was updated.")
+        return request_registry.merge_facts(store_path, request_id, facts)
+    row = _redact_unless_requester(_role_for(_request_registry_call(_do), sender_email))
+    _log_request_event(request_id, "facts", sender_email, note)
     return row
 
 

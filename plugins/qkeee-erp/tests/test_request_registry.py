@@ -35,6 +35,10 @@ class OpenRequestTests(RegistryTestCase):
         self.assertEqual(len(row["linked_sessions"]), 1)
         self.assertEqual(row["linked_sessions"][0]["platform"], "email")
 
+    def test_open_starts_with_an_empty_facts_dict(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        self.assertEqual(row["facts"], {})
+
     def test_open_with_anchor_record(self):
         row = rr.open_request(self.store, ALICE, "PO for Acme", EMAIL_LINK,
                               anchor_doctype="Purchase Order", anchor_name="PO-0001")
@@ -49,19 +53,25 @@ class OpenRequestTests(RegistryTestCase):
 class LinkSessionTests(RegistryTestCase):
     def test_link_attaches_a_second_channel(self):
         row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
-        linked = rr.link_session(self.store, row["request_id"], CHAT_LINK)
+        linked = rr.link_session(self.store, row["request_id"], CHAT_LINK, BOB)
         self.assertEqual(len(linked["linked_sessions"]), 2)
         platforms = {s["platform"] for s in linked["linked_sessions"]}
         self.assertEqual(platforms, {"email", "google_chat"})
 
+    def test_link_records_the_linking_senders_email(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        linked = rr.link_session(self.store, row["request_id"], CHAT_LINK, BOB)
+        emails = {s["sender_email"] for s in linked["linked_sessions"]}
+        self.assertEqual(emails, {ALICE, BOB})
+
     def test_link_same_session_twice_is_idempotent(self):
         row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
-        rr.link_session(self.store, row["request_id"], CHAT_LINK)
-        linked_again = rr.link_session(self.store, row["request_id"], CHAT_LINK)
+        rr.link_session(self.store, row["request_id"], CHAT_LINK, BOB)
+        linked_again = rr.link_session(self.store, row["request_id"], CHAT_LINK, BOB)
         self.assertEqual(len(linked_again["linked_sessions"]), 2)
 
     def test_link_to_unknown_request_returns_none(self):
-        self.assertIsNone(rr.link_session(self.store, "REQ-NOPE", CHAT_LINK))
+        self.assertIsNone(rr.link_session(self.store, "REQ-NOPE", CHAT_LINK, BOB))
 
 
 class UpdateStatusTests(RegistryTestCase):
@@ -82,6 +92,53 @@ class UpdateStatusTests(RegistryTestCase):
         updated = rr.update_status(self.store, row["request_id"], requester_confirmed="confirmed")
         self.assertEqual(updated["agent_status"], "open")
         self.assertEqual(updated["requester_confirmed"], "confirmed")
+
+
+class LinkedSendersTests(RegistryTestCase):
+    """Code review, issue 04: identity-based "already linked" check,
+    replacing an earlier (platform, chat_id, thread_id) comparison that
+    couldn't tell two different people apart on a shared-chat_id platform."""
+
+    def test_includes_the_opener(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        self.assertEqual(rr.linked_senders(row), {ALICE})
+
+    def test_includes_a_later_linker(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        linked = rr.link_session(self.store, row["request_id"], CHAT_LINK, BOB)
+        self.assertEqual(rr.linked_senders(linked), {ALICE, BOB})
+
+    def test_someone_who_never_linked_is_not_included(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        self.assertNotIn("priya@org.com", rr.linked_senders(row))
+
+    def test_is_case_insensitive(self):
+        row = rr.open_request(self.store, "Alice@Org.com", "topic", EMAIL_LINK)
+        self.assertEqual(rr.linked_senders(row), {"alice@org.com"})
+
+
+class MergeFactsTests(RegistryTestCase):
+    """Issue 04: a durable, compaction-proof bag of resolved task state."""
+
+    def test_facts_are_added(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        updated = rr.merge_facts(self.store, row["request_id"], {"supplier_id": "SUP-001"})
+        self.assertEqual(updated["facts"], {"supplier_id": "SUP-001"})
+
+    def test_new_facts_merge_with_existing_ones(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        rr.merge_facts(self.store, row["request_id"], {"supplier_id": "SUP-001"})
+        updated = rr.merge_facts(self.store, row["request_id"], {"item_code": "ITEM-42"})
+        self.assertEqual(updated["facts"], {"supplier_id": "SUP-001", "item_code": "ITEM-42"})
+
+    def test_a_repeated_key_overwrites_only_that_key(self):
+        row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
+        rr.merge_facts(self.store, row["request_id"], {"supplier_id": "SUP-001", "item_code": "OLD"})
+        updated = rr.merge_facts(self.store, row["request_id"], {"item_code": "ITEM-42"})
+        self.assertEqual(updated["facts"], {"supplier_id": "SUP-001", "item_code": "ITEM-42"})
+
+    def test_merge_on_unknown_request_returns_none(self):
+        self.assertIsNone(rr.merge_facts(self.store, "REQ-NOPE", {"a": "b"}))
 
     def test_invalid_agent_status_raises(self):
         row = rr.open_request(self.store, ALICE, "topic", EMAIL_LINK)
@@ -160,7 +217,7 @@ class OpenInSessionTests(RegistryTestCase):
         row = rr.open_request(self.store, ALICE, "alice's ask", EMAIL_LINK)
         bob_link = {"platform": "google_chat", "chat_id": "spaces/A", "thread_id": "threads/T",
                    "session_id": "s-bob"}
-        rr.link_session(self.store, row["request_id"], bob_link)
+        rr.link_session(self.store, row["request_id"], bob_link, BOB)
         rows = rr.open_in_session(self.store, "google_chat", "spaces/A", "threads/T")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["request_id"], row["request_id"])

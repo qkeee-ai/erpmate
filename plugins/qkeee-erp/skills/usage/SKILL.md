@@ -17,7 +17,7 @@ every agent that has the tools.
 | `erp_report` | Run a built-in query report. |
 | `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight`, `promotion_plan`, `bot_permissions`. |
 | `erp_execute_write` | `list_ops`, `render`, `execute` (one `op`, or a `batch`). The only write path. |
-| `erp_request` | `open`, `lookup`, `in_thread`, `link`, `status`. Tracks one distinct ask across channels and participants — gateway bookkeeping, not an ERPNext call. |
+| `erp_request` | `open`, `lookup`, `in_thread`, `link`, `status`, `facts`. Tracks one distinct ask across channels, participants, and compaction — gateway bookkeeping, not an ERPNext call. |
 
 ## 1. Never reach ERPNext another way
 
@@ -143,7 +143,14 @@ it again. A refusal that says "no email was sent" means nothing went out.
 
 - `write_failure`: ERPNext rejected the write and named the missing or
   invalid fields. Show them, ask the user for the values, and render
-  again. Never fill a value the user did not give.
+  again. Never fill a value the user did not give. The moment you have a
+  working fix (the corrected args went through), merge it into this
+  task's `erp_request` `facts` right away — not at end-of-task bookkeeping
+  — so a context compaction (or a second occurrence of the identical
+  error before compaction) finds the fix already written down instead of
+  making you relearn it (see §9's `facts`; this is agents issue 04's
+  fix for exactly that, confirmed against a real session where the same
+  `erp_execute_write` validation error was independently relearned twice).
 - `outcome_unknown`: the write may or may not have happened. Read the
   record again before any retry.
 - A submit or cancel counts as done only with `state_confirmed: true`:
@@ -156,14 +163,17 @@ it again. A refusal that says "no email was sent" means nothing went out.
 - `warnings` on a successful write (for example an audit-log problem):
   tell the user. Do not report a plain success.
 
-## 9. Track a request across channels and participants
+## 9. Track a request across channels, participants, and compaction
 
 The Requester (whoever opened the ask) may continue it from more than
 one channel (email, chat), and other people may join the same ask from
 inside a shared thread (a Google Chat space/thread already puts everyone
 in it in your same session; email does not yet). `erp_request` tracks
-one ask across both. Every result carries `your_role` for that ask:
-`"requester"` (whoever opened it) or `"input_provider"` (anyone else).
+one ask across both, AND across a context compaction mid-task — its
+state lives in gateway-side storage, never in your own context, so
+nothing here is lost when a compaction summary replaces your history.
+Every result carries `your_role` for that ask: `"requester"` (whoever
+opened it) or `"input_provider"` (anyone else).
 
 - At the start of a new ask (not a continuation you already recognise),
   call `erp_request` `action=open` with a short `topic` (e.g. "GST report
@@ -204,3 +214,16 @@ one ask across both. Every result carries `your_role` for that ask:
   to credit the original Requester (e.g. a "raised by" note), say so in
   the write's own text/comment — that is business content, not a
   permission change, and nothing here grants one.
+- **`action=facts` is where resolved task state lives, specifically so a
+  context compaction can't lose it.** For any task with real discovery
+  work (a supplier, item, or invoice you had to look up), open an
+  `erp_request` for it and merge each resolved id in as you find it —
+  `{"supplier_id": "SUP-001"}`, `{"invoice_name": "ACC-SINV-2026-00042"}`.
+  **Before repeating a lookup you suspect you already did** (most likely
+  right after a compaction, when the narrative summary feels thinner than
+  the work you remember doing), check this request's `facts` first — every
+  `open`/`lookup`/`in_thread`/`link`/`status` result already carries them,
+  no separate read needed. Merging is additive (new keys add, named keys
+  overwrite, nothing else is touched), so it's always safe to call again.
+  `facts` is open to the Requester and to anyone already `link`ed — call
+  `link` first if you're not either.

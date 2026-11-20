@@ -532,6 +532,48 @@ class RequestToolTests(ToolTestCase):
         self.assertEqual(events[1][1], "priya@org.com")
         self.assertEqual(events[2][2], "requester confirmed by reply")
 
+    def test_facts_merge_for_the_requester(self):
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(self.tools(SENDER), "erp_request",
+                        {"action": "facts", "request_id": opened["result"]["request_id"],
+                         "facts": {"supplier_id": "SUP-001"}})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["result"]["facts"], {"supplier_id": "SUP-001"})
+
+    def test_facts_needs_a_non_empty_object(self):
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(self.tools(SENDER), "erp_request",
+                        {"action": "facts", "request_id": opened["result"]["request_id"], "facts": {}})
+        self.assertFalse(out["ok"])
+
+    def test_facts_from_an_unlinked_sender_is_refused(self):
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        out = self.call(self.tools(PRIYA), "erp_request",
+                        {"action": "facts", "request_id": opened["result"]["request_id"],
+                         "facts": {"a": "b"}})
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["refused"])
+
+    def test_facts_from_a_linked_input_provider_succeeds(self):
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        request_id = opened["result"]["request_id"]
+        self.call(self.tools(PRIYA), "erp_request", {"action": "link", "request_id": request_id})
+        out = self.call(self.tools(PRIYA), "erp_request",
+                        {"action": "facts", "request_id": request_id, "facts": {"item_code": "I-1"}})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["result"]["facts"], {"item_code": "I-1"})
+
+    def test_facts_survive_being_read_back_via_open_result_shape(self):
+        # The point of issue 04: facts live on the row, so every later
+        # open/lookup/in_thread/link/status result already carries them --
+        # no separate "get" action needed.
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        request_id = opened["result"]["request_id"]
+        self.call(self.tools(SENDER), "erp_request",
+                 {"action": "facts", "request_id": request_id, "facts": {"supplier_id": "SUP-001"}})
+        out = self.call(self.tools(SENDER), "erp_request", {"action": "lookup"})
+        self.assertEqual(out["result"]["requests"][0]["facts"], {"supplier_id": "SUP-001"})
+
 
 if __name__ == "__main__":
     unittest.main()

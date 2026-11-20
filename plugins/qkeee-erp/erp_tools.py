@@ -19,11 +19,13 @@ roles and live metadata), erp_execute_write (list_ops, render, execute) and
 erp_request. Writes are only in erp_execute_write, so a platform toolset or
 a hook can target them by name.
 
-erp_request tracks a Request Registry across channels (agents issue 02)
-and participants (issue 03): it is gateway-side bookkeeping, not an
-ERPNext read or write, so it is exempt from `mode` and does not take
-`tag` — but it still binds only to the gateway session's sender email,
-same as every other tool here.
+erp_request tracks a Request Registry across channels (agents issue 02),
+participants (agents issue 03), and context compaction (agents issue 04
+— `facts` lives in this registry's own sqlite store, never in the LLM's
+context, so a compaction can't lose it): it is gateway-side bookkeeping,
+not an ERPNext read or write, so it is exempt from `mode` and does not
+take `tag` — but it still binds only to the gateway session's sender
+email, same as every other tool here.
 """
 
 import json
@@ -202,11 +204,17 @@ SCHEMAS = {
             "expected; only the Requester's own write actions are gated). status: Requester-only "
             "— set agent_status (your own belief) and/or requester_confirmed (only after the "
             "Requester actually answered your own confirm-check — never set it on their behalf); "
-            "refused if the caller is not this request's Requester. " + _NO_REQUESTER_NOTE),
+            "refused if the caller is not this request's Requester. facts: merge resolved task "
+            "state (e.g. {\"supplier_id\": \"SUP-001\"}) into the request — this survives a "
+            "context compaction, so check it before repeating a discovery lookup you may have "
+            "already done pre-compaction, and merge in a write error's known fix the moment you "
+            "resolve it so you (or a post-compaction you) never relearn it; needs link first for "
+            "anyone but the Requester. " + _NO_REQUESTER_NOTE),
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["open", "lookup", "in_thread", "link", "status"]},
+                "action": {"type": "string",
+                          "enum": ["open", "lookup", "in_thread", "link", "status", "facts"]},
                 "topic": {"type": "string", "description": "open: short human label for the ask, "
                                                             "e.g. 'GST report — Oct 2026'."},
                 "anchor_doctype": {"type": "string", "description": "open: the ERPNext DocType "
@@ -215,16 +223,20 @@ SCHEMAS = {
                                                                      "ask like an MIS/GST report)."},
                 "anchor_name": {"type": "string", "description": "open: that record's name, when "
                                                                   "anchor_doctype is given."},
-                "request_id": {"type": "string", "description": "link, status: the request to act "
-                                                                 "on."},
+                "request_id": {"type": "string", "description": "link, status, facts: the request "
+                                                                 "to act on."},
                 "agent_status": {"type": "string", "enum": ["open", "in_progress", "done"],
                                  "description": "status: your own belief about this request."},
                 "requester_confirmed": {"type": "string", "enum": ["confirmed", "disputed"],
                                         "description": "status: set only after the Requester "
                                                        "answered your confirm-check."},
-                "note": {"type": "string", "description": "open, link, status: one line on why — "
-                                                          "the forensic trail for this action "
-                                                          "(e.g. the Requester's own words "
+                "facts": {"type": "object", "description": "facts: key/value pairs to merge into "
+                                                           "this request's resolved state. New "
+                                                           "keys add, existing keys overwrite, "
+                                                           "other keys are left alone."},
+                "note": {"type": "string", "description": "open, link, status, facts: one line on "
+                                                          "why — the forensic trail for this "
+                                                          "action (e.g. the Requester's own words "
                                                           "confirming done). Optional, but write "
                                                           "one whenever there's a real answer "
                                                           "behind the action, not a guess."},
@@ -600,7 +612,7 @@ class ErpTools:
                             f"report a plain success.")
         return _ok(result, warnings=warnings) if warnings else _ok(result)
 
-    # -- cross-channel, cross-participant request tracking (agents issues 02/03) --
+    # -- request tracking: channels, participants, compaction (agents issues 02/03/04) --
     #
     # Thin here on purpose: every CRUD call goes through client.py
     # (request_open/lookup/link/status), the same encapsulation boundary
@@ -648,4 +660,10 @@ class ErpTools:
                                              agent_status=args.get("agent_status"),
                                              requester_confirmed=args.get("requester_confirmed"),
                                              note=args.get("note")))
+        if action == "facts":
+            self._need(args, "request_id")
+            if not isinstance(args.get("facts"), dict) or not args["facts"]:
+                raise client.ConnectorError("facts needs a non-empty object of key/value pairs.")
+            return _ok(client.request_facts(args["request_id"], requester, args["facts"],
+                                            note=args.get("note")))
         raise client.ConnectorError(f"unknown erp_request action {action!r}")
