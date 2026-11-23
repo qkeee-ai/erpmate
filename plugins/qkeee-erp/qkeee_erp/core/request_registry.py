@@ -48,7 +48,20 @@ from .kanban_origin import plugin_data_dir
 STORE_FILENAME = "request_registry.db"
 AGENT_STATUSES = ("open", "in_progress", "done")
 REQUESTER_CONFIRMATIONS = ("confirmed", "disputed")
+# Issue 11 §7: facts.pending.type's allowed values — named once here (not
+# re-derived in request_report.py's bucket grouping and text rendering)
+# the same way AGENT_STATUSES/REQUESTER_CONFIRMATIONS already are.
+PENDING_TYPES = ("approval", "access", "clarification")
 SESSION_LINK_FIELDS = ("platform", "chat_id", "thread_id", "session_id")
+
+# Issue 11 (weekly report), D11-b: the company's own work-week geography
+# (India IT/services: Mon-Fri, Sat/Sun off), not a hardcoded "7 calendar
+# days". `datetime.weekday()`: Monday=0 .. Sunday=6. Named here, once, so
+# a future profile in a different geography (different weekend, different
+# week-start) is a one-line change in this module, not a search-and-replace
+# across every caller that computes a week boundary or a staleness age.
+WORK_WEEK_WEEKDAYS = frozenset({0, 1, 2, 3, 4})
+WEEK_START_WEEKDAY = 0  # Monday — also D11-a's report window boundary.
 
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS request ("
@@ -69,6 +82,21 @@ _SCHEMA = (
     " id INTEGER PRIMARY KEY AUTOINCREMENT,"
     " request_id TEXT NOT NULL, action TEXT NOT NULL, sender_email TEXT NOT NULL,"
     " note TEXT, created_at INTEGER NOT NULL);"
+    # Issue 11 §8: hermes-agent's `sessions.*_tokens`/`*_cost_usd` are
+    # lifetime-cumulative per session_id, not per-call — there is no
+    # timestamped row to filter by a report window. This is the report's
+    # own delta-over-cumulative checkpoint (same principle as
+    # agent/turn_usage.py's own `+= _cost_delta`): one row per session_id,
+    # the cumulative totals as of the last time a report run accounted for
+    # them. A report computes delta = current cumulative - this row, then
+    # (only for the authoritative scheduled run, see request_report.py)
+    # overwrites this row with the new cumulative.
+    "CREATE TABLE IF NOT EXISTS session_cost_checkpoint ("
+    " session_id TEXT PRIMARY KEY,"
+    " tokens_in_as_of INTEGER NOT NULL DEFAULT 0,"
+    " tokens_out_as_of INTEGER NOT NULL DEFAULT 0,"
+    " cost_as_of_usd REAL NOT NULL DEFAULT 0,"
+    " checkpointed_at INTEGER NOT NULL);"
 )
 
 
@@ -304,6 +332,101 @@ def open_in_session(store_path: str, platform: str, chat_id: str, thread_id: str
             "AND rs.thread_id = ? AND r.agent_status != 'done' ORDER BY r.updated_at DESC LIMIT ?",
             (platform, chat_id, thread_id, int(limit))).fetchall()
         return [_row(conn, r["request_id"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def requests_in_window(store_path: str, since_us: int, until_us: int) -> list:
+    """Every request touched inside `[since_us, until_us)` — any sender,
+    any status (agents issue 11: the weekly report needs every request in
+    the window, unlike `open_for_sender()`/`open_in_session()`, which both
+    filter to `agent_status != 'done'` and scope to one sender or one
+    room — correct for their surfacing-only job, wrong here).
+
+    "Touched" means `created_at`, `updated_at`, or `closed_at` falls in
+    the window: a request appears because it was opened, closed, or
+    merely touched (a `facts`/`status` call bumps `updated_at`) in-window
+    — `updated_at` already covers every write this module makes, so no
+    separate `request_event` join is needed. Each row carries
+    `linked_sessions`, same shape as every other reader here."""
+    if not os.path.exists(store_path):
+        return []
+    conn = _connect(store_path)
+    try:
+        rows = conn.execute(
+            "SELECT request_id FROM request WHERE "
+            "(created_at >= ? AND created_at < ?) OR "
+            "(updated_at >= ? AND updated_at < ?) OR "
+            "(closed_at IS NOT NULL AND closed_at >= ? AND closed_at < ?) "
+            "ORDER BY created_at",
+            (since_us, until_us, since_us, until_us, since_us, until_us)).fetchall()
+        return [_row(conn, r["request_id"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def open_requests(store_path: str) -> list:
+    """Every request that is currently `open`/`in_progress`, any sender,
+    no window — a backlog snapshot (agents issue 11 §7's pending/
+    dependencies summary, and §3's carried-over/stale-open metrics), as
+    opposed to `requests_in_window()`'s weekly delta. Each row carries
+    `linked_sessions`."""
+    if not os.path.exists(store_path):
+        return []
+    conn = _connect(store_path)
+    try:
+        rows = conn.execute(
+            "SELECT request_id FROM request WHERE agent_status != 'done' "
+            "ORDER BY created_at").fetchall()
+        return [_row(conn, r["request_id"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_cost_checkpoints(store_path: str, session_ids) -> dict:
+    """`{session_id: {"tokens_in_as_of", "tokens_out_as_of",
+    "cost_as_of_usd", "checkpointed_at"}}` for every id in *session_ids*
+    that has a checkpoint row yet. A missing store or a session_id never
+    checkpointed before is simply absent from the result — the caller's
+    delta is then the session's full cumulative total (its first report
+    run), not an error."""
+    session_ids = [s for s in (session_ids or ()) if s]
+    if not session_ids or not os.path.exists(store_path):
+        return {}
+    conn = _connect(store_path)
+    try:
+        placeholders = ",".join("?" * len(session_ids))
+        rows = conn.execute(
+            f"SELECT session_id, tokens_in_as_of, tokens_out_as_of, cost_as_of_usd, "
+            f"checkpointed_at FROM session_cost_checkpoint WHERE session_id IN ({placeholders})",
+            session_ids).fetchall()
+        return {r["session_id"]: dict(r) for r in rows}
+    finally:
+        conn.close()
+
+
+def set_cost_checkpoints(store_path: str, checkpoints: dict) -> None:
+    """Overwrite the checkpoint row for every `session_id` key in
+    *checkpoints* (each value a `{"tokens_in_as_of", "tokens_out_as_of",
+    "cost_as_of_usd"}` dict) with the session's current cumulative totals
+    — the authoritative scheduled report run's job only (agents issue 11
+    §8): an on-demand/ad-hoc pull must not advance this cursor, or the
+    next scheduled run would silently skip the delta the ad-hoc pull
+    already consumed."""
+    if not checkpoints:
+        return
+    conn = _connect(store_path)
+    try:
+        now = _now()
+        with conn:
+            conn.executemany(
+                "INSERT INTO session_cost_checkpoint (session_id, tokens_in_as_of, "
+                "tokens_out_as_of, cost_as_of_usd, checkpointed_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET tokens_in_as_of = excluded.tokens_in_as_of, "
+                "tokens_out_as_of = excluded.tokens_out_as_of, cost_as_of_usd = excluded.cost_as_of_usd, "
+                "checkpointed_at = excluded.checkpointed_at",
+                [(sid, v.get("tokens_in_as_of") or 0, v.get("tokens_out_as_of") or 0,
+                 v.get("cost_as_of_usd") or 0.0, now) for sid, v in checkpoints.items()])
     finally:
         conn.close()
 

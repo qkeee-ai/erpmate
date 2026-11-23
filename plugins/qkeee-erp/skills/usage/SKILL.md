@@ -17,7 +17,7 @@ every agent that has the tools.
 | `erp_report` | Run a built-in query report. |
 | `erp_discover` | `health`, `whoami`, `roles`, `apps`, `modules`, `meta`, `resolve`, `preflight`, `promotion_plan`, `bot_permissions`. |
 | `erp_execute_write` | `list_ops`, `render`, `execute` (one `op`, or a `batch`). The only write path. |
-| `erp_request` | `open`, `lookup`, `in_thread`, `link`, `status`, `facts`. Tracks one distinct ask across channels, participants, and compaction — gateway bookkeeping, not an ERPNext call. |
+| `erp_request` | `open`, `lookup`, `in_thread`, `link`, `status`, `facts`, `org_report` (admin-only). Tracks one distinct ask across channels, participants, and compaction — gateway bookkeeping, not an ERPNext call. |
 
 ## 1. Never reach ERPNext another way
 
@@ -227,3 +227,20 @@ opened it) or `"input_provider"` (anyone else).
   overwrite, nothing else is touched), so it's always safe to call again.
   `facts` is open to the Requester and to anyone already `link`ed — call
   `link` first if you're not either.
+- **When you identify a request is stuck on someone else, not on you**,
+  merge a `pending` key into its `facts`, so the weekly/`org_report`
+  backlog section can show why it's stuck, not just that it is:
+  `facts={"pending": {"type": "approval"|"access"|"clarification",
+  "detail": "waiting on Requester's PO sign-off", "since": "<ISO8601, "
+  "when you identified it>"}}`. When the blocker changes, merge a new
+  `pending` with the updated `detail`/`since`. A request with no
+  `pending` recorded still shows up in that report, in its own "no
+  blocker recorded" bucket — check whether it is actually stuck before
+  leaving it there.
+- **`action=org_report` is admin-only** — an org-wide received-vs-
+  completed and token/cost summary, refused with a `refused` result for
+  anyone whose email is not a configured admin for this profile. Call it
+  only when a human explicitly asks for these numbers by name ("send me
+  last week's/last month's request numbers"), never speculatively. A
+  refusal there means exactly that: report it and stop, do not retry
+  with a different `period`/`since`/`until`.

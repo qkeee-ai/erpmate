@@ -575,5 +575,59 @@ class RequestToolTests(ToolTestCase):
         self.assertEqual(out["result"]["requests"][0]["facts"], {"supplier_id": "SUP-001"})
 
 
+class OrgReportToolTests(RequestToolTests):
+    """erp_request action=org_report (agents issue 11 §9): admin-gated,
+    cross-sender — the one erp_request action not scoped to the caller's
+    own identity."""
+
+    def test_non_admin_is_refused(self):
+        with patch.object(client, "_qkeee_env", return_value={}):
+            out = self.call(self.tools(SENDER), "erp_request", {"action": "org_report"})
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["refused"])
+
+    def test_configured_admin_succeeds(self):
+        env = {"QKEEE_ERP_DEFAULT_ADMIN_EMAIL": "nikhil@org.com"}
+        with patch.object(client, "_qkeee_env", return_value=env):
+            out = self.call(self.tools(SENDER), "erp_request", {"action": "org_report"})
+        self.assertTrue(out["ok"])
+        self.assertIn("metrics", out["result"])
+
+    def test_period_month_is_forwarded(self):
+        env = {"QKEEE_ERP_DEFAULT_ADMIN_EMAIL": "nikhil@org.com"}
+        with patch.object(client, "_qkeee_env", return_value=env), \
+             patch.object(client.request_report, "build_report",
+                          wraps=client.request_report.build_report) as build_report:
+            out = self.call(self.tools(SENDER), "erp_request", {"action": "org_report", "period": "month"})
+        self.assertTrue(out["ok"])
+        since, until = client.request_report.last_completed_month_window()
+        self.assertEqual(build_report.call_args[0][2:4], (since, until))
+
+    def test_explicit_since_until_are_parsed_as_utc_iso8601(self):
+        env = {"QKEEE_ERP_DEFAULT_ADMIN_EMAIL": "nikhil@org.com"}
+        with patch.object(client, "_qkeee_env", return_value=env):
+            out = self.call(self.tools(SENDER), "erp_request",
+                            {"action": "org_report", "since": "2026-01-01T00:00:00",
+                             "until": "2026-01-02T00:00:00"})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["result"]["window"],
+                         {"since_us": 1767225600000000, "until_us": 1767312000000000})
+
+    def test_since_without_until_is_invalid(self):
+        env = {"QKEEE_ERP_DEFAULT_ADMIN_EMAIL": "nikhil@org.com"}
+        with patch.object(client, "_qkeee_env", return_value=env):
+            out = self.call(self.tools(SENDER), "erp_request",
+                            {"action": "org_report", "since": "2026-01-01T00:00:00"})
+        self.assertFalse(out["ok"])
+
+    def test_malformed_since_is_invalid_arguments(self):
+        env = {"QKEEE_ERP_DEFAULT_ADMIN_EMAIL": "nikhil@org.com"}
+        with patch.object(client, "_qkeee_env", return_value=env):
+            out = self.call(self.tools(SENDER), "erp_request",
+                            {"action": "org_report", "since": "not-a-date", "until": "2026-01-02"})
+        self.assertFalse(out["ok"])
+        self.assertTrue(out.get("invalid_arguments"))
+
+
 if __name__ == "__main__":
     unittest.main()

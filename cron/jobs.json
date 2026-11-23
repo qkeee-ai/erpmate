@@ -15,6 +15,14 @@
       "script": "lcm_corruption_check.py",
       "schedule": "every 12h",
       "deliver": "local"
+    },
+    {
+      "id": "qkeee-erp-weekly-request-report",
+      "name": "qkeee-erp weekly request report",
+      "no_agent": true,
+      "script": "qkeee_erp_weekly_request_report.py",
+      "schedule": "0 9 * * MON",
+      "deliver": "local"
     }
   ]
 }

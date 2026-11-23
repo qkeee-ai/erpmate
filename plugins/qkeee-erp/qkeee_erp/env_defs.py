@@ -31,8 +31,8 @@ REQUIRED_PER_TAG = {
 
 OPTIONAL_PER_TAG = {
     "ADMIN_EMAIL": "ERP admin cc'd on a kanban job's approval email; audit/oversight only.",
-    "OPS_CHAT_WEBHOOK": "Google Chat webhook for lcm-corruption-check findings, alongside "
-                         "ADMIN_EMAIL.",
+    "OPS_CHAT_WEBHOOK": "Google Chat webhook for lcm-corruption-check and weekly-request-report "
+                         "findings, alongside ADMIN_EMAIL.",
     "ALLOW_INSECURE": "Skip TLS verification for this tag (test/demo instances only).",
     "ENVIRONMENT": "'non-production' extends the confirm-token lifetime to 60 min; else "
                    "production (15 min).",

@@ -17,6 +17,7 @@ from qkeee_erp_plugin.qkeee_erp.core import client as erp_client
 from qkeee_erp_plugin.qkeee_erp.core import client as ec
 from qkeee_erp_plugin.qkeee_erp.core.confirm_token import confirmation_code
 from qkeee_erp_plugin.qkeee_erp.core import operations
+from qkeee_erp_plugin.qkeee_erp.core import request_registry
 from qkeee_erp_plugin.qkeee_erp import schema_mapping
 
 
@@ -2342,6 +2343,90 @@ class RequestFactsFacadeTests(unittest.TestCase):
         ec.request_link(opened["request_id"], "priya@org.com", self.LINK_A)
         updated = ec.request_facts(opened["request_id"], "priya@org.com", {"a": "b"})
         self.assertEqual(updated["facts"], {"a": "b"})
+
+
+class RequestOrgReportTests(unittest.TestCase):
+    """client.request_org_report (agents issue 11 §9): the admin-gated,
+    cross-sender facade over request_report.build_report()."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = patch.dict("os.environ", {"HERMES_HOME": tmp.name})
+        home.start()
+        self.addCleanup(home.stop)
+
+    @staticmethod
+    def _admin_env(*emails):
+        return {f"QKEEE_ERP_TAG{i}_ADMIN_EMAIL": e for i, e in enumerate(emails)}
+
+    def test_refuses_a_non_admin_sender(self):
+        with patch.object(ec, "_qkeee_env", return_value=self._admin_env("admin@org.com")):
+            with self.assertRaises(ec.ReportAccessError):
+                ec.request_org_report("someone@org.com")
+
+    def test_refusing_a_non_admin_never_reads_the_store(self):
+        with patch.object(ec, "_qkeee_env", return_value=self._admin_env("admin@org.com")), \
+             patch.object(ec.request_report, "build_report") as build_report:
+            with self.assertRaises(ec.ReportAccessError):
+                ec.request_org_report("someone@org.com")
+        build_report.assert_not_called()
+
+    def test_admin_match_is_case_insensitive(self):
+        with patch.object(ec, "_qkeee_env", return_value=self._admin_env("Admin@Org.com")):
+            report = ec.request_org_report("admin@org.com")
+        self.assertIn("metrics", report)
+
+    def test_no_admin_configured_refuses_everyone(self):
+        with patch.object(ec, "_qkeee_env", return_value={}):
+            with self.assertRaises(ec.ReportAccessError):
+                ec.request_org_report("anyone@org.com")
+
+    def test_admin_on_any_tag_is_accepted(self):
+        env = {**self._admin_env("someone-else@org.com"), "QKEEE_ERP_OTHER_ADMIN_EMAIL": "admin@org.com"}
+        with patch.object(ec, "_qkeee_env", return_value=env):
+            report = ec.request_org_report("admin@org.com")
+        self.assertIn("metrics", report)
+
+    def test_explicit_since_until_overrides_period(self):
+        with patch.object(ec, "_qkeee_env", return_value=self._admin_env("admin@org.com")):
+            report = ec.request_org_report("admin@org.com", period="month", since_us=0, until_us=1000)
+        self.assertEqual(report["window"], {"since_us": 0, "until_us": 1000})
+
+    def test_default_period_is_the_last_completed_week(self):
+        with patch.object(ec, "_qkeee_env", return_value=self._admin_env("admin@org.com")):
+            report = ec.request_org_report("admin@org.com")
+        self.assertEqual(report["window"], {"since_us": ec.request_report.last_completed_week_window()[0],
+                                            "until_us": ec.request_report.last_completed_week_window()[1]})
+
+    def test_month_period(self):
+        with patch.object(ec, "_qkeee_env", return_value=self._admin_env("admin@org.com")):
+            report = ec.request_org_report("admin@org.com", period="month")
+        since, until = ec.request_report.last_completed_month_window()
+        self.assertEqual(report["window"], {"since_us": since, "until_us": until})
+
+    def test_never_advances_the_cost_checkpoint(self):
+        # An on-demand pull must not consume the delta the next scheduled
+        # weekly run still needs to see (request_report.build_report()'s
+        # own docstring).
+        opened = ec.request_open("nikhil@org.com", "topic",
+                                 {"platform": "email", "chat_id": "nikhil@org.com",
+                                  "thread_id": None, "session_id": "s1"})
+        with patch.object(ec, "_qkeee_env", return_value=self._admin_env("admin@org.com")):
+            ec.request_org_report("admin@org.com", since_us=0, until_us=opened["created_at"] + 1)
+        self.assertEqual(request_registry.get_cost_checkpoints(
+            ec._request_registry_store_path(), ["s1"]), {})
+
+    def test_a_refused_attempt_is_logged(self):
+        import sqlite3
+        with patch.object(ec, "_qkeee_env", return_value=self._admin_env("admin@org.com")):
+            with self.assertRaises(ec.ReportAccessError):
+                ec.request_org_report("stranger@org.com")
+        conn = sqlite3.connect(request_registry.default_store_path(ec._hermes_home()))
+        rows = conn.execute("SELECT action, sender_email FROM request_event").fetchall()
+        conn.close()
+        self.assertIn(("org_report_refused", "stranger@org.com"), rows)
 
 
 if __name__ == "__main__":

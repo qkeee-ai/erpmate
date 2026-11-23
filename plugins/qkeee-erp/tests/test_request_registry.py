@@ -234,6 +234,107 @@ class OpenInSessionTests(RegistryTestCase):
         self.assertEqual(rows, [])
 
 
+class RequestsInWindowTests(RegistryTestCase):
+    """Issue 11 §2: every request touched in [since, until), any sender,
+    any status — unlike open_for_sender()/open_in_session()."""
+
+    def test_empty_store_is_an_empty_list(self):
+        self.assertEqual(rr.requests_in_window(self.store + ".absent", 0, 10), [])
+
+    def test_a_request_created_in_window_is_included(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK)
+        rows = rr.requests_in_window(self.store, row["created_at"] - 1, row["created_at"] + 1)
+        self.assertEqual([r["request_id"] for r in rows], [row["request_id"]])
+
+    def test_a_request_outside_the_window_is_excluded(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK)
+        rows = rr.requests_in_window(self.store, row["created_at"] + 1000, row["created_at"] + 2000)
+        self.assertEqual(rows, [])
+
+    def test_boundary_since_is_inclusive(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK)
+        rows = rr.requests_in_window(self.store, row["created_at"], row["created_at"] + 1)
+        self.assertEqual(len(rows), 1)
+
+    def test_boundary_until_is_exclusive(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK)
+        rows = rr.requests_in_window(self.store, row["created_at"] - 1, row["created_at"])
+        self.assertEqual(rows, [])
+
+    def test_a_request_merely_touched_in_window_is_included(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK)
+        before = row["created_at"] - 10_000_000
+        touched = rr.merge_facts(self.store, row["request_id"], {"a": "b"})
+        rows = rr.requests_in_window(self.store, touched["updated_at"] - 1, touched["updated_at"] + 1)
+        self.assertEqual([r["request_id"] for r in rows], [row["request_id"]])
+        # not created in this narrow window, only touched
+        self.assertNotEqual(rows[0]["created_at"], touched["updated_at"])
+
+    def test_a_request_closed_in_window_is_included_by_closed_at(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK)
+        closed = rr.update_status(self.store, row["request_id"], agent_status="done")
+        rows = rr.requests_in_window(self.store, closed["closed_at"], closed["closed_at"] + 1)
+        self.assertEqual([r["request_id"] for r in rows], [row["request_id"]])
+
+    def test_mixed_statuses_and_senders_all_included(self):
+        a = rr.open_request(self.store, ALICE, "a", EMAIL_LINK)
+        b = rr.open_request(self.store, BOB, "b", EMAIL_LINK)
+        rr.update_status(self.store, b["request_id"], agent_status="done")
+        rows = rr.requests_in_window(self.store, 0, a["created_at"] + 10_000_000_000)
+        self.assertEqual({r["request_id"] for r in rows}, {a["request_id"], b["request_id"]})
+
+
+class OpenRequestsTests(RegistryTestCase):
+    """Issue 11 §7: a backlog snapshot — every open/in_progress request,
+    any sender, no window."""
+
+    def test_empty_store_is_an_empty_list(self):
+        self.assertEqual(rr.open_requests(self.store + ".absent"), [])
+
+    def test_includes_open_and_in_progress_across_senders(self):
+        a = rr.open_request(self.store, ALICE, "a", EMAIL_LINK)
+        b = rr.open_request(self.store, BOB, "b", EMAIL_LINK)
+        rr.update_status(self.store, b["request_id"], agent_status="in_progress")
+        rows = rr.open_requests(self.store)
+        self.assertEqual({r["request_id"] for r in rows}, {a["request_id"], b["request_id"]})
+
+    def test_done_requests_are_excluded(self):
+        row = rr.open_request(self.store, ALICE, "a", EMAIL_LINK)
+        rr.update_status(self.store, row["request_id"], agent_status="done")
+        self.assertEqual(rr.open_requests(self.store), [])
+
+
+class CostCheckpointTests(RegistryTestCase):
+    """Issue 11 §8: the delta-over-cumulative checkpoint for hermes-
+    agent's lifetime-cumulative token/cost counters."""
+
+    def test_unknown_session_has_no_checkpoint(self):
+        self.assertEqual(rr.get_cost_checkpoints(self.store, ["s1"]), {})
+
+    def test_missing_store_has_no_checkpoint(self):
+        self.assertEqual(rr.get_cost_checkpoints(self.store + ".absent", ["s1"]), {})
+
+    def test_set_then_get_round_trips(self):
+        rr.set_cost_checkpoints(self.store, {"s1": {"tokens_in_as_of": 100, "tokens_out_as_of": 50,
+                                                     "cost_as_of_usd": 0.01}})
+        checkpoints = rr.get_cost_checkpoints(self.store, ["s1"])
+        self.assertEqual(checkpoints["s1"]["tokens_in_as_of"], 100)
+        self.assertEqual(checkpoints["s1"]["tokens_out_as_of"], 50)
+        self.assertEqual(checkpoints["s1"]["cost_as_of_usd"], 0.01)
+
+    def test_setting_again_overwrites_not_accumulates(self):
+        rr.set_cost_checkpoints(self.store, {"s1": {"tokens_in_as_of": 100, "tokens_out_as_of": 50,
+                                                     "cost_as_of_usd": 0.01}})
+        rr.set_cost_checkpoints(self.store, {"s1": {"tokens_in_as_of": 200, "tokens_out_as_of": 90,
+                                                     "cost_as_of_usd": 0.02}})
+        checkpoints = rr.get_cost_checkpoints(self.store, ["s1"])
+        self.assertEqual(checkpoints["s1"]["tokens_in_as_of"], 200)
+
+    def test_empty_checkpoints_is_a_noop(self):
+        rr.set_cost_checkpoints(self.store, {})
+        self.assertFalse(os.path.exists(self.store))
+
+
 class LogEventTests(RegistryTestCase):
     """Adversarial review, issue 03: a forensic trail of who did what to a
     request and when, since none of the lookups/mutations above leave one."""

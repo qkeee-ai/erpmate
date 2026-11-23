@@ -31,6 +31,7 @@ email, same as every other tool here.
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 
 from .qkeee_erp import discover
 from .qkeee_erp import execute_write  # imports every domain module: registers allowlists + operations
@@ -209,12 +210,18 @@ SCHEMAS = {
             "context compaction, so check it before repeating a discovery lookup you may have "
             "already done pre-compaction, and merge in a write error's known fix the moment you "
             "resolve it so you (or a post-compaction you) never relearn it; needs link first for "
-            "anyone but the Requester. " + _NO_REQUESTER_NOTE),
+            "anyone but the Requester. When you identify a request is stuck, merge "
+            "facts={\"pending\": {\"type\": \"approval\"|\"access\"|\"clarification\", \"detail\": "
+            "\"...\", \"since\": \"<ISO8601>\"}} so the weekly/org_report backlog section can "
+            "show why, not just that. org_report: an org-wide received-vs-completed/cost summary "
+            "- ADMIN-ONLY, refused for anyone else; a human must ask for it by name (do not call "
+            "this speculatively). " + _NO_REQUESTER_NOTE),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {"type": "string",
-                          "enum": ["open", "lookup", "in_thread", "link", "status", "facts"]},
+                          "enum": ["open", "lookup", "in_thread", "link", "status", "facts",
+                                   "org_report"]},
                 "topic": {"type": "string", "description": "open: short human label for the ask, "
                                                             "e.g. 'GST report — Oct 2026'."},
                 "anchor_doctype": {"type": "string", "description": "open: the ERPNext DocType "
@@ -240,6 +247,17 @@ SCHEMAS = {
                                                           "confirming done). Optional, but write "
                                                           "one whenever there's a real answer "
                                                           "behind the action, not a guess."},
+                "period": {"type": "string", "enum": ["week", "month"],
+                          "description": "org_report: \"week\" (default, last completed Mon-Sun) "
+                                         "or \"month\" (last full calendar month). Ignored when "
+                                         "since/until are both given."},
+                "since": {"type": "string", "description": "org_report: explicit window start, "
+                                                           "ISO8601 (UTC assumed if no offset). "
+                                                           "Overrides period. Give both since and "
+                                                           "until, or neither."},
+                "until": {"type": "string", "description": "org_report: explicit window end "
+                                                           "(exclusive), ISO8601. Overrides "
+                                                           "period."},
             },
             "required": ["action"], "additionalProperties": False,
         },
@@ -252,6 +270,20 @@ _LARGE_RESULT_BYTES = 10_000
 
 _STOP_AND_ASK = ("Stop. Show the user the missing or invalid fields, ask for the values, update the "
                  "spec and re-confirm. Never fill a value the user did not give.")
+
+
+def _parse_iso_to_us(value: str, field: str) -> int:
+    """ISO8601 `value` -> epoch microseconds, assuming UTC when no offset
+    is given (agents issue 11 §9: `request_report`'s own window math is
+    UTC-based). Raises client.InvalidArgumentsError on a bad string
+    rather than a bare ValueError traceback."""
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        raise client.InvalidArgumentsError(f"org_report {field!r}: not a valid ISO8601 value: {value!r}")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1_000_000)
 
 
 _PROMOTION_SHAPE = ('{"findings": {...environment facts}, "doctypes": ["Name" or {"name", "module", '
@@ -666,4 +698,11 @@ class ErpTools:
                 raise client.ConnectorError("facts needs a non-empty object of key/value pairs.")
             return _ok(client.request_facts(args["request_id"], requester, args["facts"],
                                             note=args.get("note")))
+        if action == "org_report":
+            since_us = _parse_iso_to_us(args.get("since"), "since") if args.get("since") else None
+            until_us = _parse_iso_to_us(args.get("until"), "until") if args.get("until") else None
+            if (since_us is None) != (until_us is None):
+                raise client.ConnectorError("org_report: give both since and until, or neither.")
+            return _ok(client.request_org_report(requester, period=args.get("period"),
+                                                  since_us=since_us, until_us=until_us))
         raise client.ConnectorError(f"unknown erp_request action {action!r}")

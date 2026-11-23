@@ -117,7 +117,7 @@ from datetime import datetime, timezone
 
 from .confirm_token import (ENVIRONMENT_NON_PRODUCTION, ENVIRONMENT_PRODUCTION, TOKEN_TTL_SECONDS,
                             compute_token, confirmation_code, expires_at, is_fresh)
-from . import kanban_origin, request_registry
+from . import kanban_origin, request_registry, request_report
 
 # Default attribution label for audit Comments when no domain-specific
 # label is supplied — see _do_mutate()'s `skill_label` param.
@@ -306,6 +306,17 @@ class GateRefusal(ConnectorError):
     def __init__(self, message: str = "", gaps: list = None):
         super().__init__(message)
         self.gaps = list(gaps or [])
+
+
+class ReportAccessError(GateRefusal):
+    """Raised when `erp_request` action `org_report` (agents issue 11 §9)
+    is called by a sender who is not a configured `QKEEE_ERP_<TAG>_
+    ADMIN_EMAIL` on any tag of this profile. Every other `erp_request`
+    action is scoped to the caller's own identity; this one is explicitly
+    cross-sender (the same reason it is not exposed to `requests_in_window`
+    at all outside this gated path, see `request_registry.py`'s own
+    module docstring) and must not become something any chat participant
+    can ask the agent to run."""
 
 
 class ReadOnlyModeError(GateRefusal):
@@ -1615,6 +1626,69 @@ def request_facts(request_id: str, sender_email: str, facts: dict, note: str = N
     row = _redact_unless_requester(_role_for(_request_registry_call(_do), sender_email))
     _log_request_event(request_id, "facts", sender_email, note)
     return row
+
+
+def _admin_emails() -> set:
+    """Every configured `QKEEE_ERP_<tag>_ADMIN_EMAIL`, lowercased, across
+    every tag in this profile's qkeee-erp.env — the admin allowlist for
+    `request_org_report()` below. Mirrors `admin_emails_and_webhooks()`
+    in scripts/lcm_corruption_check.py (same "any configured tag's admin
+    counts as this profile's admin" reasoning), but reachable from inside
+    the gateway process, not a bare cron subprocess."""
+    return {value.lower() for key, value in _qkeee_env().items()
+           if key.endswith("_ADMIN_EMAIL") and value}
+
+
+def _state_db_path() -> str:
+    """hermes-agent's own `state.db` (token/cost ledger), same
+    `HERMES_HOME` directory as this plugin's own stores, sibling to
+    `lcm.db` (agents issue 11 §8)."""
+    return os.path.join(_hermes_home(), "state.db")
+
+
+# Issue 11 §9: request_org_report's refusal has no real request_id to
+# attach to — it is cross-request by design — so its forensic trail uses
+# this fixed sentinel id rather than skipping the audit log entirely.
+_ORG_REPORT_EVENT_ID = "ORG-REPORT"
+
+
+def request_org_report(sender_email: str, *, period: str = None, since_us: int = None,
+                       until_us: int = None) -> dict:
+    """Admin-gated org-wide report (agents issue 11 §9): every other
+    `erp_request` action is scoped to the caller's own identity; this one
+    is explicitly cross-sender, so it is refused with `ReportAccessError`
+    unless *sender_email* case-insensitively matches a configured
+    `QKEEE_ERP_<TAG>_ADMIN_EMAIL` on ANY tag of this profile — the gate,
+    not a new trust model, reusing the exact allowlist already trusted
+    with Requester correspondence (`ADMIN_EMAIL` ccs on
+    `notify.job_approval_request`).
+
+    `period`: `"week"` (default) = the last completed Mon-Sun (D11-a);
+    `"month"` = the last full calendar month. Explicit `since_us`/
+    `until_us` always override `period`. Never advances the cost
+    checkpoint (`request_report.build_report()`'s
+    `advance_checkpoint=False` default) — that cursor belongs to the
+    scheduled weekly cron run only; an on-demand pull must not consume a
+    delta the next scheduled run still needs to see."""
+    email = (sender_email or "").strip().lower()
+    if not email or email not in _admin_emails():
+        _log_request_event(_ORG_REPORT_EVENT_ID, "org_report_refused", sender_email or "")
+        raise ReportAccessError(
+            f"Refusing: {sender_email!r} is not a configured admin for this profile. "
+            f"org_report is ops-only. Nothing was read.")
+    if since_us is None or until_us is None:
+        if period == "month":
+            since_us, until_us = request_report.last_completed_month_window()
+        else:
+            since_us, until_us = request_report.last_completed_week_window()
+    # Routed through _request_registry_call (not a direct build_report()
+    # call) so a store-level sqlite3.Error (lock, corruption) becomes the
+    # same ConnectorError every other request_* facade here translates
+    # it to, instead of an uncaught crash.
+    report = _request_registry_call(request_report.build_report, _state_db_path(), since_us,
+                                     until_us, advance_checkpoint=False)
+    _log_request_event(_ORG_REPORT_EVENT_ID, "org_report", sender_email)
+    return report
 
 
 def _qkeee_env_file_path() -> str:
