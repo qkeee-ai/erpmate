@@ -12,16 +12,30 @@
 # flag.
 #
 # `hermes meet install` syncs the `google-meet` extra (playwright,
-# websockets) into the shared PM venv generation under $HERMES_HOME/installs
-# and confirms the Chromium this image already pins at build time
-# (pm.ensure("chromium") is a no-op once the fact matches) — see
-# plugins/google_meet/cli.py. The venv/Chromium store itself is shared by
-# every profile, but the `meet` subcommand only EXISTS on the CLI parser
-# built for a HERMES_HOME that has the plugin enabled: `-p`/`--profile` is
-# consumed before argparse runs and sets that HERMES_HOME (hermes_cli/
+# websockets) and confirms the Chromium this image already pins at build
+# time (pm.ensure("chromium") is a no-op once the fact matches) — see
+# plugins/google_meet/cli.py. The `meet` subcommand only EXISTS on the CLI
+# parser built for a HERMES_HOME that has the plugin enabled: `-p`/`--profile`
+# is consumed before argparse runs and sets that HERMES_HOME (hermes_cli/
 # _parser.py), so this must run with the same `-p "$NAME"` as the enable
 # call above — without it, it resolves to the **default** profile (which
 # never had the plugin enabled) and fails with "invalid choice: 'meet'".
+#
+# Observed on qk-prod-erp: the sync writes the extra straight into the
+# image's sealed /opt/hermes/.venv (`uv` reported "Using Python 3.13.5
+# environment at: /opt/hermes/.venv", then "Permission denied" removing a
+# file there) rather than into a per-profile generation under
+# $HERMES_HOME/installs, despite the docs describing lazy extras as
+# generation-based and /opt/hermes/.venv as "never modified" at runtime —
+# this image's actual behaviour disagrees. That venv is root-owned with
+# `go-w` (write stripped for group/other, kept for the owner — see this
+# repo's main Dockerfile), the same as the rest of the baked venv, so only
+# root can write it; hermes can still read and run it afterwards. Run this
+# one step as root (not through `run()`) and chown back anything it may
+# also have written under the profile's own installs/ dir, so the gateway
+# (which runs as hermes) keeps owning its data tree. Repeats every boot —
+# cheap: Chromium is already staged and just gets confirmed, and the wheels
+# are small.
 #
 # Deliberately installed WITHOUT --realtime: that step additionally wants
 # pulseaudio-utils via `sudo apt-get`, and the gateway runs as the
@@ -38,8 +52,10 @@
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 NAME="$(cat /run/hermes-profile-name 2>/dev/null)"
 [ -n "$NAME" ] || { echo "[google-meet] no installed profile name (016 skipped?); skipping"; exit 0; }
+DIR="$HERMES_HOME/profiles/$NAME"
 
 run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
+root_run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" "$@"; }
 
 if run hermes -p "$NAME" plugins enable google_meet; then
     echo "[google-meet:$NAME] plugin enabled"
@@ -47,10 +63,11 @@ else
     echo "[google-meet:$NAME] WARNING: plugin enable failed; continuing" >&2
 fi
 
-if run hermes -p "$NAME" meet install; then
+if root_run hermes -p "$NAME" meet install; then
     echo "[google-meet:$NAME] install ok"
 else
     echo "[google-meet:$NAME] WARNING: meet install failed; meet_* tools unavailable until it succeeds" >&2
 fi
+[ -d "$DIR/installs" ] && chown -R hermes:hermes "$DIR/installs"
 
 exit 0
