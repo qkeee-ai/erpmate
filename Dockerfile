@@ -102,10 +102,13 @@ RUN chmod -R a+rX,go-w /opt/defaults
 # sidecar terminal values, not the host ones).
 ENV QKEEE_ERP_IN_CONTAINER=1
 COPY docker/cont-init.d/ /etc/cont-init.d/
-# Globbed in four parts: `01[6-9]-*` does not match the 4-digit 015x/0185/
-# 019x names (the `-` has nothing to match against their 4th character).
+# Globbed in five parts: `01[6-9]-*` does not match the 4-digit 015x/0185/
+# 0186/019x names (the `-` has nothing to match against their 4th character).
+# 0186-lcm-corruption-check was missing from this list entirely until a
+# qk-prod-erp boot hit "Permission denied" exec'ing it — COPY alone does not
+# reliably carry the executable bit from a non-Linux checkout.
 RUN set -eu; for f in /etc/cont-init.d/015[5-8]-* /etc/cont-init.d/01[6-9]-* \
-        /etc/cont-init.d/0185-* /etc/cont-init.d/019[5-8]-*; do \
+        /etc/cont-init.d/0185-* /etc/cont-init.d/0186-* /etc/cont-init.d/019[5-8]-*; do \
         sed -i 's/\r$//' "$f" && chmod 0755 "$f"; \
     done
 # Operator maintenance tools (see adminops/README.md). Baked in so they are
