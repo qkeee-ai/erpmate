@@ -45,6 +45,18 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
     && rm -rf /opt/hermes-lcm/.git \
     && chmod -R a+rX,go-w /opt/hermes-lcm
 
+# Local patch for a google_meet join race: NousResearch/hermes-agent#74680 and
+# #118049 (item 4), both open/unfixed as of 2026-11-26. `_visible()` checks
+# count()/is_visible() immediately after `domcontentloaded`, before Meet's
+# client-rendered pre-join UI exists, misses the "Join now"/"Ask to join"
+# button, clicks nothing, and the bot sits there with a healthy-looking
+# status forever — no error, no real join request sent to Google. See
+# docker/patches/google-meet-join-race.py for the exact patch and how to
+# update it when the base image's meet_bot.py changes (it fails the build
+# loudly rather than silently no-op'ing against a future rewrite).
+COPY docker/patches/google-meet-join-race.py /tmp/
+RUN python3 /tmp/google-meet-join-race.py && rm /tmp/google-meet-join-race.py
+
 # Boot hooks (s6 cont-init.d, lexicographic order). Everything targets
 # $HERMES_HOME (a volume) so it runs at every boot and is idempotent.
 #   01-hermes-setup       (base image) volume chown + config seed
