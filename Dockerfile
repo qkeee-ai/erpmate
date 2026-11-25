@@ -57,6 +57,18 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 COPY docker/patches/google-meet-join-race.py /tmp/
 RUN python3 /tmp/google-meet-join-race.py && rm /tmp/google-meet-join-race.py
 
+# Second google_meet patch, same floating-base-image caveat: #118049 item 5.
+# _ENABLE_CAPTIONS_JS dispatches a synthetic (isTrusted: false) KeyboardEvent
+# before admission is even confirmed — Meet ignores it and the captions
+# button doesn't exist pre-admission anyway, so captions never actually turn
+# on and the transcript stays empty forever with no error. Confirmed on
+# qk-prod-erp right after the join-race fix: clean join (inCall: true),
+# transcriptLines stuck at 0. See docker/patches/google-meet-captions-
+# untrusted-event.py for the exact patch (moves the toggle to a real,
+# trusted page.keyboard.press("c") fired once admission is confirmed).
+COPY docker/patches/google-meet-captions-untrusted-event.py /tmp/
+RUN python3 /tmp/google-meet-captions-untrusted-event.py && rm /tmp/google-meet-captions-untrusted-event.py
+
 # Boot hooks (s6 cont-init.d, lexicographic order). Everything targets
 # $HERMES_HOME (a volume) so it runs at every boot and is idempotent.
 #   01-hermes-setup       (base image) volume chown + config seed
