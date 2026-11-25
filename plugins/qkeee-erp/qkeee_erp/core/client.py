@@ -1500,13 +1500,19 @@ def _log_request_event(request_id: str, action: str, sender_email: str, note: st
 
 
 def request_open(sender_email: str, topic: str, session_link: dict, *,
-                 anchor_doctype: str = None, anchor_name: str = None, note: str = None) -> dict:
+                 anchor_doctype: str = None, anchor_name: str = None, note: str = None,
+                 message_id: str = None) -> dict:
     """Start tracking a new cross-channel Request (agents issue 02),
     keyed on the lowercased session sender email — the same identity key
     every channel's `user_id` already resolves to (see issue 02's design
-    note: no new mapping table)."""
+    note: no new mapping table).
+
+    `message_id` (issue 03 follow-up, email Message-ID index): this
+    turn's own inbound message id, when the platform has one — see
+    `request_registry.open_request()`'s docstring."""
     row = _request_registry_call(request_registry.open_request, sender_email.lower(), topic,
-                                 session_link, anchor_doctype=anchor_doctype, anchor_name=anchor_name)
+                                 session_link, anchor_doctype=anchor_doctype, anchor_name=anchor_name,
+                                 message_id=message_id)
     _log_request_event(row["request_id"], "open", sender_email, note)
     return _role_for(row, sender_email)
 
@@ -1535,6 +1541,47 @@ def request_in_session(sender_email: str, platform: str, chat_id: str, thread_id
     return [_role_for(r, sender_email) for r in rows]
 
 
+_MESSAGE_ID_TOKEN_RE = re.compile(r"<[^<>\s]+>")
+
+
+def _parse_message_id_references(raw: str) -> list:
+    """Every RFC 5322 msg-id token (`<...>`) in *raw* — a raw `References`
+    and/or `In-Reply-To` header blob. Order doesn't matter to the lookup
+    below, which checks every token against the index."""
+    return _MESSAGE_ID_TOKEN_RE.findall(raw or "")
+
+
+def request_in_email_thread(sender_email: str, references_raw: str) -> list:
+    """The Request (if any) an inbound email's own `In-Reply-To`/
+    `References` chain resolves to — email's answer to
+    `request_in_session()` above, since email has no shared (platform,
+    chat_id, thread_id) room the way Chat does (agents issue 03 "Known
+    limitations", issue 11 follow-up list). Same shape as
+    `request_in_session()`: a plain list of 0 or 1 row, never auto-acted
+    on by the caller.
+
+    **Not yet reachable in production.** *references_raw* has to come
+    from a session var hermes-agent does not expose yet — see
+    `request_registry.resolve_request_by_message_ids()`'s own docstring
+    for exactly what and why that gap exists and what closes it. Call
+    this with an empty/missing string (today's only real case, since
+    nothing populates the var) and it is a correct, cheap no-op — the
+    same documented-empty shape `request_in_session()` already has for
+    email. Built now so the erpnext-hermes half is ready the moment that
+    session var exists; nothing here needs to change when it lands,
+    only `erp_tools.py`'s read of the (currently absent) env var."""
+    ids = _parse_message_id_references(references_raw)
+    if not ids:
+        return []
+    request_id = _request_registry_call(request_registry.resolve_request_by_message_ids, ids)
+    if not request_id:
+        return []
+    row = _request_registry_call(request_registry.get_request, request_id)
+    if row is None:
+        return []
+    return [_role_for(row, sender_email)]
+
+
 def _existing_request(store_path: str, request_id: str) -> dict:
     """*request_id*'s row, or InvalidArgumentsError when it does not exist."""
     row = request_registry.get_request(store_path, request_id)
@@ -1559,7 +1606,8 @@ def _redact_unless_requester(row: dict) -> dict:
     return row
 
 
-def request_link(request_id: str, sender_email: str, session_link: dict, note: str = None) -> dict:
+def request_link(request_id: str, sender_email: str, session_link: dict, note: str = None, *,
+                 message_id: str = None) -> dict:
     """Attach *session_link* to *request_id*, recording *sender_email* as
     whoever this session belongs to. Any Requester may link their own
     session to any known request — that is literally how an
@@ -1567,10 +1615,15 @@ def request_link(request_id: str, sender_email: str, session_link: dict, note: s
     is no ownership check here, unlike `request_status()` below. The
     caller (erp_tools.ErpTools) must still have a human confirm first,
     same as `request_lookup()`/`request_in_session()`'s results — this
-    function performs the link, it does not decide whether to."""
+    function performs the link, it does not decide whether to.
+
+    `message_id`: see `request_open()`'s own docstring — indexed the same
+    way, so a chain of email replies keeps growing the set of ids that
+    resolve back to this request."""
     def _do(store_path):
         _existing_request(store_path, request_id)
-        return request_registry.link_session(store_path, request_id, session_link, sender_email.lower())
+        return request_registry.link_session(store_path, request_id, session_link, sender_email.lower(),
+                                              message_id=message_id)
     row = _redact_unless_requester(_role_for(_request_registry_call(_do), sender_email))
     _log_request_event(request_id, "link", sender_email, note)
     return row

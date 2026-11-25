@@ -82,6 +82,20 @@ _SCHEMA = (
     " id INTEGER PRIMARY KEY AUTOINCREMENT,"
     " request_id TEXT NOT NULL, action TEXT NOT NULL, sender_email TEXT NOT NULL,"
     " note TEXT, created_at INTEGER NOT NULL);"
+    # Issue 03 follow-up / issue 11's email Message-ID index (agents
+    # .scratch/qkeee-erp-email-channel-reliability, issue 03 "Known
+    # limitations"): email has no shared (chat_id, thread_id) the way
+    # Chat does — chat_id is the sender's own address, so a second
+    # participant's reply can't be found by room. Every touch's own
+    # inbound message_id is indexed here (first-writer-wins: a message_id
+    # is immutably one request's); resolving a REPLY to a request means
+    # checking its In-Reply-To/References chain against this table —
+    # still pending an upstream hermes-agent change to expose that chain
+    # to this plugin (see resolve_request_by_message_ids()'s docstring).
+    "CREATE TABLE IF NOT EXISTS request_message_id ("
+    " message_id TEXT PRIMARY KEY,"
+    " request_id TEXT NOT NULL,"
+    " created_at INTEGER NOT NULL);"
     # Issue 11 §8: hermes-agent's `sessions.*_tokens`/`*_cost_usd` are
     # lifetime-cumulative per session_id, not per-call — there is no
     # timestamped row to filter by a report window. This is the report's
@@ -159,14 +173,29 @@ def _row(conn: sqlite3.Connection, request_id: str):
     return out
 
 
+def _index_message_id(conn: sqlite3.Connection, request_id: str, message_id: str) -> None:
+    """First-writer-wins: a message_id is immutably one request's. No-op
+    when *message_id* is falsy (every platform but email, and email's
+    own first indexable touch before this feature existed)."""
+    if not message_id:
+        return
+    conn.execute("INSERT OR IGNORE INTO request_message_id (message_id, request_id, created_at) "
+                "VALUES (?, ?, ?)", (message_id, request_id, _now()))
+
+
 def open_request(store_path: str, sender_email: str, topic: str, session_link: dict, *,
-                 anchor_doctype: str = None, anchor_name: str = None) -> dict:
+                 anchor_doctype: str = None, anchor_name: str = None, message_id: str = None) -> dict:
     """Start tracking a new ask: a fresh `request_id`, `agent_status` 'open',
     linked to *session_link* (the session that just opened it).
 
     `request_id` is a full uuid4 (agents issue 02: "not a content hash"),
     not a truncated one — a short id would trade away the exact guarantee
-    (effectively no collisions) uuid4 was asked for."""
+    (effectively no collisions) uuid4 was asked for.
+
+    `message_id` (issue 03 follow-up): this turn's own inbound message id
+    (email's `Message-ID` header; every platform but email passes None
+    today), indexed so a later participant's reply can resolve back to
+    this request — see `resolve_request_by_message_ids()`."""
     request_id = f"REQ-{uuid.uuid4().hex.upper()}"
     now = _now()
     conn = _connect(store_path)
@@ -181,6 +210,7 @@ def open_request(store_path: str, sender_email: str, topic: str, session_link: d
                 "INSERT INTO request_session (request_id, platform, chat_id, thread_id, "
                 "session_id, sender_email, linked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 _session_row(request_id, session_link, sender_email))
+            _index_message_id(conn, request_id, message_id)
         return _row(conn, request_id)
     finally:
         conn.close()
@@ -198,13 +228,18 @@ def get_request(store_path: str, request_id: str):
         conn.close()
 
 
-def link_session(store_path: str, request_id: str, session_link: dict, sender_email: str):
+def link_session(store_path: str, request_id: str, session_link: dict, sender_email: str, *,
+                 message_id: str = None):
     """Attach *session_link* to an existing request, recording *sender_email*
     as whoever this session belongs to. Returns the updated row, or None
     when *request_id* does not exist. Idempotent: linking the same
     session twice is a no-op, not an error (the second call's sender_email
     is not written over the first's, consistent with every other
-    first-write-wins field in this registry)."""
+    first-write-wins field in this registry).
+
+    `message_id`: see `open_request()`'s own docstring — indexed the same
+    way, so a chain of email replies keeps growing the set of ids that
+    resolve back to this request."""
     conn = _connect(store_path)
     try:
         if conn.execute("SELECT 1 FROM request WHERE request_id = ?", (request_id,)).fetchone() is None:
@@ -214,6 +249,7 @@ def link_session(store_path: str, request_id: str, session_link: dict, sender_em
                 "INSERT OR IGNORE INTO request_session (request_id, platform, chat_id, thread_id, "
                 "session_id, sender_email, linked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 _session_row(request_id, session_link, sender_email))
+            _index_message_id(conn, request_id, message_id)
         return _row(conn, request_id)
     finally:
         conn.close()
@@ -332,6 +368,45 @@ def open_in_session(store_path: str, platform: str, chat_id: str, thread_id: str
             "AND rs.thread_id = ? AND r.agent_status != 'done' ORDER BY r.updated_at DESC LIMIT ?",
             (platform, chat_id, thread_id, int(limit))).fetchall()
         return [_row(conn, r["request_id"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def resolve_request_by_message_ids(store_path: str, message_ids) -> str:
+    """The `request_id` already indexed under ANY of *message_ids*, or
+    None. Agents issue 03's deferred half ("Known limitations": "The
+    email-only Message-ID -> request_id index... was not built") and
+    issue 11's follow-up list.
+
+    Intended caller: an inbound email reply's own Message-ID plus every
+    ancestor in its `In-Reply-To`/`References` chain — passing the WHOLE
+    chain (not just the immediate parent) means this resolves correctly
+    even when the immediate parent is the bot's own generated Message-ID
+    (never indexed here — only inbound touches are), as long as the
+    chain also carries an earlier inbound id this registry already knows
+    about (true for any normal mail client, which grows `References`
+    with every hop rather than replacing it).
+
+    **Still pending, not yet reachable in production**: nothing in
+    erpnext-hermes exposes an inbound email's `In-Reply-To`/`References`
+    header to this plugin today — only its OWN `Message-ID`
+    (`HERMES_SESSION_MESSAGE_ID`, already used to populate *message_id*
+    above). That gap is a hermes-agent change (a new session var,
+    scoped to the email adapter only — NOT a reuse of `thread_id`, which
+    already feeds `gateway/session.py::build_session_key()` and would
+    silently change session routing for every email conversation on
+    every profile). Filed, not yet built; this function and the index it
+    reads are ready for the day it is."""
+    message_ids = [m for m in (message_ids or ()) if m]
+    if not message_ids or not os.path.exists(store_path):
+        return None
+    conn = _connect(store_path)
+    try:
+        placeholders = ",".join("?" * len(message_ids))
+        row = conn.execute(
+            f"SELECT request_id FROM request_message_id WHERE message_id IN ({placeholders}) "
+            f"ORDER BY created_at LIMIT 1", message_ids).fetchone()
+        return row["request_id"] if row else None
     finally:
         conn.close()
 

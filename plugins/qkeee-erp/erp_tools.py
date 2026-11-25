@@ -197,8 +197,9 @@ SCHEMAS = {
             "channel. lookup: YOUR OWN other open asks (any channel) — a plain list, NOT "
             "auto-matched to the current turn. in_thread: open ask(s) already linked to THIS "
             "room (this chat/thread), opened by someone else — how a second person in the same "
-            "Google Chat thread finds the first person's ask (email has no thread-sharing yet, "
-            "so this returns nothing there). For lookup and in_thread: ask whoever you're "
+            "Google Chat thread finds the first person's ask (on email this currently returns "
+            "nothing — no code change needed on your side, it resolves automatically once it "
+            "can). For lookup and in_thread: ask whoever you're "
             "talking to which one (if any) this continues, or that it's new, before calling link "
             "or open — never assume. link: attach the CURRENT session to an existing request_id "
             "once confirmed — open to any sender (an input-provider joining someone else's ask is "
@@ -417,6 +418,24 @@ class ErpTools:
         meta = audit.get("channel_metadata") or {}
         return {"platform": audit.get("channel"), "chat_id": meta.get("chat_id"),
                 "thread_id": meta.get("thread_id"), "session_id": audit.get("session_id")}
+
+    @staticmethod
+    def _message_id() -> str:
+        """This turn's own inbound message id (agents issue 03's email
+        Message-ID index follow-up) — already exposed by hermes-agent
+        (`HERMES_SESSION_MESSAGE_ID`, same var `gateway/run_voice.py`
+        documents as "for reply anchoring"). Empty on every platform
+        that has no such concept."""
+        return client.session_env("HERMES_SESSION_MESSAGE_ID") or ""
+
+    @staticmethod
+    def _email_references() -> str:
+        """The raw `In-Reply-To`/`References` header blob for this turn's
+        inbound email, when hermes-agent exposes one. **Not yet
+        populated by anything** — see `client.request_in_email_thread()`'s
+        own docstring for the filed hermes-agent follow-up this needs.
+        Always "" today, which is the correct, documented-empty input."""
+        return client.session_env("HERMES_SESSION_EMAIL_REFERENCES") or ""
 
     @staticmethod
     def _need(args, *keys):
@@ -658,7 +677,8 @@ class ErpTools:
             self._need(args, "topic")
             row = client.request_open(requester, args["topic"], self._session_link(args),
                                       anchor_doctype=args.get("anchor_doctype"),
-                                      anchor_name=args.get("anchor_name"), note=args.get("note"))
+                                      anchor_name=args.get("anchor_name"), note=args.get("note"),
+                                      message_id=self._message_id())
             row["_note"] = ("Say both `topic` and `request_id` to the user at least once, so they "
                             "can recognise this request if they continue it from another channel.")
             return _ok(row)
@@ -672,8 +692,16 @@ class ErpTools:
             return _ok(out)
         if action == "in_thread":
             link = self._session_link(args)
-            rows = client.request_in_session(requester, link["platform"], link["chat_id"],
-                                             link["thread_id"])
+            if link["platform"] == "email":
+                # Chat's (platform, chat_id, thread_id) room doesn't exist for
+                # email (chat_id is the sender's own address) — resolve via the
+                # In-Reply-To/References chain instead. Always [] today: no
+                # session var populates it yet (agents issue 03 follow-up,
+                # client.request_in_email_thread()'s own docstring).
+                rows = client.request_in_email_thread(requester, self._email_references())
+            else:
+                rows = client.request_in_session(requester, link["platform"], link["chat_id"],
+                                                 link["thread_id"])
             out = {"requests": rows}
             if rows:
                 out["_note"] = ("Not auto-joined. Ask whoever you're talking to which one (if "
@@ -683,7 +711,7 @@ class ErpTools:
         if action == "link":
             self._need(args, "request_id")
             return _ok(client.request_link(args["request_id"], requester, self._session_link(args),
-                                           note=args.get("note")))
+                                           note=args.get("note"), message_id=self._message_id()))
         if action == "status":
             self._need(args, "request_id")
             if not args.get("agent_status") and not args.get("requester_confirmed"):

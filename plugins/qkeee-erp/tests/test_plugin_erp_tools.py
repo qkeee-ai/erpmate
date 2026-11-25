@@ -503,6 +503,63 @@ class RequestToolTests(ToolTestCase):
         self.assertEqual(out["result"]["requests"], [])
         self.assertNotIn("_note", out["result"])
 
+    def test_in_thread_on_email_resolves_nothing_without_a_references_var(self):
+        # Issue 03 follow-up: no session var populates email references yet
+        # (client.request_in_email_thread()'s own docstring) — same [] as
+        # the pre-existing email case above, exercised explicitly so a
+        # future hermes-agent change that starts setting the var is the
+        # ONLY thing that can turn this test's own behavior "on".
+        self.call(self.tools(PRIYA), "erp_request", {"action": "open", "topic": "alice's ask"})
+        bob_email = dict(PRIYA, HERMES_SESSION_USER_ID="bob@org.com", HERMES_SESSION_CHAT_ID="bob@org.com",
+                         HERMES_SESSION_ID="sess-bob")
+        out = self.call(self.tools(bob_email), "erp_request", {"action": "in_thread"})
+        self.assertEqual(out["result"]["requests"], [])
+
+    def test_in_thread_on_email_resolves_via_the_references_var_once_set(self):
+        # Simulates the hermes-agent side of the follow-up landing: once
+        # HERMES_SESSION_EMAIL_REFERENCES is populated, this already works
+        # end to end with no further erpnext-hermes change needed.
+        alice_opens = dict(PRIYA, HERMES_SESSION_MESSAGE_ID="<alice-opens@mail>")
+        opened = self.call(self.tools(alice_opens), "erp_request", {"action": "open", "topic": "alice's ask"})
+        bob_replying = dict(PRIYA, HERMES_SESSION_USER_ID="bob@org.com", HERMES_SESSION_CHAT_ID="bob@org.com",
+                            HERMES_SESSION_ID="sess-bob", HERMES_SESSION_EMAIL_REFERENCES="<alice-opens@mail>")
+        out = self.call(self.tools(bob_replying), "erp_request", {"action": "in_thread"})
+        self.assertEqual(len(out["result"]["requests"]), 1)
+        self.assertEqual(out["result"]["requests"][0]["request_id"], opened["result"]["request_id"])
+        self.assertEqual(out["result"]["requests"][0]["your_role"], "input_provider")
+
+    def test_in_thread_on_email_ignores_a_references_var_matching_nothing(self):
+        alice_opens = dict(PRIYA, HERMES_SESSION_MESSAGE_ID="<alice-opens@mail>")
+        self.call(self.tools(alice_opens), "erp_request", {"action": "open", "topic": "alice's ask"})
+        bob_replying = dict(PRIYA, HERMES_SESSION_USER_ID="bob@org.com", HERMES_SESSION_CHAT_ID="bob@org.com",
+                            HERMES_SESSION_ID="sess-bob", HERMES_SESSION_EMAIL_REFERENCES="<unrelated@mail>")
+        out = self.call(self.tools(bob_replying), "erp_request", {"action": "in_thread"})
+        self.assertEqual(out["result"]["requests"], [])
+
+    def test_open_indexes_the_sessions_message_id(self):
+        from qkeee_erp_plugin.qkeee_erp.core import request_registry
+        session = dict(SENDER, HERMES_SESSION_MESSAGE_ID="<opened@mail>")
+        out = self.call(self.tools(session), "erp_request", {"action": "open", "topic": "t"})
+        resolved = request_registry.resolve_request_by_message_ids(
+            request_registry.default_store_path(self.home), ["<opened@mail>"])
+        self.assertEqual(resolved, out["result"]["request_id"])
+
+    def test_open_with_no_message_id_var_indexes_nothing(self):
+        from qkeee_erp_plugin.qkeee_erp.core import request_registry
+        self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        self.assertIsNone(request_registry.resolve_request_by_message_ids(
+            request_registry.default_store_path(self.home), [""]))
+
+    def test_link_indexes_the_sessions_message_id(self):
+        from qkeee_erp_plugin.qkeee_erp.core import request_registry
+        opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
+        linker = dict(PRIYA, HERMES_SESSION_MESSAGE_ID="<linked@mail>")
+        self.call(self.tools(linker), "erp_request",
+                 {"action": "link", "request_id": opened["result"]["request_id"]})
+        resolved = request_registry.resolve_request_by_message_ids(
+            request_registry.default_store_path(self.home), ["<linked@mail>"])
+        self.assertEqual(resolved, opened["result"]["request_id"])
+
     def test_open_records_a_forensic_event(self):
         opened = self.call(self.tools(SENDER), "erp_request", {"action": "open", "topic": "t"})
         events = self._events(opened["result"]["request_id"])

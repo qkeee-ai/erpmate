@@ -2247,6 +2247,28 @@ class RequestRegistryFacadeTests(unittest.TestCase):
         rows = ec.request_lookup("nikhil@org.com")
         self.assertEqual(rows[0]["your_role"], "requester")
 
+    def test_open_indexes_the_given_message_id(self):
+        # Issue 03 follow-up: request_open()'s message_id reaches the registry.
+        from qkeee_erp_plugin.qkeee_erp.core import request_registry
+        row = ec.request_open("nikhil@org.com", "topic", self.LINK_A, message_id="<open@mail>")
+        resolved = request_registry.resolve_request_by_message_ids(
+            ec._request_registry_store_path(), ["<open@mail>"])
+        self.assertEqual(resolved, row["request_id"])
+
+    def test_open_without_a_message_id_indexes_nothing(self):
+        from qkeee_erp_plugin.qkeee_erp.core import request_registry
+        ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        self.assertIsNone(request_registry.resolve_request_by_message_ids(
+            ec._request_registry_store_path(), [""]))
+
+    def test_link_indexes_the_given_message_id(self):
+        from qkeee_erp_plugin.qkeee_erp.core import request_registry
+        opened = ec.request_open("nikhil@org.com", "topic", self.LINK_A)
+        ec.request_link(opened["request_id"], "priya@org.com", self.LINK_B, message_id="<link@mail>")
+        resolved = request_registry.resolve_request_by_message_ids(
+            ec._request_registry_store_path(), ["<link@mail>"])
+        self.assertEqual(resolved, opened["request_id"])
+
 
 class RequestInSessionFacadeTests(unittest.TestCase):
     """client.request_in_session (agents issue 03): the other lookup
@@ -2279,6 +2301,59 @@ class RequestInSessionFacadeTests(unittest.TestCase):
         ec.request_open("nikhil@org.com", "topic", self.CHAT_LINK)
         rows = ec.request_in_session("priya@org.com", "google_chat", "spaces/B", "threads/T")
         self.assertEqual(rows, [])
+
+
+class RequestInEmailThreadFacadeTests(unittest.TestCase):
+    """client.request_in_email_thread (agents issue 03 follow-up, issue 11
+    follow-up list): email's answer to request_in_session() above, via the
+    In-Reply-To/References chain instead of a shared (chat_id, thread_id)
+    room. Not yet reachable in production (nothing populates the
+    references string yet) — these tests exercise it as if it were, to
+    prove the erpnext-hermes half is ready."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = patch.dict("os.environ", {"HERMES_HOME": tmp.name})
+        home.start()
+        self.addCleanup(home.stop)
+
+    ALICE_LINK = {"platform": "email", "chat_id": "alice@org.com", "thread_id": None, "session_id": "s1"}
+
+    def test_empty_references_resolves_to_nothing(self):
+        ec.request_open("alice@org.com", "topic", self.ALICE_LINK, message_id="<a@mail>")
+        self.assertEqual(ec.request_in_email_thread("bob@org.com", ""), [])
+
+    def test_a_reply_referencing_the_opening_message_id_resolves(self):
+        opened = ec.request_open("alice@org.com", "topic", self.ALICE_LINK, message_id="<a@mail>")
+        rows = ec.request_in_email_thread("bob@org.com", "<a@mail>")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["request_id"], opened["request_id"])
+
+    def test_the_replier_is_tagged_input_provider(self):
+        ec.request_open("alice@org.com", "topic", self.ALICE_LINK, message_id="<a@mail>")
+        rows = ec.request_in_email_thread("bob@org.com", "<a@mail>")
+        self.assertEqual(rows[0]["your_role"], "input_provider")
+
+    def test_a_full_references_header_with_an_unknown_parent_still_resolves(self):
+        # The bot's own generated Message-ID (the immediate In-Reply-To
+        # parent) is never indexed — only inbound touches are. A real mail
+        # client's References still carries the original opening id too.
+        ec.request_open("alice@org.com", "topic", self.ALICE_LINK, message_id="<a@mail>")
+        references = "<a@mail> <hermes-generated-reply@bot> <bob-own-reply@mail>"
+        rows = ec.request_in_email_thread("priya@org.com", references)
+        self.assertEqual(len(rows), 1)
+
+    def test_an_unrelated_references_chain_resolves_to_nothing(self):
+        ec.request_open("alice@org.com", "topic", self.ALICE_LINK, message_id="<a@mail>")
+        self.assertEqual(ec.request_in_email_thread("bob@org.com", "<unrelated@mail>"), [])
+
+    def test_the_opener_sees_their_own_request_as_requester(self):
+        opened = ec.request_open("alice@org.com", "topic", self.ALICE_LINK, message_id="<a@mail>")
+        rows = ec.request_in_email_thread("alice@org.com", "<a@mail>")
+        self.assertEqual(rows[0]["your_role"], "requester")
+        self.assertEqual(rows[0]["request_id"], opened["request_id"])
 
 
 class RequestFactsFacadeTests(unittest.TestCase):

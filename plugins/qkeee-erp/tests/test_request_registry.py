@@ -335,6 +335,61 @@ class CostCheckpointTests(RegistryTestCase):
         self.assertFalse(os.path.exists(self.store))
 
 
+class MessageIdIndexTests(RegistryTestCase):
+    """Issue 03 follow-up / issue 11: the email Message-ID index — how a
+    second email participant's reply resolves back to the request their
+    thread already belongs to, without a shared (chat_id, thread_id)."""
+
+    def test_open_indexes_the_opening_message_id(self):
+        rr.open_request(self.store, ALICE, "t", EMAIL_LINK, message_id="<a@mail>")
+        resolved = rr.resolve_request_by_message_ids(self.store, ["<a@mail>"])
+        self.assertIsNotNone(resolved)
+
+    def test_resolve_returns_the_right_request_id(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK, message_id="<a@mail>")
+        resolved = rr.resolve_request_by_message_ids(self.store, ["<a@mail>"])
+        self.assertEqual(resolved, row["request_id"])
+
+    def test_no_message_id_means_nothing_indexed(self):
+        rr.open_request(self.store, ALICE, "t", EMAIL_LINK)
+        self.assertIsNone(rr.resolve_request_by_message_ids(self.store, ["<a@mail>"]))
+
+    def test_resolve_checks_every_id_in_the_list(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK, message_id="<a@mail>")
+        resolved = rr.resolve_request_by_message_ids(
+            self.store, ["<unrelated@mail>", "<a@mail>", "<also-unrelated@mail>"])
+        self.assertEqual(resolved, row["request_id"])
+
+    def test_unknown_id_resolves_to_none(self):
+        rr.open_request(self.store, ALICE, "t", EMAIL_LINK, message_id="<a@mail>")
+        self.assertIsNone(rr.resolve_request_by_message_ids(self.store, ["<nope@mail>"]))
+
+    def test_empty_list_resolves_to_none(self):
+        rr.open_request(self.store, ALICE, "t", EMAIL_LINK, message_id="<a@mail>")
+        self.assertIsNone(rr.resolve_request_by_message_ids(self.store, []))
+
+    def test_missing_store_resolves_to_none(self):
+        self.assertIsNone(rr.resolve_request_by_message_ids(self.store + ".absent", ["<a@mail>"]))
+
+    def test_link_session_also_indexes_its_message_id(self):
+        row = rr.open_request(self.store, ALICE, "t", EMAIL_LINK, message_id="<a@mail>")
+        bob_link = {"platform": "email", "chat_id": BOB, "thread_id": None, "session_id": "s-bob"}
+        rr.link_session(self.store, row["request_id"], bob_link, BOB, message_id="<b@mail>")
+        resolved_a = rr.resolve_request_by_message_ids(self.store, ["<a@mail>"])
+        resolved_b = rr.resolve_request_by_message_ids(self.store, ["<b@mail>"])
+        self.assertEqual(resolved_a, row["request_id"])
+        self.assertEqual(resolved_b, row["request_id"])
+
+    def test_a_message_id_is_first_writer_wins_across_requests(self):
+        # A message_id is immutably one request's — a later request that
+        # (implausibly) reused the same id must not steal the index entry.
+        a = rr.open_request(self.store, ALICE, "a", EMAIL_LINK, message_id="<shared@mail>")
+        b = rr.open_request(self.store, BOB, "b", EMAIL_LINK, message_id="<shared@mail>")
+        self.assertEqual(rr.resolve_request_by_message_ids(self.store, ["<shared@mail>"]), a["request_id"])
+        self.assertNotEqual(rr.resolve_request_by_message_ids(self.store, ["<shared@mail>"]), b["request_id"])
+
+
+
 class LogEventTests(RegistryTestCase):
     """Adversarial review, issue 03: a forensic trail of who did what to a
     request and when, since none of the lookups/mutations above leave one."""
