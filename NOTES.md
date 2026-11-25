@@ -32,6 +32,9 @@
 
 16. Jev routing.json periodic update and syncup basis the preference for reasoning level vs pricing and latest deprecations of models.
 
+17. Google drive access and using as audit and evidence area by the bot.
+
+18. https://www.anthropic.com/research/code-execution-with-mcp - MCP as code
 # EVAL Scenarios
 
 ## Guardrails - Scope & Functionality
