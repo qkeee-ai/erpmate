@@ -412,6 +412,7 @@ The Dockerfile also carries two local patches for open upstream bugs in `meet_bo
 
 - [`docker/patches/google-meet-join-race.py`](./docker/patches/google-meet-join-race.py) (NousResearch/hermes-agent#74680, #118049 item 4): the pre-join button check doesn't wait for Meet's client-rendered UI, so the bot can silently never click "Join now"/"Ask to join" while `meet status` still looks healthy — no error, and zero join attempts show up in Google Admin's Meet logs.
 - [`docker/patches/google-meet-captions-untrusted-event.py`](./docker/patches/google-meet-captions-untrusted-event.py) (NousResearch/hermes-agent#118049 item 5): the captions toggle is a synthetic, untrusted `KeyboardEvent` fired before admission — Meet ignores it, so even a clean join leaves the transcript empty forever with no error.
+- [`docker/patches/google-meet-caption-dedup.py`](./docker/patches/google-meet-caption-dedup.py) (no upstream issue filed yet): Meet streams captions token-by-token and revises already-emitted words, but `record_caption()` only dedupes on an exact match — a single utterance produced dozens of near-duplicate partial lines. The patch buffers the growing/revising line and commits it once a different speaker starts or it goes quiet.
 
 Both fail the build loudly if the base image's `meet_bot.py` no longer matches the text they expect, since they patch a floating `:latest` base image; if that happens, check whether the upstream issues got fixed and drop the patch, or re-capture the live file and update it.
 

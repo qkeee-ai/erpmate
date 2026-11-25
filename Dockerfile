@@ -69,6 +69,16 @@ RUN python3 /tmp/google-meet-join-race.py && rm /tmp/google-meet-join-race.py
 COPY docker/patches/google-meet-captions-untrusted-event.py /tmp/
 RUN python3 /tmp/google-meet-captions-untrusted-event.py && rm /tmp/google-meet-captions-untrusted-event.py
 
+# Third google_meet patch: Meet streams captions token-by-token AND revises
+# already-emitted words as more context arrives, but record_caption() only
+# dedupes on an exact (speaker, text) match — so every partial/corrected
+# version of the same utterance became its own transcript line. Confirmed on
+# qk-prod-erp: a ~13s utterance produced ~30 near-duplicate lines. See
+# docker/patches/google-meet-caption-dedup.py — buffers the growing line and
+# commits it once a different speaker starts or it goes quiet.
+COPY docker/patches/google-meet-caption-dedup.py /tmp/
+RUN python3 /tmp/google-meet-caption-dedup.py && rm /tmp/google-meet-caption-dedup.py
+
 # Boot hooks (s6 cont-init.d, lexicographic order). Everything targets
 # $HERMES_HOME (a volume) so it runs at every boot and is idempotent.
 #   01-hermes-setup       (base image) volume chown + config seed
