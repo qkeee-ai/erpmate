@@ -149,6 +149,9 @@ services:
       - JEV_INIT_ENABLE=${JEV_INIT_ENABLE:-1} # 0 = skip jev init
       # 0 = skip enabling hermes-lcm (context.engine=lcm) at boot:
       - HERMES_LCM_ENABLE=${HERMES_LCM_ENABLE:-1}
+      # 0 = skip enabling the bundled google_meet plugin (018-google-meet-plugin)
+      # and its `hermes meet install` at boot:
+      - GOOGLE_MEET_PLUGIN_ENABLE=${GOOGLE_MEET_PLUGIN_ENABLE:-1}
       # 1 = register the /lcm slash command (/lcm doctor, /lcm doctor repair
       # apply, /lcm backup). The plugin hides it unless this is set:
       - LCM_ENABLE_SLASH_COMMAND=${LCM_ENABLE_SLASH_COMMAND:-1}

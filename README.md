@@ -335,6 +335,7 @@ s6 runs `/etc/cont-init.d/*` in lexicographic order. Base-image hooks are unmark
 | `0158-erp-skills-unlock` | Gives `skills/qkeee-erp` back to hermes so the profile install/update can rewrite it |
 | `016-profile-install` | Installs this distribution on first boot; records its skill inventory to `.distribution-skills` |
 | `017-jev-skills` | Runs the jev installer — CLI, `hermes-jev` + `hermes-handoff` plugins, per-profile shims |
+| `018-google-meet-plugin` | Enables the bundled `google_meet` plugin and runs `hermes meet install` (Playwright + Chromium check) — v1 transcribe-only |
 | `018-hermes-lcm` | Links and enables the `hermes-lcm` plugin, sets `context.engine: lcm` |
 | `018-qkeee-erp-plugin` | Enables the profile's `qkeee-erp` plugin |
 | `0185-qkeee-erp-setup` | Runs `hermes qkeee-erp setup --apply-profile-fixes` (credentials move, plugin settings, toolsets, ssh terminal, exclusive terminal target, Isolation probe through the sidecar); retries while incomplete (`QKEEE_ERP_SETUP_ATTEMPTS`, default 3, for a sidecar still starting), then warns. `QKEEE_ERP_SETUP=0` skips |
@@ -398,6 +399,12 @@ Pools ship in [`docker/defaults/jev/routing.json`](./docker/defaults/jev/routing
 LCM supersedes manual context tuning for long-running sessions — but `compression.threshold: 0.30` in `config.yaml` still matters as the backstop, and it only works if the auxiliary lane is alive (see [Cost controls](#cost-controls)).
 
 `LCM_ENABLE_SLASH_COMMAND=1` (compose default) registers `/lcm` (`/lcm doctor`, `/lcm doctor repair apply`, `/lcm backup`); the plugin hides it otherwise.
+
+### Google Meet bot
+
+[`plugins/google_meet`](https://github.com/NousResearch/hermes-agent/blob/main/plugins/google_meet/README.md) ships inside hermes-agent itself, not this distribution. `018-google-meet-plugin` enables it (it's bundled, so no capability-consent prompt) and runs `hermes meet install`, which syncs the `google-meet` extra (Playwright, websockets) into the shared PM venv and confirms the Chromium this image already pins at build time for the browser tool. `GOOGLE_MEET_PLUGIN_ENABLE=0` skips both.
+
+Only v1 (Playwright joins `meet.google.com/...`, scrapes live captions to a transcript) is installed by default — the same default upstream ships. Realtime speech-out (`meet_join mode='realtime'`) additionally needs `pulseaudio-utils`, which upstream's `hermes meet install --realtime` installs via `sudo apt-get`; the gateway container runs as the unprivileged `hermes` user with no sudo, so that step is left to the operator: add `pulseaudio-utils` to this Dockerfile's apt-get layer, rebuild, then run `docker compose exec hermes hermes meet install --realtime --yes` and set an `OPENAI_API_KEY` for the Realtime session. Remote node hosting (v3, running the bot on a different machine than the gateway) is likewise an operator-run opt-in (`hermes meet node run` / `node approve`), not something this boot hook sets up.
 
 ### Skill lockdown
 

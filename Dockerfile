@@ -64,6 +64,11 @@ RUN git clone "${JEV_REPO}" /opt/jev-skills \
 #   016-profile-install   install the erpnext-hermes profile distribution
 #   017-jev-skills        jev installer; links into every profile, so it must
 #                         run after the profile exists
+#   018-google-meet-plugin  enable the bundled google_meet plugin (Playwright
+#                         Meet bot: join/transcribe/speak) and `hermes meet
+#                         install` its deps — v1 transcribe-only, no
+#                         --realtime (needs sudo apt-get the hermes user
+#                         doesn't have)
 #   018-hermes-lcm        link + enable the LCM plugin (default + profiles)
 #   018-qkeee-erp-plugin  enable the profile's qkeee-erp plugin (gateway
 #                         ERPNext tools, Kanban requester origin)

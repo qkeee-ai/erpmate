@@ -1,0 +1,51 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Enable the bundled google_meet plugin for the installed profile and
+# install its runtime deps. Idempotent. Non-fatal.
+# Set GOOGLE_MEET_PLUGIN_ENABLE=0 to skip.
+#
+# google_meet ships inside hermes-agent itself (plugins/google_meet), not
+# this profile's distribution, so unlike qkeee-erp there is no
+# plugin.yaml-missing case to guard against: it is always present in this
+# image. It is a bundled plugin (source == "bundled" in
+# hermes_cli/plugins_cmd.py), so `plugins enable` needs no capability-consent
+# flag.
+#
+# `hermes meet install` syncs the `google-meet` extra (playwright,
+# websockets) into the shared PM venv generation under $HERMES_HOME/installs
+# and confirms the Chromium this image already pins at build time
+# (pm.ensure("chromium") is a no-op once the fact matches) — see
+# plugins/google_meet/cli.py. It is NOT profile-scoped: one hermes install,
+# one venv, shared by every profile.
+#
+# Deliberately installed WITHOUT --realtime: that step additionally wants
+# pulseaudio-utils via `sudo apt-get`, and the gateway runs as the
+# unprivileged hermes user with no sudo and no apt network guarantee. v1
+# (transcribe-only caption scrape) is what ships by default upstream too
+# (plugins/google_meet/README.md). To add realtime speech-out, bake
+# pulseaudio-utils into this Dockerfile's apt-get layer and run
+# `hermes meet install --realtime --yes` by hand afterwards.
+#
+# Runs after 016-profile-install, which writes /run/hermes-profile-name.
+
+[ "${GOOGLE_MEET_PLUGIN_ENABLE:-1}" = "0" ] && { echo "[google-meet] disabled via GOOGLE_MEET_PLUGIN_ENABLE=0"; exit 0; }
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+NAME="$(cat /run/hermes-profile-name 2>/dev/null)"
+[ -n "$NAME" ] || { echo "[google-meet] no installed profile name (016 skipped?); skipping"; exit 0; }
+
+run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
+
+if run hermes -p "$NAME" plugins enable google_meet; then
+    echo "[google-meet:$NAME] plugin enabled"
+else
+    echo "[google-meet:$NAME] WARNING: plugin enable failed; continuing" >&2
+fi
+
+if run hermes meet install; then
+    echo "[google-meet:$NAME] install ok"
+else
+    echo "[google-meet:$NAME] WARNING: meet install failed; meet_* tools unavailable until it succeeds" >&2
+fi
+
+exit 0
