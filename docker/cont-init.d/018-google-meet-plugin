@@ -15,8 +15,13 @@
 # websockets) into the shared PM venv generation under $HERMES_HOME/installs
 # and confirms the Chromium this image already pins at build time
 # (pm.ensure("chromium") is a no-op once the fact matches) — see
-# plugins/google_meet/cli.py. It is NOT profile-scoped: one hermes install,
-# one venv, shared by every profile.
+# plugins/google_meet/cli.py. The venv/Chromium store itself is shared by
+# every profile, but the `meet` subcommand only EXISTS on the CLI parser
+# built for a HERMES_HOME that has the plugin enabled: `-p`/`--profile` is
+# consumed before argparse runs and sets that HERMES_HOME (hermes_cli/
+# _parser.py), so this must run with the same `-p "$NAME"` as the enable
+# call above — without it, it resolves to the **default** profile (which
+# never had the plugin enabled) and fails with "invalid choice: 'meet'".
 #
 # Deliberately installed WITHOUT --realtime: that step additionally wants
 # pulseaudio-utils via `sudo apt-get`, and the gateway runs as the
@@ -42,7 +47,7 @@ else
     echo "[google-meet:$NAME] WARNING: plugin enable failed; continuing" >&2
 fi
 
-if run hermes meet install; then
+if run hermes -p "$NAME" meet install; then
     echo "[google-meet:$NAME] install ok"
 else
     echo "[google-meet:$NAME] WARNING: meet install failed; meet_* tools unavailable until it succeeds" >&2
