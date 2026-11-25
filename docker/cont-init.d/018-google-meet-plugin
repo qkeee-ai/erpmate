@@ -37,6 +37,13 @@
 # cheap: Chromium is already staged and just gets confirmed, and the wheels
 # are small.
 #
+# A plain root invocation is NOT enough: /opt/hermes/bin/hermes (first on
+# PATH) is a privilege-drop shim that silently re-execs any root caller
+# through `s6-setuidgid hermes` (docker/hermes-exec-shim.sh — the same
+# protection that stops `docker exec <c> hermes login` from leaving a
+# root-owned auth.json). It has one opt-out, HERMES_DOCKER_EXEC_AS_ROOT=1,
+# which `root_run` sets for this one call.
+#
 # Deliberately installed WITHOUT --realtime: that step additionally wants
 # pulseaudio-utils via `sudo apt-get`, and the gateway runs as the
 # unprivileged hermes user with no sudo and no apt network guarantee. v1
@@ -55,7 +62,7 @@ NAME="$(cat /run/hermes-profile-name 2>/dev/null)"
 DIR="$HERMES_HOME/profiles/$NAME"
 
 run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes "$@"; }
-root_run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" "$@"; }
+root_run() { HOME=/opt/data HERMES_HOME="$HERMES_HOME" HERMES_DOCKER_EXEC_AS_ROOT=1 "$@"; }
 
 if run hermes -p "$NAME" plugins enable google_meet; then
     echo "[google-meet:$NAME] plugin enabled"
