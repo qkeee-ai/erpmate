@@ -65,8 +65,8 @@ SETUP_COMMAND = "hermes qkeee-erp setup"
 # Values from the shipped Profile config.yaml that P1/P2 write with the flag
 # (tests/test_plugin_setup.py ShippedValuesTests keeps them equal).
 CHAT_PLATFORM = "google_chat"
-SHIPPED_GOOGLE_CHAT = ["clarify", "cronjob", "delegation", "file", "kanban", "memory", "qkeee_erp",
-                       "session_search", "skills", "terminal", "todo", "vision", "web"]
+SHIPPED_GOOGLE_CHAT = ["clarify", "connections", "cronjob", "delegation", "file", "kanban", "memory",
+                       "qkeee_erp", "session_search", "skills", "terminal", "todo", "vision", "web"]
 KNOWN_TOOLSET_PLATFORMS = ("cli", "discord", "google_chat")
 OPERATOR_PLATFORM = "cli"  # Kanban workers and the Operator: may keep code_execution
 TOOLSET = "qkeee_erp"
