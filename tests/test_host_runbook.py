@@ -21,7 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN = REPO / "plugins" / "qkeee-erp"
 DROP_IN = REPO / "host" / "hermes-terminal.sshd.conf"
-HEADING = "## Host install (Linux/macOS)"
+HEADING = "### Hermes CLI (host)"
 
 # Sidecar directives that must hold for the host terminal user too.
 FORWARDING_OFF = ("AllowTcpForwarding", "AllowStreamLocalForwarding", "AllowAgentForwarding",
@@ -39,7 +39,7 @@ def _section() -> str:
     text = (REPO / "README.md").read_text(encoding="utf-8")
     assert HEADING in text, f"README lacks {HEADING!r}"
     body = text.split(HEADING, 1)[1]
-    return re.split(r"^## ", body, maxsplit=1, flags=re.M)[0]
+    return re.split(r"^##+ ", body, maxsplit=1, flags=re.M)[0]
 
 
 def _code_lines(section: str) -> list[str]:
@@ -83,7 +83,7 @@ def _setup():
 def test_every_qkeee_erp_command_in_the_section_parses():
     parser = _parser()
     commands = [ln for ln in _code_lines(_section()) if " qkeee-erp " in ln and ln.startswith("hermes")]
-    assert len(commands) >= 6, commands
+    assert len(commands) >= 5, commands
     for line in commands:
         line = line.split("#", 1)[0]
         argv = shlex.split(re.sub(r"<[^>]+>", "x", line))

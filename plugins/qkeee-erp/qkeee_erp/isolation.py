@@ -45,7 +45,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 from typing import Callable, Mapping
 
 RECORD = "isolation.json"
@@ -110,10 +109,15 @@ def target(fp) -> str | None:
     return f"{fp['ssh_user']}@{'localhost' if host in _LOOPBACK else host}"
 
 
+def _single_quote(path: str) -> str:
+    """Always single-quote, so the command has one fixed shape."""
+    return "'" + path.replace("'", "'\\''") + "'"
+
+
 def probe_command(paths: list[str], nonce: str) -> str:
     """One POSIX shell line: per path, `<nonce> <index> readable|denied`."""
     return "; ".join(
-        f"if cat -- {shlex.quote(p)} >/dev/null 2>&1; then echo '{nonce} {i} readable'; "
+        f"if cat -- {_single_quote(p)} >/dev/null 2>&1; then echo '{nonce} {i} readable'; "
         f"else echo '{nonce} {i} denied'; fi" for i, p in enumerate(paths))
 
 
