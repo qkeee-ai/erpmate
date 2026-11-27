@@ -1,0 +1,207 @@
+{
+ "narrow_user": "smoke.narrow.1514@example.com",
+ "created": [
+  [
+   "Supplier",
+   "SMOKE Supplier 1514 W"
+  ],
+  [
+   "Purchase Order",
+   "PUR-ORD-2026-00001"
+  ],
+  [
+   "Customer",
+   "SMOKE Customer 1514"
+  ],
+  [
+   "Sales Order",
+   "SAL-ORD-2026-00001"
+  ],
+  [
+   "Journal Entry",
+   "ACC-JV-2026-00022"
+  ],
+  [
+   "Stock Entry",
+   "MAT-STE-00001"
+  ],
+  [
+   "Employee",
+   "HR-EMP-00001"
+  ],
+  [
+   "Supplier",
+   "SMOKE Supplier 1514b"
+  ],
+  [
+   "Supplier",
+   "SMOKE Supplier 1514b W"
+  ],
+  [
+   "Holiday List",
+   "SMOKE HL 1514"
+  ],
+  [
+   "Employee",
+   "HR-EMP-00001"
+  ],
+  [
+   "Leave Allocation",
+   "HR-LAL-2026-00001"
+  ],
+  [
+   "Job Applicant",
+   "smoke.applicant.1514@example.com"
+  ],
+  [
+   "Job Offer",
+   "HR-OFF-2026-00001"
+  ],
+  [
+   "Employee Onboarding",
+   "HR-EMP-ONB-2026-00001"
+  ],
+  [
+   "Employee Separation",
+   "HR-EMP-SEP-2026-00001"
+  ],
+  [
+   "Holiday List",
+   "SMOKE HL 1514h"
+  ],
+  [
+   "Employee",
+   "HR-EMP-00002"
+  ],
+  [
+   "Leave Allocation",
+   "HR-LAL-2026-00002"
+  ],
+  [
+   "Job Applicant",
+   "smoke.applicant.1514h@example.com"
+  ],
+  [
+   "Job Offer",
+   "HR-OFF-2026-00002"
+  ],
+  [
+   "Employee Onboarding",
+   "HR-EMP-ONB-2026-00002"
+  ],
+  [
+   "Employee Separation",
+   "HR-EMP-SEP-2026-00002"
+  ],
+  [
+   "Holiday List",
+   "SMOKE HL 1514i"
+  ],
+  [
+   "Employee",
+   "HR-EMP-00003"
+  ],
+  [
+   "Leave Application",
+   "HR-LAP-2026-00001"
+  ],
+  [
+   "Leave Allocation",
+   "HR-LAL-2026-00003"
+  ],
+  [
+   "Leave Application",
+   "HR-LAP-2026-00001"
+  ],
+  [
+   "Job Applicant",
+   "smoke.applicant.1514i@example.com"
+  ],
+  [
+   "Job Offer",
+   "HR-OFF-2026-00003"
+  ],
+  [
+   "Employee Onboarding",
+   "HR-EMP-ONB-2026-00003"
+  ],
+  [
+   "Employee Separation",
+   "HR-EMP-SEP-2026-00003"
+  ],
+  [
+   "Holiday List",
+   "SMOKE HL 1514j"
+  ],
+  [
+   "Employee",
+   "HR-EMP-00004"
+  ],
+  [
+   "Holiday List Assignment",
+   "HR-HLA-2026-00001"
+  ],
+  [
+   "Leave Application",
+   "HR-LAP-2026-00002"
+  ],
+  [
+   "Leave Allocation",
+   "HR-LAL-2026-00004"
+  ],
+  [
+   "Leave Application",
+   "HR-LAP-2026-00003"
+  ],
+  [
+   "Job Applicant",
+   "smoke.applicant.1514j@example.com"
+  ],
+  [
+   "Job Offer",
+   "HR-OFF-2026-00003"
+  ],
+  [
+   "Employee Onboarding",
+   "HR-EMP-ONB-2026-00003"
+  ],
+  [
+   "Employee Separation",
+   "HR-EMP-SEP-2026-00003"
+  ],
+  [
+   "Location",
+   "SMOKE Loc 1514"
+  ],
+  [
+   "Asset Category",
+   "SMOKE Cat 1514"
+  ],
+  [
+   "Location",
+   "SMOKE Loc 1514k"
+  ],
+  [
+   "Asset Category",
+   "SMOKE Cat 1514k"
+  ],
+  [
+   "Item",
+   "SMOKE-FA-1514k"
+  ],
+  [
+   "Asset",
+   "ACC-ASS-2026-00005"
+  ],
+  [
+   "Asset",
+   "ACC-ASS-2026-00006"
+  ],
+  [
+   "Sales Invoice",
+   "SINV-26-00001"
+  ]
+ ],
+ "asset1": "ACC-ASS-2026-00005",
+ "asset2": "ACC-ASS-2026-00006"
+}
