@@ -48,3 +48,8 @@ cron/executions.db
 cron/ticker_heartbeat
 cron/ticker_last_success
 cron/output/
+
+# mattpocock skills install (local only)
+.agents/skills/
+.agent/skills/
+skills-lock.json
